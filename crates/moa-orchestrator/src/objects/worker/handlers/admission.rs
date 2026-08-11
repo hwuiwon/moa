@@ -89,7 +89,15 @@ impl WorkerImpl {
             .ok_or_else(|| TerminalError::new("worker is missing its admitted caller identity"))?;
         let parent_session = required_parent_session(&state)?;
         let trusted_sandbox_manifest = state.trusted_sandbox_manifest.clone();
+        let heartbeat_at = durable_utc_now(&ctx).await?;
+        state.observe_heartbeat(heartbeat_at);
+        let liveness_deadline =
+            state.arm_liveness_deadline(self.session_limits.worker_heartbeat_stale_ms);
         state.persist(&ctx);
+
+        if let Some((generation, deadline_at)) = liveness_deadline {
+            schedule_worker_liveness_deadline(&ctx, generation, heartbeat_at, deadline_at);
+        }
 
         if let Some(turn_id) = turn_id {
             start_worker_turn_execution(
@@ -171,8 +179,8 @@ impl WorkerImpl {
         ))
     }
 
-    // SAFETY: internal telemetry-plane write invoked only by the child's own turn
-    // workflow at the progress cadence; updates VO state only and appends no event.
+    // SAFETY: internal liveness write invoked only by the child's own turn workflow at
+    // the progress cadence; it updates this Worker's state and owns its self-deadline.
     pub(super) async fn record_heartbeat(
         &self,
         ctx: ObjectContext<'_>,
@@ -180,8 +188,58 @@ impl WorkerImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Worker", "record_heartbeat");
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
-        state.last_heartbeat_at = Some(at.into_inner());
+        let heartbeat_at = at.into_inner();
+        state.observe_heartbeat(heartbeat_at);
+        let liveness_deadline =
+            state.arm_liveness_deadline(self.session_limits.worker_heartbeat_stale_ms);
         state.persist(&ctx);
+        if let Some((generation, deadline_at)) = liveness_deadline {
+            let now = durable_utc_now(&ctx).await?;
+            schedule_worker_liveness_deadline(&ctx, generation, now, deadline_at);
+        }
+        Ok(())
+    }
+
+    /// Owns the single outstanding Worker liveness deadline without polling another VO.
+    pub(super) async fn liveness_deadline(
+        &self,
+        ctx: ObjectContext<'_>,
+        request: Json<WorkerLivenessDeadlineRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("Worker", "liveness_deadline");
+        let request = request.into_inner();
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
+        if !state.liveness_generation_matches(request.expected_generation) {
+            return Ok(());
+        }
+
+        let now = durable_utc_now(&ctx).await?;
+        let stale_threshold_ms = self.session_limits.worker_heartbeat_stale_ms;
+        match state.liveness_decision(now, stale_threshold_ms) {
+            WorkerLivenessDecision::Stop => {
+                state.stop_liveness_deadline();
+                state.persist(&ctx);
+            }
+            WorkerLivenessDecision::Reschedule { deadline_at } => {
+                let generation = state.replace_liveness_deadline();
+                state.persist(&ctx);
+                schedule_worker_liveness_deadline(&ctx, generation, now, deadline_at);
+            }
+            WorkerLivenessDecision::Stale { last_heartbeat_at } => {
+                let parent_session = required_parent_session(&state)?;
+                emit_worker_heartbeat_stale(
+                    &ctx,
+                    parent_session,
+                    ctx.key(),
+                    last_heartbeat_at,
+                    stale_threshold_ms,
+                    now,
+                )
+                .await?;
+                state.stop_liveness_deadline();
+                state.persist(&ctx);
+            }
+        }
         Ok(())
     }
 
@@ -262,6 +320,86 @@ impl WorkerImpl {
         tracing::info!(key = %ctx.key(), %reason, "worker cancel requested");
         Ok(())
     }
+}
+
+/// Schedules one exact generation-owned liveness deadline on this Worker key.
+fn schedule_worker_liveness_deadline(
+    ctx: &ObjectContext<'_>,
+    generation: u64,
+    now: DateTime<Utc>,
+    deadline_at: DateTime<Utc>,
+) {
+    let delay_ms = u64::try_from((deadline_at - now).num_milliseconds().max(1)).unwrap_or(u64::MAX);
+    schedule_generation_guarded_self_call(
+        ctx,
+        "Worker",
+        "liveness_deadline",
+        generation,
+        deadline_at.timestamp_millis(),
+        Json::from(WorkerLivenessDeadlineRequest {
+            expected_generation: generation,
+        }),
+        std::time::Duration::from_millis(delay_ms),
+    );
+}
+
+/// Appends one deduped stale event, then awaits the joined parent control signal.
+async fn emit_worker_heartbeat_stale(
+    ctx: &ObjectContext<'_>,
+    parent_session: SessionId,
+    worker_id: &str,
+    last_heartbeat_at: DateTime<Utc>,
+    threshold_ms: u64,
+    created_at: DateTime<Utc>,
+) -> Result<(), HandlerError> {
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id: parent_session,
+                event: Event::WorkerHeartbeatStale {
+                    worker_id: worker_id.to_string(),
+                    last_heartbeat_at,
+                    threshold_ms,
+                },
+                dedupe_key: Some(format!(
+                    "worker_stale:{worker_id}:{}",
+                    last_heartbeat_at.timestamp_millis()
+                )),
+            })),
+    )
+    .call()
+    .await?;
+
+    let signal_id = ctx
+        .run(|| async { Ok::<_, HandlerError>(Json::from(AgentSignalId::new())) })
+        .name("worker_stale_signal_id")
+        .await?
+        .into_inner();
+    crate::restate_identity::replay_safe_request(
+        ctx.object_client::<SessionClient>(parent_session.to_string())
+            .record_child_signal(Json::from(WorkerSignal {
+                signal_id,
+                worker_id: worker_id.to_string(),
+                parent_session,
+                kind: ChildSignalKind::HeartbeatStale,
+                severity: SignalSeverity::Warning,
+                summary: format!(
+                    "worker {worker_id} heartbeat went stale (no progress for over {threshold_ms}ms)"
+                ),
+                payload: serde_json::Value::Null,
+                created_at,
+                resume_policy: ParentResumePolicy::IfIdle,
+                input_request: None,
+            })),
+    )
+    .call()
+    .await?;
+    tracing::info!(
+        worker_id,
+        threshold_ms,
+        "raised worker heartbeat-stale signal"
+    );
+    Ok(())
 }
 
 pub(super) fn generate_turn_id(ctx: &mut ObjectContext<'_>) -> String {

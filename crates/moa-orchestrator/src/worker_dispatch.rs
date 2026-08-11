@@ -1,7 +1,26 @@
 //! Pure helpers for worker limits, budgets, and paths.
 
 use moa_core::types::worker::state::WorkerChildRef;
-use restate_sdk::prelude::*;
+
+/// A model-authored worker dispatch that violates a bounded delegation rule.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum WorkerDispatchRejection {
+    /// The parent is already at the maximum nesting depth.
+    #[error("worker depth limit reached ({limit})")]
+    Depth { limit: u32 },
+    /// The parent already owns the maximum number of active children.
+    #[error("worker fan-out limit reached ({limit})")]
+    FanOut { limit: usize },
+    /// The parent already owns an active child with the same task and tools.
+    #[error("duplicate worker task detected (loop prevention)")]
+    DuplicateTask,
+    /// The requested worker budget is zero.
+    #[error("worker budget must be greater than zero")]
+    EmptyBudget,
+    /// The requested worker budget exceeds the parent's remaining budget.
+    #[error("worker budget request ({requested}) exceeds remaining parent budget ({remaining})")]
+    BudgetExceeded { requested: u64, remaining: u64 },
+}
 
 /// Maximum nested worker depth allowed for one tree.
 pub const MAX_WORKER_DEPTH: u32 = 3;
@@ -30,34 +49,30 @@ fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
 }
 
 /// Validates depth, fan-out, and duplicate-task constraints before dispatch.
-pub fn validate_dispatch_limits(
+pub(crate) fn validate_dispatch_limits(
     current_depth: u32,
     children: &[WorkerChildRef],
     task: &str,
     tool_subset: &[String],
-) -> Result<String, HandlerError> {
+) -> Result<String, WorkerDispatchRejection> {
     if current_depth >= MAX_WORKER_DEPTH {
-        return Err(
-            TerminalError::new(format!("worker depth limit reached ({MAX_WORKER_DEPTH})")).into(),
-        );
+        return Err(WorkerDispatchRejection::Depth {
+            limit: MAX_WORKER_DEPTH,
+        });
     }
     let active_children = children
         .iter()
         .filter(|child| child.terminal.is_none())
         .collect::<Vec<_>>();
     if active_children.len() >= MAX_WORKER_FAN_OUT {
-        return Err(TerminalError::new(format!(
-            "worker fan-out limit reached ({MAX_WORKER_FAN_OUT})"
-        ))
-        .into());
+        return Err(WorkerDispatchRejection::FanOut {
+            limit: MAX_WORKER_FAN_OUT,
+        });
     }
 
     let hash = task_hash(task, tool_subset);
     if active_children.iter().any(|child| child.task_hash == hash) {
-        return Err(TerminalError::new(
-            "duplicate worker task detected (loop prevention)".to_string(),
-        )
-        .into());
+        return Err(WorkerDispatchRejection::DuplicateTask);
     }
 
     Ok(hash)
@@ -67,20 +82,18 @@ pub fn validate_dispatch_limits(
 pub(crate) fn validate_dispatch_budget(
     requested_budget: u64,
     remaining_parent_budget: Option<u64>,
-) -> Result<(), HandlerError> {
+) -> Result<(), WorkerDispatchRejection> {
     if requested_budget == 0 {
-        return Err(
-            TerminalError::new("worker budget must be greater than zero".to_string()).into(),
-        );
+        return Err(WorkerDispatchRejection::EmptyBudget);
     }
 
     if let Some(remaining) = remaining_parent_budget
         && requested_budget > remaining
     {
-        return Err(TerminalError::new(format!(
-            "worker budget request ({requested_budget}) exceeds remaining parent budget ({remaining})"
-        ))
-        .into());
+        return Err(WorkerDispatchRejection::BudgetExceeded {
+            requested: requested_budget,
+            remaining,
+        });
     }
 
     Ok(())
@@ -106,8 +119,8 @@ mod tests {
     use moa_core::types::worker::state::WorkerChildRef;
 
     use super::{
-        MAX_WORKER_DEPTH, MAX_WORKER_FAN_OUT, task_hash, validate_dispatch_budget,
-        validate_dispatch_limits,
+        MAX_WORKER_DEPTH, MAX_WORKER_FAN_OUT, WorkerDispatchRejection, task_hash,
+        validate_dispatch_budget, validate_dispatch_limits,
     };
 
     #[test]
@@ -130,7 +143,13 @@ mod tests {
         let error = validate_dispatch_limits(MAX_WORKER_DEPTH, &[], "task", &[])
             .expect_err("depth limit should fail");
 
-        assert!(format!("{error:?}").contains("depth limit"));
+        assert_eq!(
+            error,
+            WorkerDispatchRejection::Depth {
+                limit: MAX_WORKER_DEPTH
+            }
+        );
+        assert_eq!(error.to_string(), "worker depth limit reached (3)");
     }
 
     #[test]
@@ -146,7 +165,13 @@ mod tests {
         let error = validate_dispatch_limits(0, &children, "task", &[])
             .expect_err("fan-out limit should fail");
 
-        assert!(format!("{error:?}").contains("fan-out limit"));
+        assert_eq!(
+            error,
+            WorkerDispatchRejection::FanOut {
+                limit: MAX_WORKER_FAN_OUT
+            }
+        );
+        assert_eq!(error.to_string(), "worker fan-out limit reached (4)");
     }
 
     #[test]
@@ -161,7 +186,11 @@ mod tests {
         let error = validate_dispatch_limits(0, &children, "repeat", &["bash".to_string()])
             .expect_err("duplicate task hash should fail");
 
-        assert!(format!("{error:?}").contains("duplicate worker task"));
+        assert_eq!(error, WorkerDispatchRejection::DuplicateTask);
+        assert_eq!(
+            error.to_string(),
+            "duplicate worker task detected (loop prevention)"
+        );
     }
 
     #[test]
@@ -211,8 +240,18 @@ mod tests {
         let over_error = validate_dispatch_budget(101, Some(100))
             .expect_err("over-budget child dispatch should fail");
 
-        assert!(format!("{zero_error:?}").contains("greater than zero"));
-        assert!(format!("{over_error:?}").contains("exceeds remaining parent budget"));
+        assert_eq!(zero_error, WorkerDispatchRejection::EmptyBudget);
+        assert_eq!(
+            over_error,
+            WorkerDispatchRejection::BudgetExceeded {
+                requested: 101,
+                remaining: 100
+            }
+        );
+        assert_eq!(
+            over_error.to_string(),
+            "worker budget request (101) exceeds remaining parent budget (100)"
+        );
     }
 
     #[test]

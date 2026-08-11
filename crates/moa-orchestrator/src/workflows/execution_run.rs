@@ -32,12 +32,12 @@ use moa_execution::{
         CompileAuditWriteOutcome, ExecutionNodeMaterialization, ExecutionRepository,
         ExecutionRunRecord, ExecutionScope, FencedTerminalFinalizationOutcome, FinalizationOutcome,
         MaterializationOutcome, PlannerCallAuditWriteOutcome, RunFinalizationRequest,
-        TerminalFenceOutcome, TransitionOutcome, WakeAckOutcome,
+        TaskOutcomeWrite, TerminalFenceOutcome, TransitionOutcome, WakeAckOutcome,
     },
     state::{
         CompensationStatus, ExecutionRunStatus, ExecutionTaskId, ExecutionTaskStatus,
         ExecutionTerminalCause, PendingExecutionTerminal, ScheduleDecision, TerminalProjection,
-        WaitingReason, run_status_from_terminal_projection,
+        WaitingReason, cancelled_task_outcome, run_status_from_terminal_projection,
     },
     wire::{
         ExecutionAmendmentRequest, ExecutionCompensationWorkflowRequest, ExecutionMutationResponse,
@@ -46,7 +46,12 @@ use moa_execution::{
         execution_progress_from_run,
     },
 };
-use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_observability::{
+    restate_observability::annotate_restate_handler_span,
+    runtime_metrics::{
+        record_execution_dispatch_batch_size, record_execution_owned_in_flight_tasks,
+    },
+};
 use restate_sdk::context::macro_support::SealedDurableFuture;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -136,11 +141,18 @@ impl ExecutionRun for ExecutionRunImpl {
             let repository = self.repository.clone();
             let drive_request = request.clone();
             let config = self.config.clone();
+            let drive_owned_task_ids = owned_task_ids.clone();
             let step = ctx
                 .run(|| async move {
-                    drive_once(repository, scope, drive_request, config)
-                        .await
-                        .map(Json::from)
+                    drive_once(
+                        repository,
+                        scope,
+                        drive_request,
+                        config,
+                        drive_owned_task_ids,
+                    )
+                    .await
+                    .map(Json::from)
                 })
                 .name(format!("execution_run_drive_{step_index}"))
                 .await?
@@ -219,7 +231,32 @@ impl ExecutionRun for ExecutionRunImpl {
                         }
                     }
                 }
-                RunDriveStep::Dispatch { tasks } => {
+                RunDriveStep::Dispatch {
+                    tasks,
+                    processed_epoch,
+                } => {
+                    if owned_task_calls.len() != owned_task_ids.len() {
+                        return Err(TerminalError::new(
+                            "execution task call ownership index diverged",
+                        )
+                        .into());
+                    }
+                    if owned_task_calls.len() > self.config.max_in_flight_tasks {
+                        return Err(TerminalError::new(format!(
+                            "execution task call ownership {} exceeds configured window {}",
+                            owned_task_calls.len(),
+                            self.config.max_in_flight_tasks
+                        ))
+                        .into());
+                    }
+                    let tasks = select_dispatch_batch(
+                        tasks,
+                        &owned_task_ids,
+                        self.config
+                            .max_in_flight_tasks
+                            .saturating_sub(owned_task_calls.len()),
+                    );
+                    record_execution_dispatch_batch_size(tasks.len());
                     for task in tasks {
                         if !owned_task_ids.insert(task.task_id) {
                             return Err(TerminalError::new(format!(
@@ -235,6 +272,17 @@ impl ExecutionRun for ExecutionRunImpl {
                         .call();
                         owned_task_calls.push((task, call));
                     }
+                    record_execution_owned_in_flight_tasks(owned_task_calls.len());
+                    await_persisted_wake_or_owned_task(
+                        &ctx,
+                        self.repository.clone(),
+                        scope,
+                        request.run_uid,
+                        processed_epoch,
+                        &mut owned_task_calls,
+                        &mut owned_task_ids,
+                    )
+                    .await?;
                 }
                 RunDriveStep::SettleForward { tasks, reason } => {
                     cancel_completion_owner_from_workflow(
@@ -271,63 +319,16 @@ impl ExecutionRun for ExecutionRunImpl {
                     .await?;
                 }
                 RunDriveStep::Park { processed_epoch } => {
-                    ctx.set(K_AWAITED_WAKE_EPOCH, Json::from(processed_epoch));
-                    let repository = self.repository.clone();
-                    let acknowledgement = ctx
-                        .run(|| async move {
-                            repository
-                                .ack_run_wake(scope, request.run_uid, processed_epoch)
-                                .await
-                                .map(Json::from)
-                                .map_err(execution_error)
-                        })
-                        .name(format!("execution_run_ack_{processed_epoch}"))
-                        .await?
-                        .into_inner();
-                    let processed_epoch = match acknowledgement {
-                        WakeAckOutcome::Acknowledged {
-                            processed_wake_epoch,
-                        }
-                        | WakeAckOutcome::Replayed {
-                            processed_wake_epoch,
-                        } => processed_wake_epoch,
-                        WakeAckOutcome::Changed { .. } => continue,
-                        WakeAckOutcome::NotFound => {
-                            return Err(TerminalError::new_with_code(
-                                404,
-                                "execution run not found",
-                            )
-                            .into());
-                        }
-                    };
-                    #[cfg(feature = "integration")]
-                    test_wake_handoff_checkpoint(&ctx).await?;
-                    ctx.set(K_PROCESSED_WAKE_EPOCH, Json::from(processed_epoch));
-                    let promise_key = wake_promise_key(processed_epoch);
-                    let wake = ctx.promise::<u64>(&promise_key);
-                    if owned_task_calls.is_empty() {
-                        let _: u64 = wake.await?;
-                    } else {
-                        let mut handles =
-                            Vec::with_capacity(owned_task_calls.len().saturating_add(1));
-                        handles.push(wake.handle());
-                        handles.extend(owned_task_calls.iter().map(|(_, call)| call.handle()));
-                        let selected = wake.inner_context().select(handles).await?;
-                        if selected == 0 {
-                            let _: u64 = wake.await?;
-                        } else {
-                            let call_index = selected.saturating_sub(1);
-                            if call_index >= owned_task_calls.len() {
-                                return Err(TerminalError::new(format!(
-                                    "execution task selector returned invalid branch {selected}"
-                                ))
-                                .into());
-                            }
-                            let (task, call) = owned_task_calls.swap_remove(call_index);
-                            owned_task_ids.remove(&task.task_id);
-                            call.await?;
-                        }
-                    }
+                    await_persisted_wake_or_owned_task(
+                        &ctx,
+                        self.repository.clone(),
+                        scope,
+                        request.run_uid,
+                        processed_epoch,
+                        &mut owned_task_calls,
+                        &mut owned_task_ids,
+                    )
+                    .await?;
                 }
                 RunDriveStep::Terminal { task_ids, reason } => {
                     if !owned_task_calls.is_empty() || !task_ids.is_empty() {
@@ -384,6 +385,8 @@ impl ExecutionRun for ExecutionRunImpl {
         {
             ctx.resolve_promise(&wake_promise_key(promise_epoch), request.wake_epoch);
         }
+        #[cfg(feature = "integration")]
+        delay_test_wake_acknowledgement().await;
         Ok(())
     }
 }
@@ -396,6 +399,15 @@ fn pause_automatic_amendment_planner() -> bool {
 #[cfg(not(feature = "integration"))]
 const fn pause_automatic_amendment_planner() -> bool {
     false
+}
+
+#[cfg(feature = "integration")]
+async fn delay_test_wake_acknowledgement() {
+    if std::env::var("MOA_EXECUTION_TEST_DELAY_WAKE_ACK").as_deref() == Ok("true") {
+        // The service E2E observes this handler after its durable work but before
+        // its response, proving public mutations join the wake acknowledgement.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
 }
 
 #[cfg(feature = "integration")]
@@ -421,6 +433,76 @@ async fn test_wake_handoff_checkpoint(ctx: &WorkflowContext<'_>) -> Result<(), H
     Ok(())
 }
 
+async fn await_persisted_wake_or_owned_task<F>(
+    ctx: &WorkflowContext<'_>,
+    repository: ExecutionRepository,
+    scope: ExecutionScope,
+    run_uid: uuid::Uuid,
+    processed_epoch: u64,
+    owned_task_calls: &mut Vec<(ExecutionTaskWorkflowRequest, F)>,
+    owned_task_ids: &mut BTreeSet<ExecutionTaskId>,
+) -> Result<(), HandlerError>
+where
+    F: restate_sdk::context::DurableFuture<Output = Result<(), TerminalError>>
+        + SealedDurableFuture,
+{
+    ctx.set(K_AWAITED_WAKE_EPOCH, Json::from(processed_epoch));
+    let acknowledgement = ctx
+        .run(|| async move {
+            repository
+                .ack_run_wake(scope, run_uid, processed_epoch)
+                .await
+                .map(Json::from)
+                .map_err(execution_error)
+        })
+        .name(format!("execution_run_ack_{processed_epoch}"))
+        .await?
+        .into_inner();
+    let processed_epoch = match acknowledgement {
+        WakeAckOutcome::Acknowledged {
+            processed_wake_epoch,
+        }
+        | WakeAckOutcome::Replayed {
+            processed_wake_epoch,
+        } => processed_wake_epoch,
+        WakeAckOutcome::Changed { .. } => return Ok(()),
+        WakeAckOutcome::NotFound => {
+            return Err(TerminalError::new_with_code(404, "execution run not found").into());
+        }
+    };
+    #[cfg(feature = "integration")]
+    test_wake_handoff_checkpoint(ctx).await?;
+    ctx.set(K_PROCESSED_WAKE_EPOCH, Json::from(processed_epoch));
+    let promise_key = wake_promise_key(processed_epoch);
+    let wake = ctx.promise::<u64>(&promise_key);
+    if owned_task_calls.is_empty() {
+        let _: u64 = wake.await?;
+        return Ok(());
+    }
+
+    let mut handles = Vec::with_capacity(owned_task_calls.len().saturating_add(1));
+    handles.push(wake.handle());
+    handles.extend(owned_task_calls.iter().map(|(_, call)| call.handle()));
+    let selected = wake.inner_context().select(handles).await?;
+    if selected == 0 {
+        let _: u64 = wake.await?;
+        return Ok(());
+    }
+
+    let call_index = selected.saturating_sub(1);
+    if call_index >= owned_task_calls.len() {
+        return Err(TerminalError::new(format!(
+            "execution task selector returned invalid branch {selected}"
+        ))
+        .into());
+    }
+    let (task, call) = owned_task_calls.remove(call_index);
+    owned_task_ids.remove(&task.task_id);
+    call.await?;
+    record_execution_owned_in_flight_tasks(owned_task_calls.len());
+    Ok(())
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "step", rename_all = "snake_case")]
 enum RunDriveStep {
@@ -430,6 +512,7 @@ enum RunDriveStep {
     },
     Dispatch {
         tasks: Vec<ExecutionTaskWorkflowRequest>,
+        processed_epoch: u64,
     },
     SettleForward {
         tasks: Vec<ExecutionTaskWorkflowRequest>,
@@ -987,6 +1070,7 @@ async fn drive_once(
     scope: ExecutionScope,
     request: ExecutionRunWorkflowRequest,
     config: moa_config::ExecutionConfig,
+    owned_task_ids: BTreeSet<ExecutionTaskId>,
 ) -> Result<RunDriveStep, HandlerError> {
     let Some(snapshot) = repository
         .load_scheduling_snapshot(scope, request.run_uid)
@@ -1019,10 +1103,36 @@ async fn drive_once(
     if snapshot.run.pending_terminal.is_some()
         || snapshot.run.status == ExecutionRunStatus::Compensating
     {
-        return drive_compensation(&repository, scope, &request, snapshot).await;
+        return drive_compensation(&repository, scope, &request, snapshot, &owned_task_ids).await;
     }
     if snapshot.run.status == ExecutionRunStatus::AwaitingConfirmation {
         return Ok(park_at_epoch(&snapshot.run));
+    }
+    if matches!(
+        snapshot.run.status,
+        ExecutionRunStatus::Queued | ExecutionRunStatus::Running
+    ) {
+        let pending_tasks = snapshot
+            .projection
+            .tasks
+            .iter()
+            .filter(|task| task.status == ExecutionTaskStatus::Pending)
+            .map(|task| ExecutionTaskWorkflowRequest {
+                run_uid: snapshot.run.run_uid,
+                task_id: task.task_id,
+                generation: task.generation,
+                tenant_id: snapshot.run.tenant_id,
+                contact_id: snapshot.run.contact_id,
+                session_id: snapshot.run.session_id,
+                identity: request.identity.clone(),
+            })
+            .collect::<Vec<_>>();
+        if !pending_tasks.is_empty() {
+            return Ok(RunDriveStep::Dispatch {
+                tasks: pending_tasks,
+                processed_epoch: snapshot.run.wake_epoch,
+            });
+        }
     }
     let now = chrono::Utc::now();
     let schedule_request = ScheduleRequest {
@@ -1119,6 +1229,12 @@ async fn drive_once(
                     MaterializationOutcome::Conflict => return Ok(RunDriveStep::Continue),
                 }
             }
+            let dispatch_epoch = repository
+                .load_run(scope, snapshot.run.run_uid)
+                .await
+                .map_err(execution_error)?
+                .ok_or_else(|| TerminalError::new_with_code(404, "execution run not found"))?
+                .wake_epoch;
             Ok(RunDriveStep::Dispatch {
                 tasks: records
                     .into_iter()
@@ -1133,6 +1249,7 @@ async fn drive_once(
                         identity: request.identity.clone(),
                     })
                     .collect(),
+                processed_epoch: dispatch_epoch,
             })
         }
         ScheduleDecision::Waiting(waiting) => {
@@ -1152,10 +1269,7 @@ async fn drive_once(
                 .map_err(execution_error)?;
             Ok(wait_transition_step(
                 waiting_status,
-                matches!(
-                    transition,
-                    TransitionOutcome::RunApplied(_) | TransitionOutcome::RunAlreadyApplied(_)
-                ),
+                matches!(transition, TransitionOutcome::RunApplied(_)),
                 snapshot.run.plan_revision,
                 snapshot.run.wake_epoch,
             ))
@@ -1253,6 +1367,7 @@ async fn drive_compensation(
     scope: ExecutionScope,
     request: &ExecutionRunWorkflowRequest,
     scheduling: moa_execution::repository::ExecutionSchedulingSnapshot,
+    owned_task_ids: &BTreeSet<ExecutionTaskId>,
 ) -> Result<RunDriveStep, HandlerError> {
     let snapshot = repository
         .load_compensation_snapshot(scope, request.run_uid)
@@ -1267,14 +1382,62 @@ async fn drive_compensation(
             TerminalError::new_with_code(409, "execution compensation scope mismatch").into(),
         );
     }
-    if !snapshot.nonterminal_forward_tasks.is_empty() {
+    let settlement_reason = "execution run fenced forward work before compensation";
+    let mut owned_forward_tasks = Vec::new();
+    let mut settled_undispatched = false;
+    for task in &snapshot.nonterminal_forward_tasks {
+        if owned_task_ids.contains(&task.task_id) {
+            owned_forward_tasks.push(task);
+            continue;
+        }
+        if task.status != ExecutionTaskStatus::Pending {
+            return Err(TerminalError::new(format!(
+                "execution run lost ownership of active task {} in status {}",
+                task.task_id,
+                task.status.as_str()
+            ))
+            .into());
+        }
+        match repository
+            .record_task_outcome(
+                scope,
+                task.run_uid,
+                task.task_id,
+                task.generation,
+                cancelled_task_outcome(settlement_reason.to_string(), task.actual.clone()),
+            )
+            .await
+            .map_err(execution_error)?
+        {
+            TaskOutcomeWrite::Applied { .. } | TaskOutcomeWrite::Replayed { .. } => {
+                settled_undispatched = true;
+            }
+            TaskOutcomeWrite::Rejected { reason, .. } => {
+                return Err(TerminalError::new(format!(
+                    "execution run could not fence undispatched task {}: {reason:?}",
+                    task.task_id
+                ))
+                .into());
+            }
+            TaskOutcomeWrite::NotFound => {
+                return Err(TerminalError::new_with_code(
+                    404,
+                    format!("execution task {} not found", task.task_id),
+                )
+                .into());
+            }
+        }
+    }
+    if settled_undispatched {
+        return Ok(RunDriveStep::Continue);
+    }
+    if !owned_forward_tasks.is_empty() {
         return Ok(RunDriveStep::SettleForward {
-            tasks: snapshot
-                .nonterminal_forward_tasks
-                .iter()
+            tasks: owned_forward_tasks
+                .into_iter()
                 .map(|task| task_workflow_request(&snapshot.run, task, request))
                 .collect(),
-            reason: "execution run fenced forward work before compensation".to_string(),
+            reason: settlement_reason.to_string(),
         });
     }
     if snapshot.run.status != ExecutionRunStatus::Compensating {
@@ -1934,6 +2097,18 @@ fn reducer_depth(mut item_count: u64, batch_size: u32) -> u64 {
     depth
 }
 
+fn select_dispatch_batch(
+    tasks: Vec<ExecutionTaskWorkflowRequest>,
+    owned_task_ids: &BTreeSet<ExecutionTaskId>,
+    available_slots: usize,
+) -> Vec<ExecutionTaskWorkflowRequest> {
+    tasks
+        .into_iter()
+        .filter(|task| !owned_task_ids.contains(&task.task_id))
+        .take(available_slots)
+        .collect()
+}
+
 fn park_at_epoch(run: &ExecutionRunRecord) -> RunDriveStep {
     RunDriveStep::Park {
         processed_epoch: run.wake_epoch,
@@ -1946,7 +2121,7 @@ fn wait_transition_step(
     plan_revision: u64,
     processed_epoch: u64,
 ) -> RunDriveStep {
-    if transition_applied && waiting_status == ExecutionRunStatus::WaitingReplan {
+    if waiting_status == ExecutionRunStatus::WaitingReplan {
         RunDriveStep::PlanAmendment { plan_revision }
     } else if transition_applied {
         RunDriveStep::Continue
@@ -2025,6 +2200,7 @@ mod tests {
         ExecutionTaskResult, ExecutionUsage, GeneratedAmendmentCandidate, PlanAmendment,
         PlanAmendmentOperation, RetryPolicy,
     };
+    use moa_core::traits::{Identity, IdentityType};
     use moa_core::types::{
         action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
         execution_planning::{ExecutionSourceProvenance, GeneratedPlanPlannerProvenance},
@@ -2054,7 +2230,8 @@ mod tests {
         },
         wire::{
             ExecutionAmendmentRequest, ExecutionMutationResponse, ExecutionPlanningContextSnapshot,
-            ExecutionRunRequest, ExecutionRunWorkflowRequest, planning_context_hash,
+            ExecutionRunRequest, ExecutionRunWorkflowRequest, ExecutionTaskWorkflowRequest,
+            planning_context_hash,
         },
     };
     use moa_providers::ScriptedProvider;
@@ -2066,7 +2243,7 @@ mod tests {
         ReplanExhaustion, RunDriveStep, bounded_failure_evidence, compensation_entry_decision,
         compensation_registration_decision, narrow_amendment_context,
         narrow_authorized_capability_refs, prepare_amendment_planning, replan_exhaustion_reason,
-        terminal_cause, wait_transition_step, wake_promise_epoch,
+        select_dispatch_batch, terminal_cause, wait_transition_step, wake_promise_epoch,
     };
 
     #[tokio::test]
@@ -2608,6 +2785,101 @@ mod tests {
         })
     }
 
+    fn dispatch_task(sequence: u128) -> ExecutionTaskWorkflowRequest {
+        let tenant_id = TenantId::from(Uuid::from_u128(10));
+        ExecutionTaskWorkflowRequest {
+            run_uid: Uuid::from_u128(20),
+            task_id: ExecutionTaskId::from_uuid(Uuid::from_u128(sequence)),
+            generation: 1,
+            tenant_id,
+            contact_id: None,
+            session_id: SessionId(Uuid::from_u128(30)),
+            identity: Identity {
+                identity_type: IdentityType::Operator,
+                id: Uuid::from_u128(40),
+                tenant_id,
+                api_key_id: None,
+                acting_on_behalf_of: None,
+            },
+        }
+    }
+
+    fn dispatch_task_ids(tasks: &[ExecutionTaskWorkflowRequest]) -> Vec<ExecutionTaskId> {
+        tasks.iter().map(|task| task.task_id).collect()
+    }
+
+    #[test]
+    fn dispatch_window_preserves_stable_candidate_order() {
+        // Pins: a bounded refill selects the first persisted candidates without
+        // reordering their stable scheduler/materialization order.
+        let tasks = vec![dispatch_task(3), dispatch_task(1), dispatch_task(2)];
+
+        let selected = select_dispatch_batch(tasks, &BTreeSet::new(), 2);
+
+        assert_eq!(
+            dispatch_task_ids(&selected),
+            vec![
+                ExecutionTaskId::from_uuid(Uuid::from_u128(3)),
+                ExecutionTaskId::from_uuid(Uuid::from_u128(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_window_full_capacity_selects_nothing_before_parking() {
+        // Pins: a full owned-call window starts no additional task before the
+        // driver acknowledges its epoch and parks on promises/attached calls.
+        let owned = BTreeSet::from([
+            ExecutionTaskId::from_uuid(Uuid::from_u128(1)),
+            ExecutionTaskId::from_uuid(Uuid::from_u128(2)),
+        ]);
+        let tasks = vec![dispatch_task(1), dispatch_task(2), dispatch_task(3)];
+
+        let selected = select_dispatch_batch(tasks, &owned, 0);
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn dispatch_window_refills_exactly_one_open_slot() {
+        // Pins: one completed attached call opens exactly one physical slot,
+        // even when multiple durable pending task rows are ready.
+        let tasks = vec![dispatch_task(1), dispatch_task(2), dispatch_task(3)];
+
+        let selected = select_dispatch_batch(tasks, &BTreeSet::new(), 1);
+
+        assert_eq!(
+            dispatch_task_ids(&selected),
+            vec![ExecutionTaskId::from_uuid(Uuid::from_u128(1))]
+        );
+    }
+
+    #[test]
+    fn dispatch_window_replay_skips_already_owned_task_ids() {
+        // Pins: replayed pending rows whose attached calls are already journal-owned
+        // do not consume refill slots or create duplicate task invocations.
+        let owned = BTreeSet::from([
+            ExecutionTaskId::from_uuid(Uuid::from_u128(1)),
+            ExecutionTaskId::from_uuid(Uuid::from_u128(3)),
+        ]);
+        let tasks = vec![
+            dispatch_task(1),
+            dispatch_task(2),
+            dispatch_task(3),
+            dispatch_task(4),
+        ];
+
+        let selected = select_dispatch_batch(tasks, &owned, 2);
+
+        assert_eq!(
+            dispatch_task_ids(&selected),
+            vec![
+                ExecutionTaskId::from_uuid(Uuid::from_u128(2)),
+                ExecutionTaskId::from_uuid(Uuid::from_u128(4)),
+            ]
+        );
+    }
+
     #[test]
     fn waiting_replan_invokes_revision_keyed_amendment_planner_instead_of_parking() {
         // Pins: the Task 6 driver hands one persisted WaitingReplan revision to
@@ -2617,6 +2889,32 @@ mod tests {
         assert!(matches!(
             step,
             RunDriveStep::PlanAmendment { plan_revision: 7 }
+        ));
+    }
+
+    #[test]
+    fn persisted_waiting_replan_still_invokes_revision_keyed_amendment_planner() {
+        // Pins: NeedsReplan outcome persistence may transition the run before the
+        // scheduler observes it; that exact replay remains internally actionable.
+        let step = wait_transition_step(ExecutionRunStatus::WaitingReplan, false, 7, 11);
+
+        assert!(matches!(
+            step,
+            RunDriveStep::PlanAmendment { plan_revision: 7 }
+        ));
+    }
+
+    #[test]
+    fn replayed_wait_transition_parks_at_the_processed_epoch() {
+        // Pins: an unchanged persisted wait does not become a status-read loop;
+        // it suspends on the epoch promise and any attached task calls.
+        let step = wait_transition_step(ExecutionRunStatus::Running, false, 7, 11);
+
+        assert!(matches!(
+            step,
+            RunDriveStep::Park {
+                processed_epoch: 11
+            }
         ));
     }
 

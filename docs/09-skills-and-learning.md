@@ -196,8 +196,9 @@ it may call the workflow-owned `request_durable_execution` control tool for one
 typed, evidence-preserving upgrade to Durable. The tool is available only to
 that eligible turn, must be called alone, and cannot be replaced by arbitrary
 tool-result data. The turn cannot classify again or downgrade; the execution
-compiler and `ExecutionTask` runtime own the graph, with no application fan-out
-cap below the approved run budget.
+compiler and `ExecutionTask` runtime own the graph. The run fully materializes
+stable logical rows while pending rows remain storage-only, and the positive
+`execution.max_in_flight_tasks` window bounds live attached task calls.
 
 Skill selection alone does not choose Execute or Durable. A template on a serving
 skill revision is used only after routing chooses Execute/Durable and the

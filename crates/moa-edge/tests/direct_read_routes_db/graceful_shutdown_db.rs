@@ -95,7 +95,8 @@ struct EdgeExit {
 impl SpawnedEdge {
     async fn start(database_url: &str) -> Self {
         let port = free_loopback_port().await;
-        let child = Command::new(env!("CARGO_BIN_EXE_moa-edge"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_moa-edge"));
+        command
             // An ambient developer environment must not decide what this child
             // does. `.env.example` alone would point it at another database and
             // make it bind a Prometheus scrape port shared with every sibling.
@@ -114,9 +115,14 @@ impl SpawnedEdge {
             // would leave the distinguishing line out of stdout entirely.
             .env("RUST_LOG", "moa_edge=info")
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn moa-edge binary");
+            .stderr(Stdio::piped());
+        #[cfg(target_os = "macos")]
+        if let Some(dylib_path) = std::env::var_os("DYLD_FALLBACK_LIBRARY_PATH") {
+            // `prefer-dynamic` test binaries need Cargo's Rust dylib path even
+            // though application configuration remains fully sanitized.
+            command.env("DYLD_FALLBACK_LIBRARY_PATH", dylib_path);
+        }
+        let child = command.spawn().expect("spawn moa-edge binary");
         let mut edge = Self { child, port };
         edge.await_ready().await;
         edge

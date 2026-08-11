@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Provisional physical execution-task window pending the measured T3.3 default.
+const DEFAULT_MAX_IN_FLIGHT_TASKS: usize = 64;
+
 /// Tenant-independent defaults for execution planning and resource envelopes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -10,6 +13,8 @@ pub struct ExecutionConfig {
     pub planner_repair_attempts: u32,
     /// Number of identical failure fingerprints that stops replanning.
     pub repeated_failure_limit: u32,
+    /// Maximum live execution-task invocations owned by one run.
+    pub max_in_flight_tasks: usize,
     /// Default maximum logical tasks in one approved run.
     pub max_tasks: u64,
     /// Default maximum model tokens in one approved run.
@@ -45,6 +50,7 @@ impl Default for ExecutionConfig {
         Self {
             planner_repair_attempts: 1,
             repeated_failure_limit: 3,
+            max_in_flight_tasks: DEFAULT_MAX_IN_FLIGHT_TASKS,
             max_tasks: 10_000,
             max_tokens: 10_000_000,
             max_tool_calls: 100_000,
@@ -65,7 +71,7 @@ impl Default for ExecutionConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::ExecutionConfig;
+    use super::{DEFAULT_MAX_IN_FLIGHT_TASKS, ExecutionConfig};
 
     #[test]
     fn execution_config_defaults_match_the_resource_contract() {
@@ -75,6 +81,7 @@ mod tests {
             ExecutionConfig {
                 planner_repair_attempts: 1,
                 repeated_failure_limit: 3,
+                max_in_flight_tasks: DEFAULT_MAX_IN_FLIGHT_TASKS,
                 max_tasks: 10_000,
                 max_tokens: 10_000_000,
                 max_tool_calls: 100_000,
@@ -90,6 +97,16 @@ mod tests {
                 verifier_turn_tool_calls: 4,
                 verifier_turn_retrieved_bytes: 1_000_000,
             }
+        );
+
+        let encoded = serde_json::to_value(ExecutionConfig::default())
+            .expect("serialize execution config defaults");
+        assert_eq!(encoded["max_in_flight_tasks"], DEFAULT_MAX_IN_FLIGHT_TASKS);
+        assert_eq!(
+            serde_json::from_value::<ExecutionConfig>(encoded)
+                .expect("deserialize execution config defaults")
+                .max_in_flight_tasks,
+            DEFAULT_MAX_IN_FLIGHT_TASKS
         );
     }
 }

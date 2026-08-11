@@ -279,6 +279,18 @@ impl FixtureCapabilityController {
         lock_unpoisoned(&self.state.observations).calls.len()
     }
 
+    /// Returns the number of fixture `tools/call` handlers currently live.
+    #[must_use]
+    pub fn current_live_calls(&self) -> usize {
+        lock_unpoisoned(&self.state.observations).current_live_calls
+    }
+
+    /// Returns the peak number of concurrently live fixture `tools/call` handlers.
+    #[must_use]
+    pub fn peak_live_calls(&self) -> usize {
+        lock_unpoisoned(&self.state.observations).peak_live_calls
+    }
+
     /// Derives stable task IDs for unique map item keys using production algorithms.
     #[cfg(feature = "orchestrator-fixture")]
     pub fn derived_task_ids(
@@ -321,7 +333,9 @@ impl FixtureCapabilityController {
         let effects = {
             let mut observations = lock_unpoisoned(&self.state.observations);
             let effects = observations.effects.values().cloned().collect::<Vec<_>>();
+            let next_live_call_generation = observations.live_call_generation.wrapping_add(1);
             *observations = FixtureCapabilityObservations::default();
+            observations.live_call_generation = next_live_call_generation;
             effects
         };
         for effect in effects {
@@ -466,11 +480,11 @@ impl FixtureCapabilityState {
     }
 
     fn record_call(
-        &self,
+        self: &Arc<Self>,
         invocation_id: String,
         capability: String,
         input: Value,
-    ) -> Result<RecordCall> {
+    ) -> Result<(RecordCall, LiveCallGuard)> {
         let tool = self
             .tools
             .get(&capability)
@@ -483,7 +497,8 @@ impl FixtureCapabilityState {
         let mut observations = lock_unpoisoned(&self.observations);
         observations.next_transport_order += 1;
         let transport_order = observations.next_transport_order;
-        if let Some(effect) = observations.effects.get(&invocation_id).cloned() {
+        let mut unique_effect_arrived = false;
+        let record = if let Some(effect) = observations.effects.get(&invocation_id).cloned() {
             let logical_arrival_order = effect.call.arrival_order;
             let conflict = effect.call.capability != capability
                 || effect.call.item_key != item_key
@@ -499,52 +514,67 @@ impl FixtureCapabilityState {
                     logical_arrival_order,
                     is_replay: true,
                 });
-            return Ok(if conflict {
+            if conflict {
                 RecordCall::Conflict
             } else {
                 RecordCall::Effect(effect)
-            });
-        }
-
-        observations.next_unique_order += 1;
-        let unique_order = observations.next_unique_order;
-        let script_index = observations
-            .tool_script_cursors
-            .entry(capability.clone())
-            .or_default();
-        let outcome = tool
-            .outcomes
-            .get(*script_index)
-            .or_else(|| tool.outcomes.last())
-            .context("validated fixture outcome script became empty")?
-            .clone();
-        *script_index += 1;
-        let call = FixtureCapabilityCall {
-            invocation_id: invocation_id.clone(),
-            capability: capability.clone(),
-            item_key: item_key.clone(),
-            input: input.clone(),
-            arrival_order: unique_order,
-        };
-        let effect = Arc::new(LogicalEffect::new(call.clone(), outcome));
-        observations.calls.push(call);
-        observations
-            .transport_attempts
-            .push(FixtureCapabilityAttempt {
+            }
+        } else {
+            observations.next_unique_order += 1;
+            let unique_order = observations.next_unique_order;
+            let script_index = observations
+                .tool_script_cursors
+                .entry(capability.clone())
+                .or_default();
+            let outcome = tool
+                .outcomes
+                .get(*script_index)
+                .or_else(|| tool.outcomes.last())
+                .context("validated fixture outcome script became empty")?
+                .clone();
+            *script_index += 1;
+            let call = FixtureCapabilityCall {
                 invocation_id: invocation_id.clone(),
-                capability,
-                item_key,
-                input,
-                arrival_order: transport_order,
-                logical_arrival_order: unique_order,
-                is_replay: false,
-            });
-        observations
-            .effects
-            .insert(invocation_id, Arc::clone(&effect));
+                capability: capability.clone(),
+                item_key: item_key.clone(),
+                input: input.clone(),
+                arrival_order: unique_order,
+            };
+            let effect = Arc::new(LogicalEffect::new(call.clone(), outcome));
+            observations.calls.push(call);
+            observations
+                .transport_attempts
+                .push(FixtureCapabilityAttempt {
+                    invocation_id: invocation_id.clone(),
+                    capability,
+                    item_key,
+                    input,
+                    arrival_order: transport_order,
+                    logical_arrival_order: unique_order,
+                    is_replay: false,
+                });
+            observations
+                .effects
+                .insert(invocation_id, Arc::clone(&effect));
+            unique_effect_arrived = true;
+            RecordCall::Effect(effect)
+        };
+        observations.current_live_calls += 1;
+        observations.peak_live_calls = observations
+            .peak_live_calls
+            .max(observations.current_live_calls);
+        let live_call_generation = observations.live_call_generation;
         drop(observations);
-        self.arrival_notify.notify_waiters();
-        Ok(RecordCall::Effect(effect))
+        if unique_effect_arrived {
+            self.arrival_notify.notify_waiters();
+        }
+        Ok((
+            record,
+            LiveCallGuard {
+                state: Arc::clone(self),
+                live_call_generation,
+            },
+        ))
     }
 
     fn listed_tools(&self) -> Vec<Value> {
@@ -575,6 +605,23 @@ struct FixtureCapabilityObservations {
     tool_script_cursors: HashMap<String, usize>,
     next_unique_order: u64,
     next_transport_order: u64,
+    current_live_calls: usize,
+    peak_live_calls: usize,
+    live_call_generation: u64,
+}
+
+struct LiveCallGuard {
+    state: Arc<FixtureCapabilityState>,
+    live_call_generation: u64,
+}
+
+impl Drop for LiveCallGuard {
+    fn drop(&mut self) {
+        let mut observations = lock_unpoisoned(&self.state.observations);
+        if observations.live_call_generation == self.live_call_generation {
+            observations.current_live_calls = observations.current_live_calls.saturating_sub(1);
+        }
+    }
 }
 
 struct LogicalEffect {
@@ -681,10 +728,11 @@ async fn handle_tool_call(
             "tools/call _meta.moa/toolInvocationId must be a string",
         );
     };
-    let record = match state.record_call(invocation_id.to_string(), capability.to_string(), input) {
-        Ok(record) => record,
-        Err(error) => return json_rpc_error(id, -32602, error.to_string()),
-    };
+    let (record, _live_call) =
+        match state.record_call(invocation_id.to_string(), capability.to_string(), input) {
+            Ok(record) => record,
+            Err(error) => return json_rpc_error(id, -32602, error.to_string()),
+        };
     let RecordCall::Effect(effect) = record else {
         return json_rpc_error(
             id,
@@ -946,6 +994,8 @@ mod tests {
         })
         .await
         .expect("both transport attempts should arrive");
+        assert_eq!(runtime.controller().current_live_calls(), 2);
+        assert_eq!(runtime.controller().peak_live_calls(), 2);
         runtime.controller().release(1);
 
         let first = first
@@ -968,6 +1018,8 @@ mod tests {
         );
         assert_eq!(second, first);
         assert_eq!(runtime.controller().calls().len(), 1);
+        assert_eq!(runtime.controller().current_live_calls(), 0);
+        assert_eq!(runtime.controller().peak_live_calls(), 2);
         let attempts = runtime.controller().transport_attempts();
         assert_eq!(attempts.len(), 2);
         assert_eq!(
@@ -1315,6 +1367,8 @@ mod tests {
             .wait_for_calls(1, Duration::from_secs(2))
             .await
             .expect("wait for pending logical call");
+        assert_eq!(runtime.controller().current_live_calls(), 1);
+        assert_eq!(runtime.controller().peak_live_calls(), 1);
 
         runtime.controller().reset();
 
@@ -1325,5 +1379,7 @@ mod tests {
         assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
         assert!(runtime.controller().calls().is_empty());
         assert!(runtime.controller().transport_attempts().is_empty());
+        assert_eq!(runtime.controller().current_live_calls(), 0);
+        assert_eq!(runtime.controller().peak_live_calls(), 0);
     }
 }

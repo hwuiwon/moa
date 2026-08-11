@@ -3,6 +3,94 @@
 use super::support::*;
 
 #[tokio::test]
+async fn input_resume_starts_a_schedulable_generation_without_a_prior_outcome_db() -> TestResult {
+    // Pins: input redispatch starts one clean running generation while the prior NeedsInput
+    // remains audit history, so the persisted scheduler projection accepts the resumed task.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let repository = ExecutionRepository::new(test_db.store().pool().clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let mut new_run = new_run(
+        tenant_id,
+        None,
+        "input-resume-projection",
+        ExecutionRunStatus::Queued,
+        budget(10),
+    );
+    new_run.plan.definition.nodes = vec![moa_artifacts::execution_plan::ExecutionNode {
+        id: "input-resume".to_string(),
+        requirement_ids: vec!["req".to_string()],
+        depends_on: Vec::new(),
+        when: None,
+        input: json!({}),
+        output_schema: json!({"type": "object"}),
+        operation: moa_artifacts::execution_plan::ExecutionOperation::Output { value: json!({}) },
+        compensation: None,
+        retry: RetryPolicy {
+            max_attempts: 3,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 10,
+        },
+        budget: None,
+    }];
+    let run = create_run(&repository, scope, new_run).await?;
+    let task = logical_task(run.run_uid, "input-resume", "", estimate(10));
+    repository
+        .materialize_tasks(scope, run.run_uid, 1, vec![task.clone()])
+        .await?;
+    reserve_and_start(&repository, scope, run.run_uid, task.task_id).await?;
+    assert!(matches!(
+        repository
+            .record_task_outcome(scope, run.run_uid, task.task_id, 1, needs_input(1))
+            .await?,
+        TaskOutcomeWrite::Applied { .. }
+    ));
+
+    let TransitionOutcome::Applied(resumed) = repository
+        .resume_task_with_input(
+            scope,
+            run.run_uid,
+            task.task_id,
+            1,
+            json!({"answer": "approved"}),
+        )
+        .await?
+    else {
+        panic!("input resume must apply");
+    };
+    assert_eq!(resumed.status, ExecutionTaskStatus::Running);
+    assert_eq!(resumed.generation, 2);
+    assert!(
+        resumed.current_outcome.is_none(),
+        "the resumed generation must not project the prior generation's NeedsInput outcome"
+    );
+    assert_eq!(resumed.outcome_audit.len(), 1);
+
+    let snapshot = repository
+        .load_scheduling_snapshot(scope, run.run_uid)
+        .await?
+        .expect("resumed run should remain schedulable");
+    let scheduled = moa_execution::schedule(moa_execution::ScheduleRequest {
+        run_uid: snapshot.run.run_uid,
+        goal: snapshot.run.goal.clone(),
+        plan: snapshot.run.active_plan.clone(),
+        catalog: snapshot.catalog.clone(),
+        run_input: snapshot.run.input.clone(),
+        projection: snapshot.projection,
+        config: moa_config::ExecutionConfig::default(),
+        budget_ledger: snapshot.budget_ledger,
+        now: moa_test_support::fixtures::pg_now(),
+    })?;
+    assert_eq!(
+        scheduled.decision,
+        moa_execution::state::ScheduleDecision::Waiting(vec![
+            moa_execution::state::WaitingReason::RunningTasks,
+        ])
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db() -> TestResult {
     // Pins: redispatch rejected by deadline or budget atomically records the
     // typed terminal failure, releases reservations, wakes finalization, and

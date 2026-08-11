@@ -483,9 +483,6 @@ pub(super) async fn maybe_resolve_parent_awakeable(
         return Ok(());
     };
 
-    let delivered =
-        deliver_terminal_notification_once(ctx, &mut state, terminal.clone(), session_limits)
-            .await?;
     let waiters = state.take_result_waiters();
     let waiter_payload = if waiters.is_empty() {
         None
@@ -496,13 +493,20 @@ pub(super) async fn maybe_resolve_parent_awakeable(
             ))
         })?)
     };
+    // The terminal lifecycle transition was persisted by the caller before entering
+    // this helper. Remove waiter ids durably and resolve them before the joined parent
+    // handoff so an explicit wait never inherits parent event/cache latency.
+    if waiter_payload.is_some() {
+        state.persist(ctx);
+    }
     for waiter in waiters {
         if let Some(payload) = waiter_payload.as_ref() {
             ctx.resolve_awakeable(&waiter, payload.clone());
         }
     }
-
-    if delivered || waiter_payload.is_some() {
+    let delivered =
+        deliver_terminal_notification_once(ctx, &mut state, terminal, session_limits).await?;
+    if delivered {
         state.persist(ctx);
     }
     Ok(())
@@ -526,51 +530,36 @@ pub(super) async fn deliver_terminal_notification_once(
         return Ok(false);
     }
 
-    let result = terminal.result.clone();
-    // Captured before the events move `result.worker_id`, for the additive idle-wake.
-    let wake_worker_id = result.worker_id.clone();
-    let wake_summary = result
-        .error
-        .clone()
-        .unwrap_or_else(|| result.output.clone());
-    cache_parent_terminal_result(ctx, state, terminal).await?;
-    persist_parent_session_event(
-        ctx,
-        parent_session,
-        Event::WorkerStatusChanged {
-            worker_id: result.worker_id.clone(),
-            from: None,
-            to: status,
-            summary: state.last_turn_summary.clone(),
-        },
+    let signal_id = ctx
+        .run(|| async { Ok::<_, HandlerError>(Json::from(AgentSignalId::new())) })
+        .name("worker_terminal_signal_id")
+        .await?
+        .into_inner();
+    let created_at = ctx
+        .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
+        .name("worker_terminal_created_at")
+        .await?
+        .into_inner();
+    let input = RecordWorkerChildTerminalInput {
+        worker_id: terminal.result.worker_id.clone(),
+        generation: state.generation,
+        terminal,
+        signal_id,
+        created_at,
+    };
+    let started_at = std::time::Instant::now();
+    crate::restate_identity::replay_safe_request(
+        ctx.object_client::<SessionClient>(parent_session.to_string())
+            .record_worker_child_terminal(Json::from(input)),
     )
+    .call()
     .await?;
-    persist_parent_session_event(
-        ctx,
-        parent_session,
-        Event::WorkerNotificationDelivered {
-            worker_id: result.worker_id,
-            state: status,
-            summary: result
-                .error
-                .clone()
-                .unwrap_or_else(|| result.output.clone()),
-        },
-    )
-    .await?;
-
-    // Terminal idle-wake (additive control-plane wake; does NOT alter the three existing
-    // channels or the `notification_delivered` guard). Lets a finished-while-idle child
-    // wake its coordinator. The wake is idempotent via the terminal signal id's dedupe
-    // key and non-fatal. `record_child_signal` performs the idle gate (active-turn
-    // check), so a busy coordinator is never auto-resumed; a Failed terminal is
-    // resume-eligible, a Completed/Cancelled terminal records as a non-resuming Finding.
-    emit_terminal_idle_wake(ctx, parent_session, &wake_worker_id, status, wake_summary).await?;
+    record_worker_terminal_parent_ack(started_at.elapsed());
 
     state.notification_delivered = true;
 
-    // Report-then-self-clean: now that the result is durable on the parent (cache +
-    // event log) and the idle-wake fired, schedule a generation-guarded delayed
+    // Report-then-self-clean: now that the result is durable on the parent (cache,
+    // lifecycle events, and any Session-owned wake), schedule a generation-guarded delayed
     // self-cleanup. A follow-up arriving during the grace window bumps
     // `cleanup_generation` (in `post_message`), making this pending tick stale so the
     // child is revived instead of cleaned. The caller persists `state` after this
@@ -583,74 +572,4 @@ pub(super) async fn deliver_terminal_notification_once(
     }
 
     Ok(true)
-}
-
-/// Sends the additive terminal idle-wake control-plane signal to the owning coordinator.
-///
-/// The signal id and timestamp are journaled via `ctx.run()` so the wake is replay-safe
-/// and idempotent (the coordinator dedupes on `worker_signal:{signal_id}`). It is
-/// dispatched detached (`.send()`) and never fails terminal delivery; the coordinator's
-/// `record_child_signal` applies the idle gate, so this only ever wakes an *idle*
-/// parent. A Failed terminal maps to a resume-eligible `Failed` signal; a successful or
-/// cancelled terminal maps to an informational `Finding` that records the wake without
-/// arming a resume (honoring "never resume on plain success").
-pub(super) async fn emit_terminal_idle_wake(
-    ctx: &ObjectContext<'_>,
-    parent_session: SessionId,
-    worker_id: &str,
-    status: WorkerState,
-    summary: String,
-) -> Result<(), HandlerError> {
-    let signal_id = ctx
-        .run(|| async { Ok::<_, HandlerError>(Json::from(AgentSignalId::new())) })
-        .name("worker_terminal_wake_signal_id")
-        .await?
-        .into_inner();
-    let created_at = ctx
-        .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
-        .name("worker_terminal_wake_at")
-        .await?
-        .into_inner();
-    let (kind, severity) = if matches!(status, WorkerState::Failed) {
-        (ChildSignalKind::Failed, SignalSeverity::Critical)
-    } else {
-        (ChildSignalKind::Finding, SignalSeverity::Info)
-    };
-    crate::restate_identity::replay_safe_request(
-        ctx.object_client::<SessionClient>(parent_session.to_string())
-            .record_child_signal(Json::from(WorkerSignal {
-                signal_id,
-                worker_id: worker_id.to_string(),
-                parent_session,
-                kind,
-                severity,
-                summary,
-                payload: serde_json::Value::Null,
-                created_at,
-                resume_policy: ParentResumePolicy::IfIdle,
-                input_request: None,
-            })),
-    )
-    .send();
-    Ok(())
-}
-
-pub(super) async fn cache_parent_terminal_result(
-    ctx: &ObjectContext<'_>,
-    state: &WorkerVoState,
-    terminal: WorkerTerminalResult,
-) -> Result<(), HandlerError> {
-    let input = MarkWorkerChildTerminalInput {
-        worker_id: terminal.result.worker_id.clone(),
-        terminal,
-    };
-    if let Some(parent_session) = state.parent_session {
-        crate::restate_identity::replay_safe_request(
-            ctx.object_client::<SessionClient>(parent_session.to_string())
-                .mark_child_terminal(Json::from(input)),
-        )
-        .call()
-        .await?;
-    }
-    Ok(())
 }

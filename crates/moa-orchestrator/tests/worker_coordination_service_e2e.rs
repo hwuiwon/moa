@@ -1,561 +1,531 @@
-//! End-to-end coverage for the durable worker coordination wiring on the
-//! Session VO (child registry, control-plane signal dedupe, scoped cancellation,
-//! and terminal-result caching) driven against a real Restate ingress + Postgres.
+//! Service E2Es for event-driven conversational-worker coordination.
 //!
-//! Most tests intentionally exercise the coordination control plane directly
-//! through the `Session` (and `Worker`) virtual-object handlers. The recovery
-//! matrix scenario instead boots the dedicated scripted-provider/MCP fixture so
-//! three real conversational workers can be held at an exact external-effect
-//! barrier across a hard orchestrator restart.
+//! Every scenario drives a real `Worker` virtual object and
+//! `WorkerTurnExecution` workflow against the restartable local
+//! Postgres/Restate/OpenFGA/Valkey fixture. Terminal delivery is intentionally
+//! never injected through the Session handler: the Worker owns its waiters and
+//! makes the joined parent call exactly as production does.
 
 #![cfg(feature = "integration")]
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
-use moa_core::traits::Identity;
-use moa_core::{
-    events::Event, types::action_policy::ActionPolicyEffect, types::contact::SessionActorRef,
-    types::events_stream::EventRange, types::identifiers::AgentSignalId,
-    types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
-    types::session::CancelScope, types::session::SessionMeta,
-    types::worker::commands::ConsumeWorkerChildResultInput,
-    types::worker::commands::ConsumeWorkerChildResultOutput,
-    types::worker::commands::MarkWorkerChildTerminalInput, types::worker::state::ChildSignalKind,
-    types::worker::state::ParentResumePolicy, types::worker::state::SignalSeverity,
-    types::worker::state::WorkerChildRef, types::worker::state::WorkerProgressSummary,
-    types::worker::state::WorkerResult, types::worker::state::WorkerSignal,
-    types::worker::state::WorkerState, types::worker::state::WorkerStatus,
-    types::worker::state::WorkerTerminalResult,
+use anyhow::{Context, Result, bail, ensure};
+use chrono::Utc;
+use moa_core::events::{Event, TurnFailureActor};
+use moa_core::types::action_policy::ActionPolicyEffect;
+use moa_core::types::events_stream::{EventRange, EventRecord};
+use moa_core::types::identifiers::{SessionId, UserId};
+use moa_core::types::worker::signals::ChildSignalKind;
+use moa_core::types::worker::state::{
+    InputAudience, WorkerChildRef, WorkerInitialTask, WorkerMessage, WorkerState,
 };
 use moa_orchestrator::services::action_policy::UpsertActionPolicyRuleRequest;
 use moa_test_support::{
-    FixtureCapabilityOptions, FixtureCapabilityOutcome, FixtureCapabilityTool,
-    OrchestratorTestFixture, TestApiClient,
+    FixtureCapabilityController, FixtureCapabilityOptions, FixtureCapabilityOutcome,
+    FixtureCapabilityTool, OrchestratorTestFixture, TestApiClient,
 };
-use moa_wire::turn::{SessionProgress, SessionProgressRequest, TurnOutcomeKind};
-use serde::Deserialize;
-use serde_json::json;
-use uuid::Uuid;
+use serde_json::{Value, json};
 
-use crate::support::restate_runtime::{grant_tenant_operator, test_user_identity, with_identity};
 use crate::support::session_store_service::start_turn_request;
 
 #[path = "support/mod.rs"]
 mod support;
 
-/// Local projection of `Session/progress` carrying only the fields these tests
-/// assert on. Extra fields (snapshot, active turn progress) are ignored, and
-/// `child_progress` is omitted from the wire payload when empty.
-#[derive(Debug, Deserialize)]
-struct ProgressView {
-    #[serde(default)]
-    child_progress: Vec<WorkerProgressSummary>,
-    events: Vec<serde_json::Value>,
-}
+const CLASSIFIER_PROMPT: &str = "You classify one user turn into MOA's public execution decision.";
+const PARENT_PRIME_REQUEST: &str = "Prime this session's authenticated coordinator owner.";
+const PARENT_PRIME_RESPONSE: &str = "Parent coordinator ownership established.";
+const FAN_IN_RESUME_RESPONSE: &str = "Fan-in resume observed.";
+const MCP_SERVER: &str = "fixture-capability";
+const SCENARIO_TIMEOUT: Duration = Duration::from_secs(120);
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+const LONG_FAN_IN_WAVES: usize = 5;
 
-/// A created, authz-granted session used to drive coordination handlers.
-struct InitializedSession {
-    session_id: SessionId,
-    identity: Identity,
-}
-
-impl InitializedSession {
-    fn key(&self) -> String {
-        self.session_id.to_string()
-    }
-}
-
-fn ingress_url() -> String {
-    std::env::var("MOA_RESTATE_INGRESS_URL")
-        .unwrap_or_else(|_| "http://localhost:10010".to_string())
-}
-
-fn session_url(session_id: &str, handler: &str) -> String {
-    format!(
-        "{}/restate/call/Session/{session_id}/{handler}",
-        ingress_url()
-    )
-}
-
-fn session_store_url(handler: &str) -> String {
-    format!("{}/restate/call/SessionStore/{handler}", ingress_url())
-}
-
-fn worker_url(worker_id: &str, handler: &str) -> String {
-    format!(
-        "{}/restate/call/Worker/{worker_id}/{handler}",
-        ingress_url()
-    )
-}
-
-fn live_model() -> &'static str {
-    if std::env::var("MOA_ANTHROPIC_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
-        return "claude-sonnet-4-6";
-    }
-    if std::env::var("MOA_OPENAI_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
-        return "gpt-5.4-mini";
-    }
-    if std::env::var("MOA_GOOGLE_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
-        return "gemini-3-flash-preview";
-    }
-    "gpt-5.4-mini"
-}
-
-/// Creates a fresh tenant + session and grants the test identity operator access,
-/// mirroring `session_turn_lifecycle_service_e2e`'s setup so each test owns its own
-/// session/tenant ids and stays parallel-safe under nextest.
-async fn create_initialized_session(client: &reqwest::Client) -> Result<InitializedSession> {
-    let tenant_id = TenantId::new();
-    let mut identity = test_user_identity();
-    identity.tenant_id = tenant_id;
-    let meta = SessionMeta {
-        tenant_id,
-        model: ModelId::new(live_model()),
-        created_by: Some(SessionActorRef::Identity { id: identity.id }),
-        ..SessionMeta::default()
-    };
-    grant_tenant_operator(&identity, tenant_id).await?;
-
-    let create_request = client.post(session_store_url("create_session"));
-    let session_id = with_identity(create_request, &identity)
-        .json(&meta)
-        .send()
-        .await
-        .context("send SessionStore create_session")?
-        .error_for_status()
-        .context("SessionStore create_session should succeed")?
-        .json::<SessionId>()
-        .await
-        .context("deserialize created session id")?;
-
-    Ok(InitializedSession {
-        session_id,
-        identity,
-    })
-}
-
-/// Registers a root-owned child ref on the session via the internal
-/// `Session/register_child` handler (the same write `TurnExecution` performs).
-async fn register_child(
-    client: &reqwest::Client,
-    session: &InitializedSession,
-    child: &WorkerChildRef,
-) -> Result<()> {
-    client
-        .post(session_url(&session.key(), "register_child"))
-        .json(child)
-        .send()
-        .await
-        .context("send Session register_child")?
-        .error_for_status()
-        .context("Session register_child should succeed")?;
-    Ok(())
-}
-
-/// Caches a terminal child result on the parent via `Session/mark_child_terminal`.
-async fn mark_child_terminal(
-    client: &reqwest::Client,
-    session: &InitializedSession,
-    input: &MarkWorkerChildTerminalInput,
-) -> Result<()> {
-    client
-        .post(session_url(&session.key(), "mark_child_terminal"))
-        .json(input)
-        .send()
-        .await
-        .context("send Session mark_child_terminal")?
-        .error_for_status()
-        .context("Session mark_child_terminal should succeed")?;
-    Ok(())
-}
-
-/// Consumes a cached terminal child result via `Session/consume_child_result`.
-async fn consume_child_result(
-    client: &reqwest::Client,
-    session: &InitializedSession,
-    worker_id: &str,
-) -> Result<ConsumeWorkerChildResultOutput> {
-    client
-        .post(session_url(&session.key(), "consume_child_result"))
-        .json(&ConsumeWorkerChildResultInput {
-            worker_id: worker_id.to_string(),
-        })
-        .send()
-        .await
-        .context("send Session consume_child_result")?
-        .error_for_status()
-        .context("Session consume_child_result should succeed")?
-        .json::<ConsumeWorkerChildResultOutput>()
-        .await
-        .context("deserialize Session consume_child_result response")
-}
-
-/// Records a child→parent control-plane signal via `Session/record_child_signal`.
-async fn record_child_signal(
-    client: &reqwest::Client,
-    session: &InitializedSession,
-    signal: &WorkerSignal,
-) -> Result<()> {
-    client
-        .post(session_url(&session.key(), "record_child_signal"))
-        .json(signal)
-        .send()
-        .await
-        .context("send Session record_child_signal")?
-        .error_for_status()
-        .context("Session record_child_signal should succeed")?;
-    Ok(())
-}
-
-/// Reads the root-owned active child registry via the shared `Session/child_refs`.
-async fn child_refs(
-    client: &reqwest::Client,
-    session: &InitializedSession,
-) -> Result<Vec<WorkerChildRef>> {
-    client
-        .post(session_url(&session.key(), "child_refs"))
-        .send()
-        .await
-        .context("send Session child_refs")?
-        .error_for_status()
-        .context("Session child_refs should succeed")?
-        .json::<Vec<WorkerChildRef>>()
-        .await
-        .context("deserialize Session child_refs response")
-}
-
-/// Requests a scoped cancellation via `Session/cancel` (participant-gated).
-async fn cancel_session(
-    client: &reqwest::Client,
-    session: &InitializedSession,
-    scope: CancelScope,
-) -> Result<()> {
-    let request = client.post(session_url(&session.key(), "cancel"));
-    with_identity(request, &session.identity)
-        .json(&scope)
-        .send()
-        .await
-        .context("send Session cancel")?
-        .error_for_status()
-        .context("Session cancel should succeed")?;
-    Ok(())
-}
-
-/// Reads combined `Session/progress` (participant-gated) into the local projection.
-async fn session_progress(
-    client: &reqwest::Client,
-    session: &InitializedSession,
-) -> Result<ProgressView> {
-    let request = client.post(session_url(&session.key(), "progress"));
-    with_identity(request, &session.identity)
-        .json(&serde_json::json!({ "event_range": { "limit": 50 } }))
-        .send()
-        .await
-        .context("send Session progress")?
-        .error_for_status()
-        .context("Session progress should succeed")?
-        .json::<ProgressView>()
-        .await
-        .context("deserialize Session progress")
-}
-
-/// Reads a child VO's read-only status via the shared `Worker/status` handler.
-async fn worker_status(client: &reqwest::Client, worker_id: &str) -> Result<WorkerStatus> {
-    client
-        .post(worker_url(worker_id, "status"))
-        .send()
-        .await
-        .context("send Worker status")?
-        .error_for_status()
-        .context("Worker status should succeed")?
-        .json::<WorkerStatus>()
-        .await
-        .context("deserialize Worker status")
-}
-
-/// Counts `WorkerSignalReceived` events for one `signal_id` in a progress payload.
-///
-/// Each progress event is a serialized `EventRecord`; the durable `event` payload is
-/// adjacently tagged (`{"type": ..., "data": {...}}`), so the signal's identity lives
-/// at `event.data.signal_id`.
-fn count_signal_events(progress: &ProgressView, signal_id: &str) -> usize {
-    progress
-        .events
-        .iter()
-        .filter(|record| {
-            let event = &record["event"];
-            event["type"] == "WorkerSignalReceived"
-                && event["data"]["signal_id"] == serde_json::Value::String(signal_id.to_string())
-        })
-        .count()
-}
-
-/// Polls `Session/progress` until `predicate` holds or `timeout` elapses.
-async fn await_progress_matching<F>(
-    client: &reqwest::Client,
-    session: &InitializedSession,
-    timeout: Duration,
-    predicate: F,
-) -> Result<ProgressView>
-where
-    F: Fn(&ProgressView) -> bool,
-{
-    let deadline = Instant::now() + timeout;
-    let mut last = None;
-    while Instant::now() < deadline {
-        let progress = session_progress(client, session).await?;
-        if predicate(&progress) {
-            return Ok(progress);
-        }
-        last = Some(progress);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    bail!(
-        "session {} progress did not match within {:?}; last child_progress={:?}, events={}",
-        session.key(),
-        timeout,
-        last.as_ref().map(|p| &p.child_progress),
-        last.as_ref().map_or(0, |p| p.events.len()),
-    )
-}
-
-/// Polls a child VO's status until it reaches `target` or `timeout` elapses.
-async fn await_worker_state(
-    client: &reqwest::Client,
-    worker_id: &str,
-    target: WorkerState,
-    timeout: Duration,
-) -> Result<WorkerStatus> {
-    let deadline = Instant::now() + timeout;
-    let mut last = None;
-    while Instant::now() < deadline {
-        let status = worker_status(client, worker_id).await?;
-        if status.state == target {
-            return Ok(status);
-        }
-        last = Some(status);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    bail!("worker {worker_id} did not reach {target:?} within {timeout:?}; last status: {last:?}")
-}
-
-fn unique_child_id() -> String {
-    format!("child-{}", Uuid::now_v7())
-}
-
-fn completed_terminal(worker_id: &str, output: &str) -> WorkerTerminalResult {
-    WorkerTerminalResult {
-        state: WorkerState::Completed,
-        result: WorkerResult {
-            worker_id: worker_id.to_string(),
-            success: true,
-            output: output.to_string(),
-            tokens_used: 42,
-            tools_invoked: 1,
-            error: None,
-        },
-    }
-}
-
-const RECOVERY_REQUEST: &str =
-    "Run the RECOVERY-MATRIX fan-in check with three independent workers.";
-const RECOVERY_CLASSIFIER_PROMPT: &str =
-    "You classify one user turn into MOA's public execution decision.";
-const RECOVERY_MCP_SERVER: &str = "fixture-capability";
-const RECOVERY_WORKERS: [(&str, &str, &str); 3] = [
+const FAN_IN_WORKERS: [(&str, &str, &str); 3] = [
     (
-        "RECOVERY-WORKER-A: execute the durable A probe.",
-        "recovery_probe_a",
-        "RECOVERY-A-DONE",
+        "FAN-IN-WORKER-A: run the held A effect.",
+        "fan_in_probe_a",
+        "FAN-IN-A-DONE",
     ),
     (
-        "RECOVERY-WORKER-B: execute the durable B probe.",
-        "recovery_probe_b",
-        "RECOVERY-B-DONE",
+        "FAN-IN-WORKER-B: run the held B effect.",
+        "fan_in_probe_b",
+        "FAN-IN-B-DONE",
     ),
     (
-        "RECOVERY-WORKER-C: execute the durable C probe.",
-        "recovery_probe_c",
-        "RECOVERY-C-DONE",
+        "FAN-IN-WORKER-C: run the held C effect.",
+        "fan_in_probe_c",
+        "FAN-IN-C-DONE",
     ),
 ];
 
-fn recovery_tool_reference(tool_name: &str) -> String {
-    moa_hands::mcp_tool_reference(RECOVERY_MCP_SERVER, tool_name)
+const FAILED_WORKER_ID: &str = "coordination-failed-worker";
+const FAILED_WORKER_TASK: &str = "FAILURE-REPLAY-WORKER: reach the terminal worker-turn catch-all.";
+
+const INPUT_WORKER_ID: &str = "coordination-input-worker";
+const INPUT_WORKER_TASK: &str = "INPUT-WORKER: request the exact human answer.";
+const INPUT_QUESTION: &str = "Which ledger should I reconcile?";
+const INPUT_ANSWER: &str = "Reconcile ledger-seven.";
+const INPUT_COMPLETED: &str = "INPUT-WORKER-COMPLETED";
+
+const WAIT_WORKER_ID: &str = "coordination-explicit-wait-worker";
+const WAIT_WORKER_TASK: &str = "WAIT-WORKER: run the held wait effect.";
+const WAIT_CAPABILITY: &str = "wait_worker_probe";
+const WAIT_CAPABILITY_OUTPUT: &str = "WAIT-WORKER-DONE";
+const WAIT_REQUEST: &str = "Wait explicitly for the registered coordination worker.";
+const WAIT_WORKER_FINAL: &str = "The explicit worker completed its held wait effect.";
+const WAIT_FINAL: &str = "The explicit worker wait returned exactly once.";
+
+const LIVENESS_WORKER_ID: &str = "coordination-liveness-worker";
+const LIVENESS_WORKER_TASK: &str = "LIVENESS-WORKER: remain held at the heartbeat probe.";
+const LIVENESS_CAPABILITY: &str = "liveness_worker_probe";
+const LIVENESS_CAPABILITY_OUTPUT: &str = "LIVENESS-WORKER-DONE";
+const LIVENESS_STALE_MS: u64 = 2_000;
+const HEALTHY_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(250);
+const HEALTHY_HEARTBEATS: usize = 17;
+
+fn tool_reference(tool_name: &str) -> String {
+    moa_hands::mcp_tool_reference(MCP_SERVER, tool_name)
 }
 
-fn recovery_script() -> serde_json::Value {
-    let worker_completions = RECOVERY_WORKERS.iter().map(|(_, _, result)| {
+fn worker_id(scenario: &str, ordinal: usize) -> String {
+    format!("coordination-{scenario}-{ordinal}")
+}
+
+fn success_tool(tool_name: &str, output: &str) -> FixtureCapabilityTool {
+    FixtureCapabilityTool {
+        name: tool_name.to_string(),
+        description: format!("Hold and release the deterministic {tool_name} effect"),
+        input_schema: json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["worker"],
+            "properties": { "worker": { "type": "string" } }
+        }),
+        item_key_pointer: None,
+        idempotent: true,
+        outcomes: vec![FixtureCapabilityOutcome::Success {
+            output: json!({ "result": output }),
+        }],
+    }
+}
+
+fn parent_prime_script_responses() -> [Value; 2] {
+    [
         json!({
-            "match": result,
-            "completion": { "content": format!("Worker retained {result}."), "tool_calls": [] }
+            "completion": {
+                "content": r#"{"label":"respond","strategy":null,"rationale":"The priming turn needs one direct response.","confidence_bps":10000,"missing_inputs":[]}"#,
+                "tool_calls": []
+            }
+        }),
+        json!({
+            "completion": { "content": PARENT_PRIME_RESPONSE, "tool_calls": [] }
+        }),
+    ]
+}
+
+fn fan_in_script() -> Value {
+    let coordinator_resume = std::iter::once(json!({
+        "match": "fan_in_settled",
+        "completion": { "content": FAN_IN_RESUME_RESPONSE, "tool_calls": [] }
+    }));
+    let completions = FAN_IN_WORKERS.iter().map(|(_, _, output)| {
+        json!({
+            "match": output,
+            "completion": { "content": format!("retained {output}"), "tool_calls": [] }
         })
     });
-    let worker_calls = RECOVERY_WORKERS.iter().map(|(task, tool_name, _)| {
+    let tool_calls = FAN_IN_WORKERS.iter().map(|(task, tool_name, _)| {
         json!({
             "match": task,
             "completion": {
                 "content": "",
                 "tool_calls": [{
-                    "name": recovery_tool_reference(tool_name),
+                    "name": tool_reference(tool_name),
                     "id": format!("{tool_name}-call"),
                     "input": { "worker": tool_name }
                 }]
             }
         })
     });
-    let spawn_calls = RECOVERY_WORKERS
-        .iter()
-        .map(|(task, tool_name, _)| {
-            json!({
-                "name": "spawn_worker",
-                "id": format!("spawn-{tool_name}"),
-                "input": {
-                    "task": task,
-                    "tool_subset": [recovery_tool_reference(tool_name)],
-                    "budget_tokens": 1_200,
-                    "max_turns": 2
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut keyed = worker_completions.chain(worker_calls).collect::<Vec<_>>();
-    keyed.extend([
-        json!({
-            "match": "Spawned worker",
-            "completion": { "content": "All recovery workers were dispatched.", "tool_calls": [] }
-        }),
-        json!({
-            "match": RECOVERY_CLASSIFIER_PROMPT,
-            "completion": {
-                "content": r#"{"label":"execute","strategy":"inline","rationale":"The bounded work should run in parallel conversational workers.","confidence_bps":10000,"missing_inputs":[]}"#,
-                "tool_calls": []
-            }
-        }),
-        json!({
-            "match": RECOVERY_REQUEST,
-            "completion": { "content": "", "tool_calls": spawn_calls }
-        }),
-    ]);
     json!({
-        "default": { "completion": { "content": "unexpected recovery fallback", "tool_calls": [] } },
-        "keyed": keyed
+        "default": {
+            "completion": { "content": FAN_IN_RESUME_RESPONSE, "tool_calls": [] }
+        },
+        "responses": parent_prime_script_responses(),
+        "keyed": coordinator_resume
+            .chain(completions)
+            .chain(tool_calls)
+            .collect::<Vec<_>>()
     })
 }
 
-fn recovery_capability_options() -> FixtureCapabilityOptions {
+fn fan_in_options() -> FixtureCapabilityOptions {
     FixtureCapabilityOptions {
-        tools: RECOVERY_WORKERS
+        tools: FAN_IN_WORKERS
             .iter()
-            .map(|(_, tool_name, result)| FixtureCapabilityTool {
-                name: (*tool_name).to_string(),
-                description: format!("Block and release the deterministic {tool_name} effect"),
-                input_schema: json!({
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["worker"],
-                    "properties": { "worker": { "type": "string" } }
-                }),
-                item_key_pointer: None,
-                idempotent: true,
-                outcomes: vec![FixtureCapabilityOutcome::Success {
-                    output: json!({ "result": result }),
-                }],
-            })
+            .map(|(_, tool_name, output)| success_tool(tool_name, output))
             .collect(),
         orchestrator_env: vec![("RUST_LOG".to_string(), "error".to_string())],
     }
 }
 
-async fn seed_recovery_allow_rules(
+fn failure_script() -> Value {
+    json!({
+        "default": {
+            "completion": { "content": "Failure resume observed.", "tool_calls": [] }
+        },
+        "responses": parent_prime_script_responses(),
+        "keyed": [
+            {
+                "match": "<child_signal kind=\"failed\"",
+                "completion": { "content": "Failure resume observed.", "tool_calls": [] }
+            },
+            {
+                "match": FAILED_WORKER_TASK,
+                "completion": {
+                    "content": "unreachable",
+                    "tool_calls": [],
+                    "fault": { "fail_first_n": 100, "status": 500 }
+                }
+            }
+        ]
+    })
+}
+
+fn input_script() -> Value {
+    json!({
+        "default": {
+            "completion": { "content": "The worker needs a human answer.", "tool_calls": [] }
+        },
+        "responses": parent_prime_script_responses(),
+        "keyed": [
+            {
+                "match": INPUT_ANSWER,
+                "completion": { "content": INPUT_COMPLETED, "tool_calls": [] }
+            },
+            {
+                "match": INPUT_WORKER_TASK,
+                "completion": {
+                    "content": "",
+                    "tool_calls": [{
+                        "name": "request_input",
+                        "id": "coordination-input-request",
+                        "input": { "question": INPUT_QUESTION, "audience": "user" }
+                    }]
+                }
+            }
+        ]
+    })
+}
+
+fn wait_script() -> Value {
+    json!({
+        "default": { "completion": { "content": "unexpected wait fallback", "tool_calls": [] } },
+        "keyed": [
+            {
+                "match": WAIT_WORKER_FINAL,
+                "completion": { "content": WAIT_FINAL, "tool_calls": [] }
+            },
+            {
+                "match": WAIT_CAPABILITY_OUTPUT,
+                "completion": { "content": WAIT_WORKER_FINAL, "tool_calls": [] }
+            },
+            {
+                "match": WAIT_WORKER_TASK,
+                "completion": {
+                    "content": "",
+                    "tool_calls": [{
+                        "name": tool_reference(WAIT_CAPABILITY),
+                        "id": "wait-worker-probe-call",
+                        "input": { "worker": WAIT_WORKER_ID }
+                    }]
+                }
+            },
+            {
+                "match": CLASSIFIER_PROMPT,
+                "completion": {
+                    "content": r#"{"label":"execute","strategy":"inline","rationale":"The turn explicitly waits for an existing worker.","confidence_bps":10000,"missing_inputs":[]}"#,
+                    "tool_calls": []
+                }
+            },
+            {
+                "match": WAIT_REQUEST,
+                "completion": {
+                    "content": "",
+                    "tool_calls": [{
+                        "name": "wait_worker",
+                        "id": "explicit-wait-call",
+                        "input": { "worker_id": WAIT_WORKER_ID, "timeout_ms": 90000 }
+                    }]
+                }
+            }
+        ]
+    })
+}
+
+fn wait_options() -> FixtureCapabilityOptions {
+    FixtureCapabilityOptions {
+        tools: vec![success_tool(WAIT_CAPABILITY, WAIT_CAPABILITY_OUTPUT)],
+        orchestrator_env: vec![("RUST_LOG".to_string(), "error".to_string())],
+    }
+}
+
+fn liveness_script() -> Value {
+    json!({
+        "default": {
+            "completion": { "content": "Stale worker resume observed.", "tool_calls": [] }
+        },
+        "responses": parent_prime_script_responses(),
+        "keyed": [{
+            "match": LIVENESS_WORKER_TASK,
+            "completion": {
+                "content": "",
+                "tool_calls": [{
+                    "name": tool_reference(LIVENESS_CAPABILITY),
+                    "id": "liveness-worker-probe-call",
+                    "input": { "worker": LIVENESS_WORKER_ID }
+                }]
+            }
+        }]
+    })
+}
+
+fn liveness_options() -> FixtureCapabilityOptions {
+    FixtureCapabilityOptions {
+        tools: vec![success_tool(
+            LIVENESS_CAPABILITY,
+            LIVENESS_CAPABILITY_OUTPUT,
+        )],
+        orchestrator_env: vec![
+            ("RUST_LOG".to_string(), "error".to_string()),
+            (
+                "MOA_SESSION_LIMITS_WORKER_HEARTBEAT_STALE_MS".to_string(),
+                LIVENESS_STALE_MS.to_string(),
+            ),
+        ],
+    }
+}
+
+async fn allow_tools(
     fixture: &OrchestratorTestFixture,
     client: &TestApiClient,
-    tenant_id: TenantId,
+    session_id: SessionId,
+    tool_names: impl IntoIterator<Item = &'static str>,
 ) -> Result<()> {
-    fixture
-        .grant_default_tenant_admin(tenant_id)
+    let meta = client
+        .get_session(session_id)
         .await
-        .context("grant tenant admin before recovery policy setup")?;
-    for (_, tool_name, _) in RECOVERY_WORKERS {
+        .context("load session before policy setup")?;
+    fixture
+        .grant_default_tenant_admin(meta.tenant_id)
+        .await
+        .context("grant fixture identity tenant admin")?;
+    for tool_name in tool_names {
         client
             .post_void(
                 "/ActionPolicy/upsert_rule",
                 &UpsertActionPolicyRuleRequest {
-                    tenant_id,
+                    tenant_id: meta.tenant_id,
                     contact_id: None,
-                    tool_name: recovery_tool_reference(tool_name),
+                    tool_name: tool_reference(tool_name),
                     pattern: "*".to_string(),
                     effect: ActionPolicyEffect::Allow,
-                    reason: Some("deterministic recovery matrix fixture".to_string()),
+                    reason: Some("deterministic worker-coordination fixture".to_string()),
                 },
             )
             .await
-            .with_context(|| format!("allow recovery fixture tool {tool_name}"))?;
+            .with_context(|| format!("allow coordination fixture tool {tool_name}"))?;
     }
     Ok(())
 }
 
-async fn fixture_progress(
+/// Runs one authenticated production turn to leave the Session idle with an owning identity.
+async fn establish_idle_parent(client: &TestApiClient, session_id: SessionId) -> Result<()> {
+    let started = client
+        .session(session_id.to_string())
+        .start_turn(start_turn_request(PARENT_PRIME_REQUEST), None)
+        .await
+        .context("start parent ownership priming turn")?;
+    let turn_id = started
+        .turn_id
+        .context("idle parent should admit its ownership priming turn")?;
+    let outcome = client
+        .session(session_id.to_string())
+        .await_turn_outcome(&turn_id, SCENARIO_TIMEOUT, POLL_INTERVAL)
+        .await
+        .context("await parent ownership priming turn")?;
+    ensure!(
+        outcome.kind == moa_wire::turn::TurnOutcomeKind::Completed,
+        "parent ownership priming turn did not complete: {:?}",
+        outcome.kind
+    );
+    ensure!(
+        outcome.message == PARENT_PRIME_RESPONSE,
+        "parent ownership priming turn returned unexpected response: {}",
+        outcome.message
+    );
+    Ok(())
+}
+
+/// Registers and starts one real worker with a caller-chosen stable object key.
+async fn start_worker(
     client: &TestApiClient,
     session_id: SessionId,
-) -> Result<SessionProgress> {
+    worker_id: &str,
+    task: &str,
+    tool_subset: Vec<String>,
+) -> Result<()> {
+    let meta = client
+        .get_session(session_id)
+        .await
+        .context("load session before worker start")?;
+    let identity = client
+        .identity()
+        .cloned()
+        .context("fixture client must carry an identity")?;
+
     client
-        .post_call(
-            &format!("/Session/{session_id}/progress"),
-            &SessionProgressRequest {
-                event_range: EventRange::all(),
+        .post_void(
+            &format!("/Session/{session_id}/register_child"),
+            &WorkerChildRef {
+                id: worker_id.to_string(),
+                task_hash: format!("coordination:{worker_id}"),
+                budget_tokens: 4_096,
+                terminal: None,
             },
         )
         .await
-        .context("read recovery session progress")
+        .with_context(|| format!("register worker {worker_id}"))?;
+
+    client
+        .post_void(
+            &format!("/Worker/{worker_id}/post_message"),
+            &WorkerMessage::InitialTask(Box::new(WorkerInitialTask {
+                task: task.to_string(),
+                identity: identity.clone(),
+                tool_subset,
+                budget_tokens: 4_096,
+                max_turns: Some(2),
+                parent_session: session_id,
+                depth: 1,
+                tenant_id: meta.tenant_id,
+                user_id: UserId::new(format!("identity:{}", identity.id)),
+                model: meta.model,
+                trusted_sandbox_manifest: None,
+            })),
+        )
+        .await
+        .with_context(|| format!("start real worker {worker_id}"))?;
+    Ok(())
 }
 
-async fn await_worker_partition(
+async fn session_events(client: &TestApiClient, session_id: SessionId) -> Result<Vec<EventRecord>> {
+    client
+        .get_events(session_id, EventRange::all())
+        .await
+        .context("load worker-coordination session events")
+}
+
+async fn await_events(
     client: &TestApiClient,
     session_id: SessionId,
-    completed: usize,
-    running: usize,
     timeout: Duration,
-) -> Result<SessionProgress> {
-    let deadline = tokio::time::Instant::now() + timeout;
+    predicate: impl Fn(&[EventRecord]) -> bool,
+) -> Result<Vec<EventRecord>> {
+    let deadline = Instant::now() + timeout;
     loop {
-        let progress = fixture_progress(client, session_id).await?;
-        let completed_count = progress
-            .child_progress
-            .iter()
-            .filter(|worker| worker.state == WorkerState::Completed)
-            .count();
-        let running_count = progress
-            .child_progress
-            .iter()
-            .filter(|worker| worker.state == WorkerState::Running)
-            .count();
-        if progress.child_progress.len() == RECOVERY_WORKERS.len()
-            && completed_count == completed
-            && running_count == running
-        {
-            return Ok(progress);
+        let events = session_events(client, session_id).await?;
+        if predicate(&events) {
+            return Ok(events);
         }
-        if tokio::time::Instant::now() >= deadline {
-            bail!(
-                "worker partition did not reach completed={completed}, running={running} within {timeout:?}; last summaries: {:?}",
-                progress.child_progress
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        ensure!(
+            Instant::now() < deadline,
+            "session {session_id} did not reach the expected coordination boundary within {timeout:?}; events={events:#?}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
+fn worker_status_count(events: &[EventRecord], worker_id: &str, state: WorkerState) -> usize {
+    events
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::WorkerStatusChanged {
+                    worker_id: recorded,
+                    to,
+                    ..
+                } if recorded == worker_id && *to == state
+            )
+        })
+        .count()
+}
+
+fn worker_notification_count(events: &[EventRecord], worker_id: &str, state: WorkerState) -> usize {
+    events
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::WorkerNotificationDelivered {
+                    worker_id: recorded,
+                    state: recorded_state,
+                    ..
+                } if recorded == worker_id && *recorded_state == state
+            )
+        })
+        .count()
+}
+
+fn signal_count(events: &[EventRecord], worker_id: &str, kind: ChildSignalKind) -> usize {
+    events
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::WorkerSignalReceived {
+                    worker_id: recorded,
+                    kind: recorded_kind,
+                    ..
+                } if recorded == worker_id && *recorded_kind == kind
+            )
+        })
+        .count()
+}
+
+fn parent_resume_count(events: &[EventRecord]) -> usize {
+    events
+        .iter()
+        .filter(|record| matches!(record.event, Event::WorkerParentResumeRequested { .. }))
+        .count()
+}
+
+fn event_sequence(events: &[EventRecord], predicate: impl Fn(&Event) -> bool) -> Option<u64> {
+    events
+        .iter()
+        .find(|record| predicate(&record.event))
+        .map(|record| record.sequence_num)
+}
+
+async fn child_refs(client: &TestApiClient, session_id: SessionId) -> Result<Vec<WorkerChildRef>> {
+    client
+        .post_empty_call(&format!("/Session/{session_id}/child_refs"))
+        .await
+        .context("load registered worker refs")
+}
+
 async fn await_exact_recovery_attempts(
-    controller: &moa_test_support::FixtureCapabilityController,
+    controller: &FixtureCapabilityController,
     completed_capability: &str,
     timeout: Duration,
 ) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = Instant::now() + timeout;
     loop {
         let attempts = controller.transport_attempts();
-        let counts = RECOVERY_WORKERS
+        let counts = FAN_IN_WORKERS
             .iter()
             .map(|(_, tool_name, _)| {
                 (
@@ -566,633 +536,1112 @@ async fn await_exact_recovery_attempts(
                         .count(),
                 )
             })
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let exact = counts.iter().all(|(tool_name, count)| {
-            let expected = if *tool_name == completed_capability {
-                1
-            } else {
-                2
-            };
-            *count == expected
-        });
-        let exceeded = counts.iter().any(|(tool_name, count)| {
-            let expected = if *tool_name == completed_capability {
-                1
-            } else {
-                2
-            };
-            *count > expected
-        });
-        if exceeded {
-            bail!("a recovery capability replayed more than once: {counts:?}");
+            .collect::<BTreeMap<_, _>>();
+        let expected = |tool_name: &str| usize::from(tool_name != completed_capability) + 1;
+        if counts
+            .iter()
+            .any(|(tool_name, count)| *count > expected(tool_name))
+        {
+            bail!("a fan-in capability replayed more than once: {counts:?}");
         }
-        if exact {
+        if counts
+            .iter()
+            .all(|(tool_name, count)| *count == expected(tool_name))
+        {
             return Ok(());
         }
-        if tokio::time::Instant::now() >= deadline {
-            bail!("recovery attempts did not reach the exact 1/2/2 partition: {counts:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        ensure!(
+            Instant::now() < deadline,
+            "fan-in attempts did not reach the exact 1/2/2 recovery partition: {counts:?}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
-async fn await_recovery_terminal_events(
-    client: &TestApiClient,
-    session_id: SessionId,
-    timeout: Duration,
-) -> Result<Vec<moa_core::types::events_stream::EventRecord>> {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn restate_query_rows(fixture: &OrchestratorTestFixture, query: &str) -> Result<Vec<Value>> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/query", fixture.admin_url.trim_end_matches('/'));
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let events = client
-            .get_events(session_id, EventRange::all())
+        let last_error = match client
+            .post(&url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&json!({ "query": query }))
+            .send()
             .await
-            .context("load durable worker recovery events")?;
-        let completed_changes = events
-            .iter()
-            .filter(|record| {
-                matches!(
-                    record.event,
-                    Event::WorkerStatusChanged {
-                        to: WorkerState::Completed,
-                        ..
-                    }
-                )
-            })
-            .count();
-        let completed_notifications = events
-            .iter()
-            .filter(|record| {
-                matches!(
-                    record.event,
-                    Event::WorkerNotificationDelivered {
-                        state: WorkerState::Completed,
-                        ..
-                    }
-                )
-            })
-            .count();
-        if completed_changes > RECOVERY_WORKERS.len()
-            || completed_notifications > RECOVERY_WORKERS.len()
         {
-            bail!(
-                "worker recovery emitted duplicate terminal events: changes={completed_changes}, notifications={completed_notifications}"
-            );
+            Ok(response) => {
+                let status = response.status();
+                match response.text().await {
+                    Ok(body) if status.is_success() => match serde_json::from_str::<Value>(&body) {
+                        Ok(payload) => {
+                            if let Some(rows) = payload.get("rows").and_then(Value::as_array) {
+                                return Ok(rows.clone());
+                            }
+                            format!("response omitted rows: {payload}")
+                        }
+                        Err(error) => format!("decode JSON response: {error}; body={body:?}"),
+                    },
+                    Ok(body) => format!("status {status}; body={body:?}"),
+                    Err(error) => format!("read response body: {error}"),
+                }
+            }
+            Err(error) => format!("send query: {error}"),
+        };
+        ensure!(
+            Instant::now() < deadline,
+            "Restate introspection did not become ready: {last_error}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn invocation_count(
+    fixture: &OrchestratorTestFixture,
+    service: &str,
+    key: Option<&str>,
+    handler: Option<&str>,
+) -> Result<usize> {
+    let key_filter = key
+        .map(|key| format!(" AND target_service_key = '{key}'"))
+        .unwrap_or_default();
+    let handler_filter = handler
+        .map(|handler| format!(" AND target_handler_name = '{handler}'"))
+        .unwrap_or_default();
+    restate_query_rows(
+        fixture,
+        &format!(
+            "SELECT id FROM sys_invocation WHERE target_service_name = '{service}'{key_filter}{handler_filter}"
+        ),
+    )
+    .await
+    .map(|rows| rows.len())
+}
+
+async fn await_invocation_count(
+    fixture: &OrchestratorTestFixture,
+    service: &str,
+    key: Option<&str>,
+    handler: Option<&str>,
+    expected: usize,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let observed = invocation_count(fixture, service, key, handler).await?;
+        if observed == expected {
+            return Ok(());
         }
-        if completed_changes == RECOVERY_WORKERS.len()
-            && completed_notifications == RECOVERY_WORKERS.len()
-        {
-            return Ok(events);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            bail!(
-                "worker terminal events did not settle within {timeout:?}: changes={completed_changes}, notifications={completed_notifications}"
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        ensure!(
+            observed < expected,
+            "expected {expected} {service}/{handler:?} invocations for {key:?}, observed {observed}"
+        );
+        ensure!(
+            Instant::now() < deadline,
+            "expected {expected} {service}/{handler:?} invocations for {key:?}, observed {observed}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
 #[tokio::test]
-#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
-async fn session_progress_includes_child_progress_service_e2e() -> Result<()> {
-    // Pins: Session/progress collects active child summaries around an immediate cached terminal
-    // summary, then restores registration order regardless of completion order.
-    let client = reqwest::Client::new();
-    let session = create_initialized_session(&client).await?;
-    let active_before = unique_child_id();
-    let terminal_child = unique_child_id();
-    let active_after = unique_child_id();
+#[ignore = "requires Docker for the restartable Postgres/Restate/OpenFGA/Valkey fixture"]
+async fn recovery_matrix_three_children_resume_once_after_all_settle_service_e2e() -> Result<()> {
+    // Pins: three real children straddle a hard process restart; the idle parent records no
+    // early success wake and resumes exactly once when the third terminal delivery settles the
+    // current fan-in generation. Mutation pin: removing the all-settled guard makes the
+    // pre-restart zero-resume assertion fail.
+    let fixture =
+        OrchestratorTestFixture::with_execution_fixture(fan_in_script(), fan_in_options())
+            .await
+            .context("boot fan-in recovery fixture")?;
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("three-child-fan-in").await?;
+    establish_idle_parent(test.client(), session_id).await?;
+    allow_tools(
+        &fixture,
+        test.client(),
+        session_id,
+        FAN_IN_WORKERS.iter().map(|(_, tool_name, _)| *tool_name),
+    )
+    .await?;
 
-    for (index, child_id) in [&active_before, &terminal_child, &active_after]
-        .into_iter()
+    let worker_ids = FAN_IN_WORKERS
+        .iter()
         .enumerate()
-    {
-        register_child(
-            &client,
-            &session,
-            &WorkerChildRef {
-                id: child_id.clone(),
-                task_hash: format!("task-hash-progress-{index}"),
-                budget_tokens: 4_096,
-                terminal: None,
-            },
+        .map(|(index, _)| worker_id("fan-in", index))
+        .collect::<Vec<_>>();
+    for ((task, tool_name, _), worker_id) in FAN_IN_WORKERS.iter().zip(&worker_ids) {
+        start_worker(
+            test.client(),
+            session_id,
+            worker_id,
+            task,
+            vec![tool_reference(tool_name)],
         )
         .await?;
     }
-    mark_child_terminal(
-        &client,
-        &session,
-        &MarkWorkerChildTerminalInput {
-            worker_id: terminal_child.clone(),
-            terminal: completed_terminal(&terminal_child, "child finished the research"),
-        },
-    )
-    .await?;
 
-    let progress = await_progress_matching(&client, &session, Duration::from_secs(10), |p| {
-        p.child_progress.len() == 3
-    })
-    .await?;
-
-    let ordered_worker_ids: Vec<&str> = progress
-        .child_progress
-        .iter()
-        .map(|summary| summary.worker_id.as_str())
-        .collect();
-    assert_eq!(
-        ordered_worker_ids,
-        vec![
-            active_before.as_str(),
-            terminal_child.as_str(),
-            active_after.as_str(),
-        ],
-        "concurrent child-progress completion must be restored to registration order"
-    );
-    let summary = progress
-        .child_progress
-        .iter()
-        .find(|summary| summary.worker_id == terminal_child)
-        .with_context(|| format!("child_progress should include {terminal_child}"))?;
-    assert_eq!(summary.state, WorkerState::Completed);
-    assert_eq!(
-        summary.last_summary.as_deref(),
-        Some("child finished the research"),
-        "terminal child summary should carry the child's output: {summary:?}"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
-async fn coordinator_only_cancel_leaves_child_active_service_e2e() -> Result<()> {
-    // Pins: Session/cancel(CoordinatorOnly) cancels the coordinator turn only — it does NOT
-    // cascade to registered children. The child registry stays intact and the child VO is
-    // never told to cancel (its status stays Uninitialized, never Cancelled). This is the
-    // deliberate contrast to the TaskTree cascade test below.
-    let client = reqwest::Client::new();
-    let session = create_initialized_session(&client).await?;
-    let child_id = unique_child_id();
-
-    register_child(
-        &client,
-        &session,
-        &WorkerChildRef {
-            id: child_id.clone(),
-            task_hash: "task-hash-coordinator-only".to_string(),
-            budget_tokens: 4_096,
-            terminal: None,
-        },
-    )
-    .await?;
-
-    cancel_session(&client, &session, CancelScope::CoordinatorOnly).await?;
-
-    let refs = child_refs(&client, &session).await?;
-    let child = refs
-        .iter()
-        .find(|child| child.id == child_id)
-        .with_context(|| format!("CoordinatorOnly cancel must keep child {child_id} registered"))?;
-    assert!(
-        child.terminal.is_none(),
-        "CoordinatorOnly cancel must not terminate the child: {child:?}"
-    );
-
-    // The child VO received no cancel: an uninitialized child reports Uninitialized, never
-    // Cancelled. (No background path cancels a child, so this single read is deterministic.)
-    let status = worker_status(&client, &child_id).await?;
-    assert_eq!(
-        status.state,
-        WorkerState::Uninitialized,
-        "CoordinatorOnly cancel must not cascade to the child VO: {status:?}"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
-async fn task_tree_cancel_cancels_child_service_e2e() -> Result<()> {
-    // Pins: Session/cancel(TaskTree) cascades cancellation to every registered child. The
-    // cascade is a fire-and-forget VO call, so we poll the child VO until it durably reports
-    // Cancelled.
-    let client = reqwest::Client::new();
-    let session = create_initialized_session(&client).await?;
-    let child_id = unique_child_id();
-
-    register_child(
-        &client,
-        &session,
-        &WorkerChildRef {
-            id: child_id.clone(),
-            task_hash: "task-hash-task-tree".to_string(),
-            budget_tokens: 4_096,
-            terminal: None,
-        },
-    )
-    .await?;
-
-    cancel_session(&client, &session, CancelScope::TaskTree).await?;
-
-    let status = await_worker_state(
-        &client,
-        &child_id,
-        WorkerState::Cancelled,
-        Duration::from_secs(10),
-    )
-    .await?;
-    assert_eq!(status.state, WorkerState::Cancelled);
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
-async fn duplicate_child_signal_is_idempotent_service_e2e() -> Result<()> {
-    // Pins: delivering the same control-plane signal twice (same signal_id) appends exactly
-    // one durable WorkerSignalReceived event — the dedupe key (worker_signal:{id}) makes
-    // the retried delivery a no-op at the event log. A Finding under a Never resume policy
-    // arms no coordinator resume, so the only signal-derived event is the deduped one.
-    let client = reqwest::Client::new();
-    let session = create_initialized_session(&client).await?;
-    let child_id = unique_child_id();
-    let signal_id = AgentSignalId::new();
-
-    register_child(
-        &client,
-        &session,
-        &WorkerChildRef {
-            id: child_id.clone(),
-            task_hash: "task-hash-signal-dedupe".to_string(),
-            budget_tokens: 4_096,
-            terminal: None,
-        },
-    )
-    .await?;
-
-    let signal = WorkerSignal {
-        signal_id,
-        worker_id: child_id,
-        parent_session: session.session_id,
-        kind: ChildSignalKind::Finding,
-        severity: SignalSeverity::Info,
-        summary: "intermediate finding worth recording".to_string(),
-        payload: serde_json::Value::Null,
-        created_at: moa_test_support::fixtures::pg_now(),
-        resume_policy: ParentResumePolicy::Never,
-        input_request: None,
-    };
-
-    // Same signal delivered twice — the second is a retried delivery.
-    record_child_signal(&client, &session, &signal).await?;
-    record_child_signal(&client, &session, &signal).await?;
-
-    let signal_id_str = signal_id.to_string();
-    let progress = await_progress_matching(&client, &session, Duration::from_secs(10), |p| {
-        count_signal_events(p, &signal_id_str) >= 1
-    })
-    .await?;
-
-    assert_eq!(
-        count_signal_events(&progress, &signal_id_str),
-        1,
-        "duplicate signal delivery must append exactly one WorkerSignalReceived event"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
-async fn terminal_child_caches_and_consumes_result_service_e2e() -> Result<()> {
-    // Pins: a child reaching terminal caches its result on the parent (the existing terminal
-    // path), and the cached result is consumable exactly once before the child ref is dropped
-    // from the active registry.
-    //
-    // NOTE: this asserts the durable parent-side cache/consume semantics. The accompanying
-    // WorkerStatusChanged / WorkerNotificationDelivered events are emitted by the live
-    // Worker terminal-delivery path (the child workflow), which the deterministic mock
-    // provider cannot drive end-to-end (it never spawns a real child turn), so they are out
-    // of reach for this harness and are not asserted here.
-    let client = reqwest::Client::new();
-    let session = create_initialized_session(&client).await?;
-    let child_id = unique_child_id();
-
-    register_child(
-        &client,
-        &session,
-        &WorkerChildRef {
-            id: child_id.clone(),
-            task_hash: "task-hash-terminal".to_string(),
-            budget_tokens: 4_096,
-            terminal: None,
-        },
-    )
-    .await?;
-    mark_child_terminal(
-        &client,
-        &session,
-        &MarkWorkerChildTerminalInput {
-            worker_id: child_id.clone(),
-            terminal: completed_terminal(&child_id, "child completed the delegated work"),
-        },
-    )
-    .await?;
-
-    let first = consume_child_result(&client, &session, &child_id).await?;
-    let terminal = first
-        .terminal
-        .context("first consume should return the cached terminal result")?;
-    assert_eq!(terminal.state, WorkerState::Completed);
-    assert_eq!(terminal.result.output, "child completed the delegated work");
-    assert!(terminal.result.success);
-
-    // Consuming a cached terminal is exactly-once: a second consume yields nothing.
-    let second = consume_child_result(&client, &session, &child_id).await?;
-    assert!(
-        second.terminal.is_none(),
-        "terminal result must be consumed exactly once: {second:?}"
-    );
-
-    // Consuming the terminal removes the child from the active registry.
-    let refs = child_refs(&client, &session).await?;
-    assert!(
-        refs.iter().all(|child| child.id != child_id),
-        "consumed terminal child must be dropped from child_refs: {refs:?}"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
-async fn unregistered_worker_signal_records_no_event_service_e2e() -> Result<()> {
-    // Pins (signal-ownership negative): a control-plane signal whose parent_session matches this
-    // session but whose worker is NOT a registered child appends ZERO WorkerSignalReceived events.
-    // The handler treats it as a success no-op (a worker that raced its own remove_child/self-clean),
-    // never a 403 that would permanently drop a legitimate late signal — but it injects nothing into
-    // the durable log. A second, registered "control" signal delivered afterward proves the log was
-    // observed, so the zero-count assertion is not merely a not-yet-landed event.
-    let client = reqwest::Client::new();
-    let session = create_initialized_session(&client).await?;
-
-    // The session owns one child; the negative signal targets a DIFFERENT, unregistered worker.
-    let registered = unique_child_id();
-    register_child(
-        &client,
-        &session,
-        &WorkerChildRef {
-            id: registered.clone(),
-            task_hash: "task-hash-owned".to_string(),
-            budget_tokens: 4_096,
-            terminal: None,
-        },
-    )
-    .await?;
-
-    let unregistered_signal_id = AgentSignalId::new();
-    let unregistered_signal = WorkerSignal {
-        signal_id: unregistered_signal_id,
-        worker_id: unique_child_id(),
-        parent_session: session.session_id,
-        kind: ChildSignalKind::Blocked,
-        severity: SignalSeverity::Warning,
-        summary: "signal from a worker not registered on this session".to_string(),
-        payload: serde_json::Value::Null,
-        created_at: moa_test_support::fixtures::pg_now(),
-        resume_policy: ParentResumePolicy::Never,
-        input_request: None,
-    };
-    // The handler returns success (a no-op), not an error, for a parent-matching unregistered worker.
-    record_child_signal(&client, &session, &unregistered_signal).await?;
-
-    // Control signal for the registered child, delivered AFTER the unregistered one. Session VO
-    // handlers run serially per key, so by the time this control event is durable the earlier
-    // unregistered signal has already been fully processed — if it recorded an event, it would be
-    // visible now too.
-    let control_signal_id = AgentSignalId::new();
-    let control_signal = WorkerSignal {
-        signal_id: control_signal_id,
-        worker_id: registered,
-        parent_session: session.session_id,
-        kind: ChildSignalKind::Finding,
-        severity: SignalSeverity::Info,
-        summary: "registered control finding".to_string(),
-        payload: serde_json::Value::Null,
-        created_at: moa_test_support::fixtures::pg_now(),
-        resume_policy: ParentResumePolicy::Never,
-        input_request: None,
-    };
-    record_child_signal(&client, &session, &control_signal).await?;
-
-    let control_id_str = control_signal_id.to_string();
-    let progress = await_progress_matching(&client, &session, Duration::from_secs(10), |p| {
-        count_signal_events(p, &control_id_str) >= 1
-    })
-    .await?;
-
-    let unregistered_id_str = unregistered_signal_id.to_string();
-    assert_eq!(
-        count_signal_events(&progress, &unregistered_id_str),
-        0,
-        "an unregistered worker's signal must append no WorkerSignalReceived event"
-    );
-    assert_eq!(
-        count_signal_events(&progress, &control_id_str),
-        1,
-        "the registered control signal is recorded, proving the event log was observed"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires Docker for the restartable Restate/Postgres/OpenFGA/Valkey fixture"]
-async fn recovery_matrix_three_workers_retain_and_resume_once_service_e2e() -> Result<()> {
-    // Pins: after one of three conversational workers commits its terminal result and two
-    // siblings remain blocked on exact MCP effects, a hard orchestrator restart retains the
-    // completed child and resumes each unfinished child exactly once without duplicating any
-    // upstream effect, tool result, or terminal notification.
-    let fixture = OrchestratorTestFixture::with_execution_fixture(
-        recovery_script(),
-        recovery_capability_options(),
-    )
-    .await
-    .context("boot restartable worker recovery fixture")?;
-    let test = fixture.isolated().await;
-    let session_id = test.create_session("worker-fan-in-recovery").await?;
-    let session = test.client().get_session(session_id).await?;
-    seed_recovery_allow_rules(&fixture, test.client(), session.tenant_id).await?;
-
-    let started = test
-        .client()
-        .session(session_id.to_string())
-        .start_turn(start_turn_request(RECOVERY_REQUEST), None)
-        .await
-        .context("start three-worker recovery turn")?;
-    let turn_id = started
-        .turn_id
-        .context("idle recovery session should start its turn immediately")?;
     let controller = fixture
         .fixture_capability()
-        .context("worker recovery fixture omitted its capability controller")?;
+        .context("fan-in fixture omitted capability controller")?;
     let calls = controller
-        .wait_for_calls(RECOVERY_WORKERS.len(), Duration::from_secs(90))
+        .wait_for_calls(FAN_IN_WORKERS.len(), SCENARIO_TIMEOUT)
         .await
-        .context("wait for all three workers at their MCP barriers")?;
+        .context("wait for all fan-in workers at their exact effect barriers")?;
+    assert_eq!(calls.len(), FAN_IN_WORKERS.len());
     assert_eq!(
-        calls.len(),
-        RECOVERY_WORKERS.len(),
-        "every conversational worker must reach one unique logical effect"
+        calls
+            .iter()
+            .map(|call| call.capability.as_str())
+            .collect::<BTreeSet<_>>(),
+        FAN_IN_WORKERS
+            .iter()
+            .map(|(_, tool_name, _)| *tool_name)
+            .collect::<BTreeSet<_>>()
     );
-    let observed_capabilities = calls
-        .iter()
-        .map(|call| call.capability.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    let expected_capabilities = RECOVERY_WORKERS
-        .iter()
-        .map(|(_, tool_name, _)| *tool_name)
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(observed_capabilities, expected_capabilities);
 
     let completed_capability = calls[0].capability.clone();
     controller.release(1);
-    let before_restart =
-        await_worker_partition(test.client(), session_id, 1, 2, Duration::from_secs(90)).await?;
-    let completed_worker_id = before_restart
-        .child_progress
-        .iter()
-        .find(|worker| worker.state == WorkerState::Completed)
-        .map(|worker| worker.worker_id.clone())
-        .context("one worker should be durably completed before restart")?;
+    let before_restart = await_events(test.client(), session_id, SCENARIO_TIMEOUT, |events| {
+        worker_ids
+            .iter()
+            .map(|worker_id| worker_notification_count(events, worker_id, WorkerState::Completed))
+            .sum::<usize>()
+            == 1
+    })
+    .await?;
+    assert_eq!(
+        parent_resume_count(&before_restart),
+        0,
+        "N-1 settled children must not resume the idle parent"
+    );
+    assert_eq!(
+        before_restart
+            .iter()
+            .filter(|record| matches!(
+                record.event,
+                Event::WorkerSignalReceived {
+                    kind: ChildSignalKind::FanInSettled,
+                    ..
+                }
+            ))
+            .count(),
+        0,
+        "fan-in settlement cannot be published before all registered children settle"
+    );
 
     fixture
         .hard_crash_and_restart_orchestrator()
         .await
-        .context("hard crash orchestrator at the one-completed/two-blocked partition")?;
-
-    let after_restart =
-        await_worker_partition(test.client(), session_id, 1, 2, Duration::from_secs(90)).await?;
-    assert!(
-        after_restart.child_progress.iter().any(|worker| {
-            worker.worker_id == completed_worker_id && worker.state == WorkerState::Completed
-        }),
-        "the exact completed worker must remain completed after the hard restart: {:?}",
-        after_restart.child_progress
-    );
-
-    await_exact_recovery_attempts(controller, &completed_capability, Duration::from_secs(90))
-        .await?;
+        .context("hard restart at the one-complete/two-running fan-in partition")?;
+    await_exact_recovery_attempts(controller, &completed_capability, SCENARIO_TIMEOUT).await?;
     controller.release(2);
 
-    let terminal = await_worker_partition(
-        test.client(),
-        session_id,
-        RECOVERY_WORKERS.len(),
-        0,
-        Duration::from_secs(90),
-    )
+    let events = await_events(test.client(), session_id, SCENARIO_TIMEOUT, |events| {
+        worker_ids.iter().all(|worker_id| {
+            worker_notification_count(events, worker_id, WorkerState::Completed) == 1
+        }) && parent_resume_count(events) == 1
+            && events.iter().any(|record| {
+                matches!(
+                    &record.event,
+                    Event::BrainResponse { text, .. } if text == FAN_IN_RESUME_RESPONSE
+                )
+            })
+    })
     .await?;
-    assert_eq!(
-        terminal
-            .child_progress
-            .iter()
-            .filter(|worker| worker.state == WorkerState::Completed)
-            .count(),
-        RECOVERY_WORKERS.len()
-    );
 
-    let outcome = test
-        .client()
-        .session(session_id.to_string())
-        .await_turn_outcome(
-            &turn_id,
-            Duration::from_secs(90),
-            Duration::from_millis(100),
-        )
-        .await
-        .context("await retained coordinator turn outcome")?;
-    assert_eq!(outcome.kind, TurnOutcomeKind::Completed);
-
-    let events =
-        await_recovery_terminal_events(test.client(), session_id, Duration::from_secs(90)).await?;
-    let spawned = events
+    for worker_id in &worker_ids {
+        assert_eq!(
+            worker_status_count(&events, worker_id, WorkerState::Completed),
+            1,
+            "worker {worker_id} must record exactly one completed transition"
+        );
+        assert_eq!(
+            worker_notification_count(&events, worker_id, WorkerState::Completed),
+            1,
+            "worker {worker_id} must deliver exactly one terminal notification"
+        );
+    }
+    let fan_in_signals = events
         .iter()
         .filter_map(|record| match &record.event {
-            Event::WorkerSpawned {
-                worker_id, task, ..
-            } => Some((worker_id.clone(), task.as_str())),
+            Event::WorkerSignalReceived {
+                signal_id,
+                kind: ChildSignalKind::FanInSettled,
+                ..
+            } => Some(*signal_id),
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        spawned.len(),
-        RECOVERY_WORKERS.len(),
-        "the coordinator must spawn exactly three workers"
-    );
-    let completed_task = RECOVERY_WORKERS
-        .iter()
-        .find(|(_, tool_name, _)| *tool_name == completed_capability)
-        .map(|(task, _, _)| *task)
-        .context("completed capability must belong to one scripted worker")?;
-    assert!(
-        spawned
-            .iter()
-            .any(|(worker_id, task)| worker_id == &completed_worker_id && *task == completed_task),
-        "the retained completed worker must be the child whose effect was released first"
-    );
-
-    let terminal_changes = events
+    let resumes = events
         .iter()
         .filter_map(|record| match &record.event {
+            Event::WorkerParentResumeRequested { signal_id, .. } => Some(*signal_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fan_in_signals.len(), 1, "fan-in emits one settled signal");
+    assert_eq!(
+        resumes, fan_in_signals,
+        "the one resume consumes the exact fan-in signal"
+    );
+    let last_notification_seq = events
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.event,
+                Event::WorkerNotificationDelivered {
+                    state: WorkerState::Completed,
+                    ..
+                }
+            )
+        })
+        .map(|record| record.sequence_num)
+        .max()
+        .context("completed fan-in omitted terminal notifications")?;
+    let fan_in_signal_seq = event_sequence(&events, |event| {
+        matches!(
+            event,
+            Event::WorkerSignalReceived {
+                kind: ChildSignalKind::FanInSettled,
+                ..
+            }
+        )
+    })
+    .context("completed fan-in omitted its settled signal")?;
+    let resume_seq = event_sequence(&events, |event| {
+        matches!(event, Event::WorkerParentResumeRequested { .. })
+    })
+    .context("completed fan-in omitted its parent resume")?;
+    let response_seq = event_sequence(&events, |event| {
+        matches!(
+            event,
+            Event::BrainResponse { text, .. } if text == FAN_IN_RESUME_RESPONSE
+        )
+    })
+    .context("completed fan-in omitted its coordinator response")?;
+    assert!(
+        last_notification_seq < fan_in_signal_seq
+            && fan_in_signal_seq < resume_seq
+            && resume_seq < response_seq,
+        "fan-in events must remain terminal facts -> settled signal -> resume -> response"
+    );
+    assert_eq!(controller.effect_count(), FAN_IN_WORKERS.len());
+    assert_eq!(controller.request_count(), FAN_IN_WORKERS.len() + 2);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker for the restartable Postgres/Restate/OpenFGA/Valkey fixture"]
+async fn long_successive_fan_in_generations_remain_exactly_once_service_e2e() -> Result<()> {
+    // Pins: a long-lived idle parent can accept five successive three-child generations without
+    // accumulating a stale settlement, duplicate terminal delivery, or duplicate parent resume.
+    // Each generation must become visible in terminal facts before its one settled signal, and
+    // the resumed coordinator turn must finish before the next generation is registered.
+    let fixture =
+        OrchestratorTestFixture::with_execution_fixture(fan_in_script(), fan_in_options())
+            .await
+            .context("boot long fan-in fixture")?;
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("long-successive-fan-in").await?;
+    establish_idle_parent(test.client(), session_id).await?;
+    allow_tools(
+        &fixture,
+        test.client(),
+        session_id,
+        FAN_IN_WORKERS.iter().map(|(_, tool_name, _)| *tool_name),
+    )
+    .await?;
+
+    let controller = fixture
+        .fixture_capability()
+        .context("long fan-in fixture omitted capability controller")?;
+    let mut wave_worker_ids = Vec::with_capacity(LONG_FAN_IN_WAVES);
+
+    for wave in 0..LONG_FAN_IN_WAVES {
+        let worker_ids = FAN_IN_WORKERS
+            .iter()
+            .enumerate()
+            .map(|(ordinal, _)| worker_id(&format!("long-wave-{wave}"), ordinal))
+            .collect::<Vec<_>>();
+        for ((task, tool_name, _), worker_id) in FAN_IN_WORKERS.iter().zip(&worker_ids) {
+            start_worker(
+                test.client(),
+                session_id,
+                worker_id,
+                task,
+                vec![tool_reference(tool_name)],
+            )
+            .await?;
+        }
+
+        let expected_calls = (wave + 1) * FAN_IN_WORKERS.len();
+        let calls = controller
+            .wait_for_calls(expected_calls, SCENARIO_TIMEOUT)
+            .await
+            .with_context(|| format!("wait for long fan-in wave {wave} effects"))?;
+        assert_eq!(
+            calls.len(),
+            expected_calls,
+            "wave {wave} must add exactly three logical effects"
+        );
+
+        let before_release = session_events(test.client(), session_id).await?;
+        assert_eq!(
+            parent_resume_count(&before_release),
+            wave,
+            "wave {wave} cannot resume before all of its effects are released"
+        );
+        assert_eq!(
+            before_release
+                .iter()
+                .filter(|record| matches!(
+                    record.event,
+                    Event::WorkerSignalReceived {
+                        kind: ChildSignalKind::FanInSettled,
+                        ..
+                    }
+                ))
+                .count(),
+            wave,
+            "wave {wave} cannot settle before all three children finish"
+        );
+
+        controller.release(FAN_IN_WORKERS.len());
+        let events = await_events(test.client(), session_id, SCENARIO_TIMEOUT, |events| {
+            worker_ids.iter().all(|worker_id| {
+                worker_notification_count(events, worker_id, WorkerState::Completed) == 1
+            }) && parent_resume_count(events) == wave + 1
+                && events
+                    .iter()
+                    .filter(|record| {
+                        matches!(
+                            &record.event,
+                            Event::BrainResponse { text, .. } if text == FAN_IN_RESUME_RESPONSE
+                        )
+                    })
+                    .count()
+                    == wave + 1
+        })
+        .await?;
+
+        let resume_turn_id = events
+            .iter()
+            .rev()
+            .find_map(|record| match &record.event {
+                Event::WorkerParentResumeRequested { turn_id, .. } => Some(turn_id.clone()),
+                _ => None,
+            })
+            .with_context(|| format!("wave {wave} omitted its parent resume turn"))?;
+        let outcome = test
+            .client()
+            .session(session_id.to_string())
+            .await_turn_outcome(&resume_turn_id, SCENARIO_TIMEOUT, POLL_INTERVAL)
+            .await
+            .with_context(|| format!("await long fan-in wave {wave} parent outcome"))?;
+        ensure!(
+            outcome.kind == moa_wire::turn::TurnOutcomeKind::Completed,
+            "wave {wave} parent resume did not complete: {:?}",
+            outcome.kind
+        );
+        ensure!(
+            outcome.message == FAN_IN_RESUME_RESPONSE,
+            "wave {wave} parent resume returned unexpected response: {}",
+            outcome.message
+        );
+        wave_worker_ids.push(worker_ids);
+    }
+
+    let events = session_events(test.client(), session_id).await?;
+    for worker_id in wave_worker_ids.iter().flatten() {
+        assert_eq!(
+            worker_status_count(&events, worker_id, WorkerState::Completed),
+            1,
+            "worker {worker_id} must record one terminal transition"
+        );
+        assert_eq!(
+            worker_notification_count(&events, worker_id, WorkerState::Completed),
+            1,
+            "worker {worker_id} must deliver one terminal notification"
+        );
+    }
+
+    let settled = events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::WorkerSignalReceived {
+                signal_id,
+                kind: ChildSignalKind::FanInSettled,
+                ..
+            } => Some((record.sequence_num, *signal_id)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let resumes = events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::WorkerParentResumeRequested { signal_id, .. } => {
+                Some((record.sequence_num, *signal_id))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(settled.len(), LONG_FAN_IN_WAVES);
+    assert_eq!(resumes.len(), LONG_FAN_IN_WAVES);
+    for ((settled_seq, settled_id), (resume_seq, resume_id)) in settled.iter().zip(&resumes) {
+        assert_eq!(
+            resume_id, settled_id,
+            "each resume must consume its settlement"
+        );
+        assert!(
+            settled_seq < resume_seq,
+            "the settlement fact must precede its parent resume"
+        );
+    }
+    assert_eq!(
+        controller.effect_count(),
+        LONG_FAN_IN_WAVES * FAN_IN_WORKERS.len()
+    );
+    assert_eq!(
+        controller.request_count(),
+        LONG_FAN_IN_WAVES * FAN_IN_WORKERS.len(),
+        "the no-restart long case must not replay a provider effect"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker for the restartable Postgres/Restate/OpenFGA/Valkey fixture"]
+async fn recovery_matrix_failed_child_records_one_failure_and_resume_service_e2e() -> Result<()> {
+    // Pins: a real worker turn that reaches its catch-all across a hard restart produces one
+    // canonical failure, one failed terminal cache entry, one Failed attention signal, and one
+    // guarded parent resume. Mutation pin: restoring the removed turn-level Failed writer makes
+    // the exact signal/resume assertions fail.
+    let fixture = OrchestratorTestFixture::with_script(failure_script())
+        .await
+        .context("boot failed-worker recovery fixture")?;
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("failed-child-replay").await?;
+    establish_idle_parent(test.client(), session_id).await?;
+    fixture.reset_scripted_requests()?;
+    start_worker(
+        test.client(),
+        session_id,
+        FAILED_WORKER_ID,
+        FAILED_WORKER_TASK,
+        Vec::new(),
+    )
+    .await?;
+
+    fixture
+        .wait_for_scripted_requests(1, SCENARIO_TIMEOUT)
+        .await
+        .context("wait for the failed worker's first provider attempt")?;
+    fixture
+        .hard_crash_and_restart_orchestrator()
+        .await
+        .context("hard restart while the failed worker turn is replayable")?;
+
+    let events = await_events(
+        test.client(),
+        session_id,
+        Duration::from_secs(240),
+        |events| {
+            worker_notification_count(events, FAILED_WORKER_ID, WorkerState::Failed) == 1
+                && signal_count(events, FAILED_WORKER_ID, ChildSignalKind::Failed) == 1
+                && parent_resume_count(events) == 1
+                && events.iter().any(|record| {
+                    matches!(
+                        &record.event,
+                        Event::BrainResponse { text, .. } if text == "Failure resume observed."
+                    )
+                })
+        },
+    )
+    .await?;
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::TurnFailed {
+                    actor: TurnFailureActor::Worker { worker_id },
+                    ..
+                } if worker_id == FAILED_WORKER_ID
+            ))
+            .count(),
+        1,
+        "worker replay must retain one canonical failed-turn fact"
+    );
+    assert_eq!(
+        worker_status_count(&events, FAILED_WORKER_ID, WorkerState::Failed),
+        1
+    );
+    assert_eq!(
+        worker_notification_count(&events, FAILED_WORKER_ID, WorkerState::Failed),
+        1
+    );
+    assert_eq!(
+        signal_count(&events, FAILED_WORKER_ID, ChildSignalKind::Failed),
+        1
+    );
+    assert_eq!(parent_resume_count(&events), 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::BrainResponse { text, .. } if text == "Failure resume observed."
+            ))
+            .count(),
+        1,
+        "the one failure wake produces one coordinator response"
+    );
+    let turn_failed_seq = event_sequence(&events, |event| {
+        matches!(
+            event,
+            Event::TurnFailed {
+                actor: TurnFailureActor::Worker { worker_id },
+                ..
+            } if worker_id == FAILED_WORKER_ID
+        )
+    })
+    .context("failed worker omitted its canonical turn failure")?;
+    let status_seq = event_sequence(&events, |event| {
+        matches!(
+            event,
+            Event::WorkerStatusChanged {
+                worker_id,
+                to: WorkerState::Failed,
+                ..
+            } if worker_id == FAILED_WORKER_ID
+        )
+    })
+    .context("failed worker omitted its terminal status")?;
+    let notification_seq = event_sequence(&events, |event| {
+        matches!(
+            event,
+            Event::WorkerNotificationDelivered {
+                worker_id,
+                state: WorkerState::Failed,
+                ..
+            } if worker_id == FAILED_WORKER_ID
+        )
+    })
+    .context("failed worker omitted its terminal notification")?;
+    let failed_signal_seq = event_sequence(&events, |event| {
+        matches!(
+            event,
+            Event::WorkerSignalReceived {
+                worker_id,
+                kind: ChildSignalKind::Failed,
+                ..
+            } if worker_id == FAILED_WORKER_ID
+        )
+    })
+    .context("failed worker omitted its attention signal")?;
+    let resume_seq = event_sequence(&events, |event| {
+        matches!(event, Event::WorkerParentResumeRequested { .. })
+    })
+    .context("failed worker omitted its parent resume")?;
+    assert!(
+        turn_failed_seq < status_seq
+            && status_seq < notification_seq
+            && notification_seq < failed_signal_seq
+            && failed_signal_seq < resume_seq,
+        "failure events must remain canonical failure -> terminal facts -> signal -> resume"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(
+                record.event,
+                Event::WorkerSignalReceived {
+                    kind: ChildSignalKind::FanInSettled,
+                    ..
+                }
+            ))
+            .count(),
+        0,
+        "a failed child suppresses success fan-in for its registration generation"
+    );
+    let refs = child_refs(test.client(), session_id).await?;
+    let terminal = refs
+        .iter()
+        .find(|child| child.id == FAILED_WORKER_ID)
+        .and_then(|child| child.terminal.as_ref())
+        .context("failed worker terminal result must be cached on its parent")?;
+    assert_eq!(terminal.state, WorkerState::Failed);
+    assert!(!terminal.result.success);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker for the Postgres/Restate/OpenFGA/Valkey fixture"]
+async fn needs_input_wakes_parent_and_resolves_exact_awakeable_once_service_e2e() -> Result<()> {
+    // Pins: a real child `request_input` wakes the idle Session immediately; one user reply is
+    // routed to the exact Worker target, resumes the same WorkerTurnExecution awakeable, and an
+    // admission replay resolves neither a second awakeable nor a second worker workflow.
+    let fixture = OrchestratorTestFixture::with_script(input_script())
+        .await
+        .context("boot worker-input fixture")?;
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("worker-needs-input").await?;
+    establish_idle_parent(test.client(), session_id).await?;
+    start_worker(
+        test.client(),
+        session_id,
+        INPUT_WORKER_ID,
+        INPUT_WORKER_TASK,
+        Vec::new(),
+    )
+    .await?;
+
+    let input_events = await_events(test.client(), session_id, SCENARIO_TIMEOUT, |events| {
+        signal_count(events, INPUT_WORKER_ID, ChildSignalKind::NeedsInput) == 1
+            && parent_resume_count(events) == 1
+    })
+    .await?;
+    let input_request_id = input_events
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::WorkerSignalReceived {
+                worker_id,
+                kind: ChildSignalKind::NeedsInput,
+                input_request_id: Some(input_request_id),
+                input_audience: Some(InputAudience::User),
+                ..
+            } if worker_id == INPUT_WORKER_ID => Some(input_request_id.clone()),
+            _ => None,
+        })
+        .context("NeedsInput event omitted its exact input request id")?;
+    assert_eq!(
+        invocation_count(&fixture, "WorkerTurnExecution", None, Some("run")).await?,
+        1,
+        "the input wait must be inside one worker workflow"
+    );
+
+    let reply = start_turn_request(INPUT_ANSWER);
+    let first = test
+        .client()
+        .session(session_id.to_string())
+        .start_turn(reply.clone(), None)
+        .await
+        .context("deliver exact user reply to the pending worker input")?;
+    assert_eq!(
+        first.turn_id, None,
+        "a worker reply must not start a root turn"
+    );
+    assert!(!first.queued);
+    let replay = test
+        .client()
+        .session(session_id.to_string())
+        .start_turn(reply, None)
+        .await
+        .context("replay the same worker-input admission")?;
+    assert_eq!(
+        replay, first,
+        "reply admission replay must return its stored response"
+    );
+
+    let events = await_events(test.client(), session_id, SCENARIO_TIMEOUT, |events| {
+        worker_notification_count(events, INPUT_WORKER_ID, WorkerState::Completed) == 1
+    })
+    .await?;
+    assert_eq!(
+        invocation_count(&fixture, "WorkerTurnExecution", None, Some("run")).await?,
+        1,
+        "answering input resumes the original worker workflow instead of starting another"
+    );
+    assert_eq!(
+        invocation_count(
+            &fixture,
+            "Worker",
+            Some(INPUT_WORKER_ID),
+            Some("provide_input")
+        )
+        .await?,
+        1,
+        "the exact Worker awakeable target is resolved once despite admission replay"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::WorkerMessageSent {
+                    worker_id,
+                    input_request_id: Some(recorded),
+                    text,
+                } if worker_id == INPUT_WORKER_ID
+                    && recorded == &input_request_id
+                    && text == INPUT_ANSWER
+            ))
+            .count(),
+        1,
+        "the durable reply must name the exact request and appear once"
+    );
+    assert_eq!(
+        signal_count(&events, INPUT_WORKER_ID, ChildSignalKind::NeedsInput),
+        1
+    );
+    assert_eq!(
+        worker_status_count(&events, INPUT_WORKER_ID, WorkerState::Completed),
+        1
+    );
+    assert_eq!(
+        worker_notification_count(&events, INPUT_WORKER_ID, WorkerState::Completed),
+        1
+    );
+    let needs_input_seq = event_sequence(&events, |event| {
+        matches!(
+            event,
+            Event::WorkerSignalReceived {
+                worker_id,
+                kind: ChildSignalKind::NeedsInput,
+                ..
+            } if worker_id == INPUT_WORKER_ID
+        )
+    })
+    .context("input worker omitted NeedsInput signal")?;
+    let input_resume_seq = event_sequence(&events, |event| {
+        matches!(event, Event::WorkerParentResumeRequested { .. })
+    })
+    .context("input worker omitted immediate parent wake")?;
+    let reply_seq = event_sequence(&events, |event| {
+        matches!(
+            event,
+            Event::WorkerMessageSent {
+                worker_id,
+                input_request_id: Some(recorded),
+                ..
+            } if worker_id == INPUT_WORKER_ID && recorded == &input_request_id
+        )
+    })
+    .context("input worker omitted exact reply event")?;
+    let completed_seq = event_sequence(&events, |event| {
+        matches!(
+            event,
             Event::WorkerStatusChanged {
                 worker_id,
                 to: WorkerState::Completed,
                 ..
-            } => Some(worker_id.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let terminal_notifications = events
-        .iter()
-        .filter_map(|record| match &record.event {
-            Event::WorkerNotificationDelivered {
+            } if worker_id == INPUT_WORKER_ID
+        )
+    })
+    .context("input worker omitted completed status")?;
+    assert!(
+        needs_input_seq < input_resume_seq
+            && needs_input_seq < reply_seq
+            && reply_seq < completed_seq,
+        "input events must wake immediately, then apply the exact reply before completion"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker for the Postgres/Restate/OpenFGA/Valkey fixture"]
+async fn explicit_wait_returns_without_queued_fan_in_resume_service_e2e() -> Result<()> {
+    // Pins: `wait_worker` attaches to the real child before terminal delivery, returns the exact
+    // result through the child-owned awakeable, and the Session records no success resume because
+    // the coordinator is already active. This exercises waiter-before-parent-ack ordering.
+    let fixture = OrchestratorTestFixture::with_execution_fixture(wait_script(), wait_options())
+        .await
+        .context("boot explicit-wait fixture")?;
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("explicit-worker-wait").await?;
+    allow_tools(&fixture, test.client(), session_id, [WAIT_CAPABILITY]).await?;
+    start_worker(
+        test.client(),
+        session_id,
+        WAIT_WORKER_ID,
+        WAIT_WORKER_TASK,
+        vec![tool_reference(WAIT_CAPABILITY)],
+    )
+    .await?;
+    let controller = fixture
+        .fixture_capability()
+        .context("explicit-wait fixture omitted capability controller")?;
+    controller
+        .wait_for_calls(1, SCENARIO_TIMEOUT)
+        .await
+        .context("wait for worker at its held effect")?;
+
+    let started = test
+        .client()
+        .session(session_id.to_string())
+        .start_turn(start_turn_request(WAIT_REQUEST), None)
+        .await
+        .context("start coordinator explicit wait turn")?;
+    let turn_id = started
+        .turn_id
+        .context("idle session should start the explicit wait turn")?;
+    await_invocation_count(
+        &fixture,
+        "Worker",
+        Some(WAIT_WORKER_ID),
+        Some("attach_result_waiter"),
+        1,
+        SCENARIO_TIMEOUT,
+    )
+    .await?;
+
+    controller.release(1);
+    let outcome = test
+        .client()
+        .session(session_id.to_string())
+        .await_turn_outcome(&turn_id, SCENARIO_TIMEOUT, POLL_INTERVAL)
+        .await
+        .context("await explicit wait coordinator outcome")?;
+    assert_eq!(outcome.kind, moa_wire::turn::TurnOutcomeKind::Completed);
+
+    let events = await_events(test.client(), session_id, SCENARIO_TIMEOUT, |events| {
+        worker_notification_count(events, WAIT_WORKER_ID, WorkerState::Completed) == 1
+            && events.iter().any(|record| {
+                matches!(
+                    &record.event,
+                    Event::BrainResponse { text, .. } if text == WAIT_FINAL
+                )
+            })
+    })
+    .await?;
+    assert_eq!(
+        invocation_count(
+            &fixture,
+            "Worker",
+            Some(WAIT_WORKER_ID),
+            Some("attach_result_waiter")
+        )
+        .await?,
+        1,
+        "the explicit waiter is attached once"
+    );
+    assert_eq!(
+        parent_resume_count(&events),
+        0,
+        "explicit wait must not queue a second resume"
+    );
+    assert_eq!(
+        signal_count(&events, WAIT_WORKER_ID, ChildSignalKind::FanInSettled),
+        0,
+        "an active explicit waiter suppresses automatic success fan-in wake"
+    );
+    assert_eq!(
+        worker_status_count(&events, WAIT_WORKER_ID, WorkerState::Completed),
+        1
+    );
+    assert_eq!(
+        worker_notification_count(&events, WAIT_WORKER_ID, WorkerState::Completed),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::BrainResponse { text, .. } if text == WAIT_FINAL
+            ))
+            .count(),
+        1,
+        "the one attached waiter returns one exact coordinator response"
+    );
+    assert_eq!(controller.effect_count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker for the Postgres/Restate/OpenFGA/Valkey fixture"]
+async fn healthy_worker_never_polls_session_and_stale_deadline_emits_once_service_e2e() -> Result<()>
+{
+    // Pins: a held real worker stays healthy across multiple Worker-owned deadline firings
+    // without invoking Session; after heartbeats stop, its latest exact deadline emits one
+    // WorkerHeartbeatStale fact, one HeartbeatStale signal, and one parent resume, then stops.
+    // Mutation pin: bypassing the liveness generation/outstanding fence makes the exact stale
+    // counts fail after the additional deadline window.
+    let fixture =
+        OrchestratorTestFixture::with_execution_fixture(liveness_script(), liveness_options())
+            .await
+            .context("boot worker-owned liveness fixture")?;
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("worker-owned-liveness").await?;
+    establish_idle_parent(test.client(), session_id).await?;
+    allow_tools(&fixture, test.client(), session_id, [LIVENESS_CAPABILITY]).await?;
+    start_worker(
+        test.client(),
+        session_id,
+        LIVENESS_WORKER_ID,
+        LIVENESS_WORKER_TASK,
+        vec![tool_reference(LIVENESS_CAPABILITY)],
+    )
+    .await?;
+    let controller = fixture
+        .fixture_capability()
+        .context("liveness fixture omitted capability controller")?;
+    let barrier_deadline = Instant::now() + SCENARIO_TIMEOUT;
+    while controller.calls().is_empty() {
+        test.client()
+            .post_void(
+                &format!("/Worker/{LIVENESS_WORKER_ID}/record_heartbeat"),
+                &Utc::now(),
+            )
+            .await
+            .context("keep liveness worker healthy while it reaches the held effect")?;
+        ensure!(
+            Instant::now() < barrier_deadline,
+            "liveness worker did not reach its held effect"
+        );
+        tokio::time::sleep(HEALTHY_HEARTBEAT_INTERVAL).await;
+    }
+    assert_eq!(
+        controller.calls().len(),
+        1,
+        "the liveness worker reaches one exact held effect"
+    );
+    assert_eq!(
+        session_events(test.client(), session_id)
+            .await?
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::WorkerHeartbeatStale { worker_id, .. }
+                    if worker_id == LIVENESS_WORKER_ID
+            ))
+            .count(),
+        0,
+        "a worker kept healthy while reaching its effect cannot already be stale"
+    );
+
+    let session_calls_before =
+        invocation_count(&fixture, "Session", Some(&session_id.to_string()), None).await?;
+    for _ in 0..HEALTHY_HEARTBEATS {
+        test.client()
+            .post_void(
+                &format!("/Worker/{LIVENESS_WORKER_ID}/record_heartbeat"),
+                &Utc::now(),
+            )
+            .await
+            .context("refresh healthy worker heartbeat")?;
+        tokio::time::sleep(HEALTHY_HEARTBEAT_INTERVAL).await;
+        assert_eq!(
+            invocation_count(&fixture, "Session", Some(&session_id.to_string()), None,).await?,
+            session_calls_before,
+            "fresh worker deadlines must reschedule on Worker without polling Session"
+        );
+    }
+    let stale_events = await_events(
+        test.client(),
+        session_id,
+        Duration::from_secs(10),
+        |events| {
+            events
+                .iter()
+                .filter(|record| {
+                    matches!(
+                        &record.event,
+                        Event::WorkerHeartbeatStale { worker_id, .. }
+                            if worker_id == LIVENESS_WORKER_ID
+                    )
+                })
+                .count()
+                == 1
+                && signal_count(events, LIVENESS_WORKER_ID, ChildSignalKind::HeartbeatStale) == 1
+                && parent_resume_count(events) == 1
+                && events.iter().any(|record| {
+                    matches!(
+                        &record.event,
+                        Event::BrainResponse { text, .. }
+                            if text == "Stale worker resume observed."
+                    )
+                })
+        },
+    )
+    .await?;
+    let stale_seq = event_sequence(&stale_events, |event| {
+        matches!(
+            event,
+            Event::WorkerHeartbeatStale { worker_id, .. }
+                if worker_id == LIVENESS_WORKER_ID
+        )
+    })
+    .context("stale worker omitted its stale fact")?;
+    let signal_seq = event_sequence(&stale_events, |event| {
+        matches!(
+            event,
+            Event::WorkerSignalReceived {
                 worker_id,
-                state: WorkerState::Completed,
+                kind: ChildSignalKind::HeartbeatStale,
                 ..
-            } => Some(worker_id.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        terminal_changes.len(),
-        RECOVERY_WORKERS.len(),
-        "each worker must record one completed state transition"
+            } if worker_id == LIVENESS_WORKER_ID
+        )
+    })
+    .context("stale worker omitted its attention signal")?;
+    let resume_seq = event_sequence(&stale_events, |event| {
+        matches!(event, Event::WorkerParentResumeRequested { .. })
+    })
+    .context("stale worker omitted its parent resume")?;
+    assert!(
+        stale_seq < signal_seq && signal_seq < resume_seq,
+        "stale coordination must remain persisted fact -> joined signal -> resume"
     );
     assert_eq!(
-        terminal_changes
+        invocation_count(
+            &fixture,
+            "Session",
+            Some(&session_id.to_string()),
+            Some("record_child_signal")
+        )
+        .await?,
+        1,
+        "one stale transition makes one joined Session handoff"
+    );
+    let worker_status = test
+        .client()
+        .post_empty_call::<moa_core::types::worker::state::WorkerStatus>(&format!(
+            "/Worker/{LIVENESS_WORKER_ID}/status"
+        ))
+        .await
+        .context("read stale worker status")?;
+    assert_eq!(
+        worker_status.state,
+        WorkerState::Running,
+        "staleness is an attention transition, not a terminal worker state"
+    );
+
+    tokio::time::sleep(Duration::from_millis(LIVENESS_STALE_MS * 2 + 250)).await;
+    let final_events = session_events(test.client(), session_id).await?;
+    assert_eq!(
+        final_events
             .iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        RECOVERY_WORKERS.len(),
-        "no worker may record duplicate completed transitions"
+            .filter(|record| matches!(
+                &record.event,
+                Event::WorkerHeartbeatStale { worker_id, .. }
+                    if worker_id == LIVENESS_WORKER_ID
+            ))
+            .count(),
+        1,
+        "the stale deadline stops after its first accepted transition"
     );
     assert_eq!(
-        terminal_notifications.len(),
-        RECOVERY_WORKERS.len(),
-        "each worker must deliver one terminal notification"
+        signal_count(
+            &final_events,
+            LIVENESS_WORKER_ID,
+            ChildSignalKind::HeartbeatStale,
+        ),
+        1
     );
+    assert_eq!(parent_resume_count(&final_events), 1);
     assert_eq!(
-        terminal_notifications
-            .iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        RECOVERY_WORKERS.len(),
-        "no worker may deliver a duplicate terminal notification"
-    );
-    assert_eq!(
-        controller.effect_count(),
-        RECOVERY_WORKERS.len(),
-        "restart must not duplicate any logical upstream effect"
-    );
-    assert_eq!(
-        controller.request_count(),
-        RECOVERY_WORKERS.len() + 2,
-        "the completed effect stays at one transport attempt and each blocked effect resumes once"
+        invocation_count(
+            &fixture,
+            "Session",
+            Some(&session_id.to_string()),
+            Some("record_child_signal")
+        )
+        .await?,
+        1,
+        "the Worker deadline cannot repeatedly wake Session after becoming stale"
     );
     Ok(())
 }

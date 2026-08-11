@@ -5,19 +5,18 @@ use std::time::Duration;
 use moa_core::{
     events::Event, types::contact::SessionActorRef, types::identifiers::SessionId,
     types::identifiers::UserId, types::session::SessionMeta, types::tools::ToolOutput,
-    types::tools::TrustedSandboxFileManifestRef,
-    types::worker::commands::AttachWorkerResultWaiterInput,
-    types::worker::commands::CancelWorkerInput,
-    types::worker::commands::ConsumeWorkerChildResultInput,
+    types::tools::TrustedSandboxFileManifestRef, types::worker::commands::CancelWorkerInput,
     types::worker::commands::ListWorkersInput, types::worker::commands::ListWorkersOutput,
     types::worker::commands::MessageWorkerInput, types::worker::commands::ProvideWorkerInputInput,
-    types::worker::commands::RemoveWorkerResultWaiterInput,
     types::worker::commands::ReservedWorker, types::worker::commands::SpawnWorkerInput,
     types::worker::commands::SpawnWorkerOutput, types::worker::commands::WaitWorkerInput,
     types::worker::commands::WaitWorkerOutput, types::worker::state::WorkerChildRef,
     types::worker::state::WorkerChildRequest, types::worker::state::WorkerId,
     types::worker::state::WorkerMessage, types::worker::state::WorkerProgressSummary,
     types::worker::state::WorkerState, types::worker::state::WorkerTerminalResult,
+    types::worker::terminal::AttachWorkerResultWaiterInput,
+    types::worker::terminal::ConsumeWorkerChildResultInput,
+    types::worker::terminal::RemoveWorkerResultWaiterInput,
     types::worker::tool_schema::DelegationTool,
 };
 use moa_wire::session_store::AppendEventRequest;
@@ -32,8 +31,8 @@ use crate::objects::session::{
 use crate::objects::worker::WorkerClient;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::worker_dispatch::{
-    MAX_WORKER_FAN_OUT, child_agent_path, child_is_owned, validate_dispatch_budget,
-    validate_dispatch_limits,
+    MAX_WORKER_FAN_OUT, WorkerDispatchRejection, child_agent_path, child_is_owned,
+    validate_dispatch_budget, validate_dispatch_limits,
 };
 
 /// Maximum wait accepted by the v2 wait tool.
@@ -70,7 +69,7 @@ pub(crate) async fn execute_delegation_tool(
 ) -> Result<ToolOutput, HandlerError> {
     let output = match tool {
         DelegationTool::Spawn(input) => {
-            spawn_output(spawn_child_detached(ctx, parent, input, trusted_sandbox_manifest).await?)
+            spawn_child_detached(ctx, parent, input, trusted_sandbox_manifest).await?
         }
         DelegationTool::Wait(input) => {
             // Fast path: a cached terminal is only ever stored on an owned child, so consuming it
@@ -146,6 +145,13 @@ pub(crate) fn spawn_output(output: SpawnWorkerOutput) -> ToolOutput {
     )
 }
 
+fn spawn_rejection_output(rejection: WorkerDispatchRejection) -> ToolOutput {
+    ToolOutput::error(
+        format!("spawn_worker rejected: {rejection}. Do not retry the same request."),
+        Duration::ZERO,
+    )
+}
+
 /// Builds a structured success output for `list_workers`.
 pub(crate) fn list_output(output: ListWorkersOutput) -> ToolOutput {
     let count = output.child_progress.len();
@@ -186,7 +192,7 @@ async fn spawn_child_detached(
     parent: DelegationParent<'_>,
     request: SpawnWorkerInput,
     trusted_sandbox_manifest: Option<&TrustedSandboxFileManifestRef>,
-) -> Result<SpawnWorkerOutput, HandlerError> {
+) -> Result<ToolOutput, HandlerError> {
     let max_turns = effective_child_max_turns(&request);
     let child_request = WorkerChildRequest {
         task: request.task,
@@ -195,14 +201,17 @@ async fn spawn_child_detached(
         max_turns,
         trusted_sandbox_manifest: trusted_sandbox_manifest.cloned(),
     };
-    let reservation =
-        reserve_and_start_child(ctx, parent, child_request, "spawn_worker_id").await?;
-
-    Ok(SpawnWorkerOutput {
-        worker_id: reservation.child_ref.id,
-        path: reservation.path,
-        status: WorkerState::Running,
-    })
+    match reserve_and_start_child(ctx, parent, child_request, "spawn_worker_id").await? {
+        ChildReservationOutcome::Reserved(reservation) => {
+            let reservation = *reservation;
+            Ok(spawn_output(SpawnWorkerOutput {
+                worker_id: reservation.child_ref.id,
+                path: reservation.path,
+                status: WorkerState::Running,
+            }))
+        }
+        ChildReservationOutcome::Rejected(rejection) => Ok(spawn_rejection_output(rejection)),
+    }
 }
 
 fn effective_child_max_turns(request: &SpawnWorkerInput) -> Option<u32> {
@@ -220,7 +229,7 @@ async fn reserve_and_start_child(
     parent: DelegationParent<'_>,
     request: WorkerChildRequest,
     idempotency_step: &'static str,
-) -> Result<ReservedWorker, HandlerError> {
+) -> Result<ChildReservationOutcome, HandlerError> {
     let task = request.task.clone();
     let budget_tokens = request.budget_tokens;
     let DelegationParent::RootSession {
@@ -229,7 +238,11 @@ async fn reserve_and_start_child(
         identity,
     } = parent;
     let reservation =
-        reserve_root_child(ctx, session_id, meta, identity, request, idempotency_step).await?;
+        match reserve_root_child(ctx, session_id, meta, identity, request, idempotency_step).await?
+        {
+            ChildReservationOutcome::Reserved(reservation) => reservation,
+            rejected @ ChildReservationOutcome::Rejected(_) => return Ok(rejected),
+        };
 
     moa_core::coordination_counters::record_vo_send();
     crate::restate_identity::replay_safe_request(
@@ -238,7 +251,12 @@ async fn reserve_and_start_child(
     )
     .send();
     append_child_spawned_event(ctx, parent, &reservation, task, budget_tokens).await?;
-    Ok(reservation)
+    Ok(ChildReservationOutcome::Reserved(reservation))
+}
+
+enum ChildReservationOutcome {
+    Reserved(Box<ReservedWorker>),
+    Rejected(WorkerDispatchRejection),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -249,7 +267,7 @@ async fn reserve_root_child(
     identity: &moa_core::traits::Identity,
     request: WorkerChildRequest,
     idempotency_step: &'static str,
-) -> Result<ReservedWorker, HandlerError> {
+) -> Result<ChildReservationOutcome, HandlerError> {
     if identity.tenant_id != meta.tenant_id {
         return Err(TerminalError::new_with_code(
             409,
@@ -258,8 +276,13 @@ async fn reserve_root_child(
         .into());
     }
     let children = session_child_refs(ctx, session_id).await?;
-    let hash = validate_dispatch_limits(0, &children, &request.task, &request.tool_subset)?;
-    validate_dispatch_budget(request.budget_tokens, None)?;
+    let hash = match validate_dispatch_limits(0, &children, &request.task, &request.tool_subset) {
+        Ok(hash) => hash,
+        Err(rejection) => return Ok(ChildReservationOutcome::Rejected(rejection)),
+    };
+    if let Err(rejection) = validate_dispatch_budget(request.budget_tokens, None) {
+        return Ok(ChildReservationOutcome::Rejected(rejection));
+    }
     let sub_id = ctx
         .run(|| async { Ok::<_, HandlerError>(Json::from(uuid::Uuid::now_v7().to_string())) })
         .name(idempotency_step)
@@ -286,13 +309,15 @@ async fn reserve_root_child(
         meta.model.clone(),
     );
 
-    Ok(ReservedWorker {
-        child_ref,
-        initial_message,
-        path,
-        task,
-        budget_tokens,
-    })
+    Ok(ChildReservationOutcome::Reserved(Box::new(
+        ReservedWorker {
+            child_ref,
+            initial_message,
+            path,
+            task,
+            budget_tokens,
+        },
+    )))
 }
 
 /// Derives the storage-scoped user id for a session, preferring the linked
@@ -754,9 +779,10 @@ mod tests {
 
     use super::{
         MAX_WAIT_TIMEOUT_MS, clamp_wait_timeout_ms, effective_child_max_turns,
-        is_terminal_worker_state, list_output, spawn_output, terminal_result_summary, wait_output,
-        wait_terminal_output, worker_not_owned_output,
+        is_terminal_worker_state, list_output, spawn_output, spawn_rejection_output,
+        terminal_result_summary, wait_output, wait_terminal_output, worker_not_owned_output,
     };
+    use crate::worker_dispatch::WorkerDispatchRejection;
 
     #[test]
     fn wait_timeout_is_clamped_to_supported_bound() {
@@ -944,6 +970,18 @@ mod tests {
         assert!(output.content.iter().any(
             |content| matches!(content, ToolContent::Text { text } if text.contains("list_workers"))
         ));
+    }
+
+    #[test]
+    fn duplicate_spawn_rejection_is_a_recoverable_tool_error() {
+        // Pins: a repeated model-authored spawn must close the provider tool-call pair instead of
+        // terminalizing the turn and poisoning every later completion request.
+        let output = spawn_rejection_output(WorkerDispatchRejection::DuplicateTask);
+
+        assert!(output.is_error);
+        assert!(output.content.iter().any(|content| {
+            matches!(content, ToolContent::Text { text } if text.contains("duplicate worker task") && text.contains("Do not retry"))
+        }));
     }
 
     #[test]

@@ -474,6 +474,10 @@ pub(super) const RESUME_TASK_SQL: &str = r#"
             WHEN $8::JSONB IS NULL THEN resume_input_history
             ELSE resume_input_history || jsonb_build_array($8::JSONB)
         END,
+        current_outcome = CASE
+            WHEN $8::JSONB IS NULL THEN current_outcome
+            ELSE NULL
+        END,
         updated_at = NOW()
     WHERE run_uid = $1 AND task_id = $2 AND status = $3 AND generation = $4
     RETURNING

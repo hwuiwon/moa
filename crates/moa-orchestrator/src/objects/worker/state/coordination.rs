@@ -10,6 +10,9 @@ impl WorkerVoState {
     /// instructions that the stale review's continuation must not preempt.
     pub(in crate::objects::worker) fn advance_generation(&mut self) -> u64 {
         self.generation = self.generation.saturating_add(1);
+        // Terminal acknowledgement is generation-scoped. A revived child must deliver
+        // the later generation even if its previous terminal report was acknowledged.
+        self.notification_delivered = false;
         let discarded = self.action_reviews.discard_below(self.generation);
         if discarded > 0 {
             tracing::debug!(

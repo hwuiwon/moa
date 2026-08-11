@@ -26,11 +26,11 @@ use moa_core::{
     types::worker::commands::ReportToParentInput, types::worker::commands::RequestInputInput,
     types::worker::commands::WorkerToolRecord, types::worker::commands::WorkerTurnOutcomeRecord,
     types::worker::commands::WorkerTurnPreparation,
-    types::worker::commands::WorkerTurnResponseRecord, types::worker::state::ChildSignalKind,
-    types::worker::state::InputAudience, types::worker::state::ParentResumePolicy,
-    types::worker::state::SignalSeverity, types::worker::state::WorkerInputRequest,
-    types::worker::state::WorkerInputTarget, types::worker::state::WorkerPendingInput,
-    types::worker::state::WorkerSignal, types::worker::tool_schema::ChildReportTool,
+    types::worker::commands::WorkerTurnResponseRecord, types::worker::signals::ChildSignalKind,
+    types::worker::signals::ParentResumePolicy, types::worker::signals::SignalSeverity,
+    types::worker::signals::WorkerSignal, types::worker::state::InputAudience,
+    types::worker::state::WorkerInputRequest, types::worker::state::WorkerInputTarget,
+    types::worker::state::WorkerPendingInput, types::worker::tool_schema::ChildReportTool,
 };
 use moa_hands::truncate_tool_span_text;
 use moa_observability::restate_observability::{
@@ -63,7 +63,7 @@ use crate::tool_invocation::governed::{
 };
 use crate::turn::util::{
     TurnEvidence, allowed_tool_names, annotate_unresolved_verification,
-    exclude_reserved_control_tool_schemas, response_tool_calls, stable_tool_call_id,
+    exclude_reserved_control_tool_schemas, response_tool_calls, stable_worker_tool_call_id,
     turn_outcome_for_response,
 };
 use crate::turn_driver::{
@@ -228,11 +228,6 @@ impl WorkerTurnExecution for WorkerTurnExecutionImpl {
         };
         turn_progress::finish(&ctx).await?;
         driver_progress::set_phase(&ctx, phase);
-        // Control plane: a FAILED outcome raises a Failed attention signal to the owning
-        // coordinator (the only child-originated emit in this increment).
-        emit_failed_child_signal_if_needed(&ctx, &request.worker_id, parent_session, &outcome)
-            .await?;
-
         notify_worker_of_outcome(&ctx, &request.worker_id, &outcome).await?;
         Ok(Json::from(outcome))
     }
@@ -575,6 +570,7 @@ async fn run_worker_iteration(
         let tool_context = WorkerToolContext {
             turn_id: &input.request.turn_id,
             generation: input.request.generation,
+            model_turn: input.model_turn,
             worker_id: &input.request.worker_id,
             meta: &input.meta,
             identity: &input.request.identity,
@@ -673,6 +669,7 @@ struct WorkerToolContext<'a> {
     turn_id: &'a str,
     /// Worker generation that admitted this turn, recorded on any action review it queues.
     generation: u64,
+    model_turn: usize,
     worker_id: &'a str,
     meta: &'a SessionMeta,
     identity: &'a moa_core::traits::Identity,
@@ -700,7 +697,15 @@ async fn handle_tool_call(
     let meta = tool_context.meta;
     let session_id = tool_context.session_id;
     let selected_skills = tool_context.selected_skills;
-    let tool_id = stable_tool_call_id(session_id, index, tool_call);
+    let tool_id = stable_worker_tool_call_id(
+        session_id,
+        worker_id,
+        tool_context.turn_id,
+        tool_context.generation,
+        tool_context.model_turn,
+        index,
+        tool_call,
+    );
 
     // Child-only report/request-input tools are handled in the child's own turn loop, not
     // via the governed executor or the delegation-manager path: they emit control-plane
@@ -1643,88 +1648,6 @@ async fn notify_worker_of_outcome(
     Ok(())
 }
 
-/// Emits a `Failed` control-plane attention signal to the owning coordinator when a
-/// child turn ends in a FAILED outcome.
-///
-/// This is the only child-originated control-plane emit in this increment: it is
-/// low-frequency (once per failed turn) and routed to `parent_session`. The signal id
-/// and timestamp are journaled via `ctx.run()`/`durable_utc_now` for replay safety, and
-/// the cross-VO `record_child_signal` is joined before terminal owner delivery. A missing `parent_session`
-/// (failure before the first turn prepared) is non-fatal — the terminal-delivery
-/// idle-wake still covers waking an idle parent.
-// Model-driven Finding/Blocked/NeedsInput signals (incl. the needs_input awakeable
-// round-trip) are emitted from inside the child turn loop by `handle_child_report_tool`;
-// this terminal `Failed` emit covers a turn that errors out.
-async fn emit_failed_child_signal_if_needed(
-    ctx: &WorkflowContext<'_>,
-    worker_id: &str,
-    parent_session: SessionId,
-    outcome: &TurnOutcome,
-) -> Result<(), HandlerError> {
-    if !matches!(outcome.kind, TurnOutcomeKind::Failed) {
-        return Ok(());
-    }
-
-    let signal_id = ctx
-        .run(|| async { Ok::<_, HandlerError>(Json::from(AgentSignalId::new())) })
-        .name("worker_failed_signal_id")
-        .await?
-        .into_inner();
-    let created_at = durable_utc_now(ctx, "worker_failed_signal_at").await?;
-    let signal = build_failed_child_signal(
-        worker_id,
-        parent_session,
-        signal_id,
-        created_at,
-        &outcome.message,
-    );
-    moa_core::coordination_counters::record_session_vo_call();
-    crate::restate_identity::replay_safe_request(
-        ctx.object_client::<SessionClient>(parent_session.to_string())
-            .record_child_signal(Json::from(signal)),
-    )
-    .call()
-    .await?;
-    tracing::info!(
-        worker_id = %worker_id,
-        parent_session = %parent_session,
-        signal_id = %signal_id,
-        "emitted Failed control-plane signal to coordinator"
-    );
-    Ok(())
-}
-
-/// Builds the `Failed` control-plane signal for a failed child turn.
-///
-/// A resume-eligible `Failed`/`Critical` signal with `resume_policy = IfIdle` and a
-/// short, safe one-line summary. Kept pure (no Restate context) so the construction is
-/// unit-testable; the caller journals `signal_id`/`created_at`.
-fn build_failed_child_signal(
-    worker_id: &str,
-    parent_session: SessionId,
-    signal_id: AgentSignalId,
-    created_at: DateTime<Utc>,
-    failure_message: &str,
-) -> WorkerSignal {
-    WorkerSignal {
-        signal_id,
-        worker_id: worker_id.to_string(),
-        parent_session,
-        kind: ChildSignalKind::Failed,
-        severity: SignalSeverity::Critical,
-        summary: short_failure_summary(failure_message),
-        payload: serde_json::Value::Null,
-        created_at,
-        resume_policy: ParentResumePolicy::IfIdle,
-        input_request: None,
-    }
-}
-
-/// Reduces a failure message into a short, safe one-line control-plane summary.
-fn short_failure_summary(message: &str) -> String {
-    clamp_signal_summary(message, "worker turn failed")
-}
-
 /// Reduces an arbitrary model-supplied string to a short, safe one-line signal summary.
 ///
 /// Takes the first non-empty line (so multi-line tool output never leaks into a signal),
@@ -1780,16 +1703,16 @@ mod tests {
     use moa_core::{
         types::identifiers::AgentSignalId, types::identifiers::SessionId,
         types::security::ToolCapabilityId, types::worker::commands::ChildReportKind,
-        types::worker::commands::ReportToParentInput, types::worker::state::ChildSignalKind,
-        types::worker::state::InputAudience, types::worker::state::ParentResumePolicy,
-        types::worker::state::SignalSeverity, types::worker::state::WorkerInputRequest,
+        types::worker::commands::ReportToParentInput, types::worker::signals::ChildSignalKind,
+        types::worker::signals::ParentResumePolicy, types::worker::signals::SignalSeverity,
+        types::worker::state::InputAudience, types::worker::state::WorkerInputRequest,
         types::worker::state::WorkerInputTarget,
     };
     use moa_wire::turn::{TurnOutcome, TurnOutcomeKind};
 
     use super::{
-        build_child_report_signal, build_failed_child_signal, build_needs_input_signal,
-        disabled_capability_for_tool, enforce_worker_user_message_origin, short_failure_summary,
+        build_child_report_signal, build_needs_input_signal, disabled_capability_for_tool,
+        enforce_worker_user_message_origin,
     };
 
     #[test]
@@ -1924,46 +1847,5 @@ mod tests {
         assert!(signal.summary.chars().count() <= 201);
         assert!(signal.summary.ends_with('…'));
         assert!(!signal.summary.contains("second line"));
-    }
-
-    #[test]
-    fn failed_outcome_builds_resume_eligible_failed_signal() {
-        // Pins: a FAILED child turn constructs a Failed/Critical, IfIdle-resume signal
-        // routed to the owning coordinator with a short summary derived from the failure.
-        let parent_session = SessionId::new();
-        let signal_id = AgentSignalId::new();
-        let created_at = Utc::now();
-        let outcome = TurnOutcome {
-            turn_id: "turn-1".to_string(),
-            kind: TurnOutcomeKind::Failed,
-            message: "tool sandbox crashed\nstack trace line".to_string(),
-        };
-
-        let signal = build_failed_child_signal(
-            "parent-1-child-1",
-            parent_session,
-            signal_id,
-            created_at,
-            &outcome.message,
-        );
-
-        assert_eq!(signal.signal_id, signal_id);
-        assert_eq!(signal.worker_id, "parent-1-child-1");
-        assert_eq!(signal.parent_session, parent_session);
-        assert_eq!(signal.kind, ChildSignalKind::Failed);
-        assert_eq!(signal.severity, SignalSeverity::Critical);
-        assert_eq!(signal.resume_policy, ParentResumePolicy::IfIdle);
-        // Summary is the first non-empty line only (no multi-line leak).
-        assert_eq!(signal.summary, "tool sandbox crashed");
-    }
-
-    #[test]
-    fn short_failure_summary_falls_back_and_truncates() {
-        // Pins: empty failure text yields a safe default; overlong text is truncated.
-        assert_eq!(short_failure_summary("   "), "worker turn failed");
-        let long = "x".repeat(300);
-        let summary = short_failure_summary(&long);
-        assert!(summary.chars().count() <= 201, "summary must be bounded");
-        assert!(summary.ends_with('…'), "overlong summary is truncated");
     }
 }

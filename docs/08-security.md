@@ -276,9 +276,10 @@ absence before workspace reads or provider I/O.
 Conversational workers are available only as interactive delegation in `act`;
 they are not the bulk DAG primitive. Sandbox-using `ExecutionTask` instances
 receive equivalent isolation under a stable run/task identity and generation
-fence. Execution maps submit every budget-admitted logical task without an
-application fan-out cap; provider pacing and governed capability or hand
-capacity control physical pressure.
+fence. Execution maps materialize every budget-admitted logical row, but only
+the positive `execution.max_in_flight_tasks` window owns live task invocations;
+pending rows remain storage-only. Provider pacing and governed capability or
+hand capacity impose independent bounds inside that run-owned window.
 
 Only the reserved mutable tenant-data root is checkpointed. Trusted files,
 credentials, tokens, authorization, policy, runtime controls, network state,
@@ -370,14 +371,6 @@ skills, capabilities, turn count, and budget. It cannot mutate durable state or
 the graph invisibly: unexpected conditions return typed `NeedsInput` or
 `NeedsReplan`, and every amendment is compiler-validated, replayable, and unable
 to broaden authorization.
-
-Progress narration treats child summaries and tool output as untrusted input.
-The per-session narrator summarizes that material into neutral, user-facing prose
-that is never executed, respects the same privacy/PII boundaries as other visible
-output, and must not widen what the user can already see. Its
-`tokens_used`/cost are attributed to a system/overhead bucket in observability,
-not to the user's task budget, and a narration failure is a warning rather than a
-turn failure.
 
 ## Learning Privacy
 

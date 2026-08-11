@@ -622,16 +622,6 @@ pub struct EnvOverlay {
     pub session_limits_progress_first_delay_ms: Option<u64>,
     /// `MOA_SESSION_LIMITS_PROGRESS_INTERVAL_MS`.
     pub session_limits_progress_interval_ms: Option<u64>,
-    /// `MOA_SESSION_LIMITS_PROGRESS_NARRATION_ENABLED`.
-    pub session_limits_progress_narration_enabled: Option<bool>,
-    /// `MOA_SESSION_LIMITS_PROGRESS_NARRATION_MODEL`.
-    pub session_limits_progress_narration_model: Option<String>,
-    /// `MOA_SESSION_LIMITS_PROGRESS_NARRATION_INTERVAL_MS`.
-    pub session_limits_progress_narration_interval_ms: Option<u64>,
-    /// `MOA_SESSION_LIMITS_PROGRESS_NARRATION_MAX_PER_WINDOW`.
-    pub session_limits_progress_narration_max_per_window: Option<u32>,
-    /// `MOA_SESSION_LIMITS_PROGRESS_NARRATION_MAX_TOKENS`.
-    pub session_limits_progress_narration_max_tokens: Option<u32>,
     /// `MOA_SESSION_LIMITS_WORKER_CLEANUP_GRACE_MS`.
     pub session_limits_worker_cleanup_grace_ms: Option<u64>,
     /// `MOA_SESSION_LIMITS_WORKER_RESUME_MAX_PER_WINDOW`.
@@ -738,6 +728,8 @@ pub struct EnvOverlay {
     pub execution_planner_repair_attempts: Option<u32>,
     /// `MOA_EXECUTION_REPEATED_FAILURE_LIMIT`.
     pub execution_repeated_failure_limit: Option<u32>,
+    /// `MOA_EXECUTION_MAX_IN_FLIGHT_TASKS`.
+    pub execution_max_in_flight_tasks: Option<usize>,
     /// `MOA_EXECUTION_MAX_TASKS`.
     pub execution_max_tasks: Option<u64>,
     /// `MOA_EXECUTION_MAX_TOKENS`.

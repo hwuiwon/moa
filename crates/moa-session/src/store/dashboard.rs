@@ -546,11 +546,6 @@ fn redacted_event_summary(event: &Event) -> String {
             threshold_ms,
             ..
         } => format!("worker {worker_id} heartbeat stale after {threshold_ms}ms"),
-        Event::ProgressNarrated {
-            source,
-            tokens_used,
-            ..
-        } => format!("progress narrated by {source:?} using {tokens_used} tokens"),
         Event::MemoryRead { .. } => "memory read".to_string(),
         Event::MemoryWrite { .. } => "memory write".to_string(),
         Event::MemoryIngest { affected_pages, .. } => {

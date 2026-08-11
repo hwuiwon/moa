@@ -11,7 +11,7 @@ use super::super::{
 use super::state::{
     AgentPath, InputAudience, WorkerChildRef, WorkerChildRequest, WorkerId, WorkerInitialTask,
     WorkerInputTarget, WorkerMessage, WorkerProgressSummary, WorkerResult, WorkerState,
-    WorkerTerminalResult, default_worker_budget_tokens,
+    default_worker_budget_tokens,
 };
 
 /// Spawn-tool input.
@@ -174,43 +174,6 @@ pub struct WaitWorkerOutput {
     pub progress: Option<WorkerProgressSummary>,
 }
 
-/// Input for registering an awakeable that should resolve when a child terminates.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AttachWorkerResultWaiterInput {
-    /// Awakeable id owned by the waiting workflow.
-    pub awakeable_id: String,
-}
-
-/// Output returned when registering a terminal result waiter.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AttachWorkerResultWaiterOutput {
-    /// Already available terminal result, if the child had finished before registration.
-    pub terminal: Option<WorkerTerminalResult>,
-}
-
-/// Input for removing a terminal result waiter after timeout or cancellation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RemoveWorkerResultWaiterInput {
-    /// Awakeable id that should no longer be resolved by the child.
-    pub awakeable_id: String,
-}
-
-/// Input for caching a child's terminal result on its parent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MarkWorkerChildTerminalInput {
-    /// Child worker id.
-    pub worker_id: WorkerId,
-    /// Terminal state and result to cache.
-    pub terminal: WorkerTerminalResult,
-}
-
-/// Input for consuming a cached child result from a parent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConsumeWorkerChildResultInput {
-    /// Child worker id.
-    pub worker_id: WorkerId,
-}
-
 /// Input retracting the coordinator-advertised reply targets a child no longer owns.
 ///
 /// Sent by the child whenever it clears in-flight `request_input` registrations —
@@ -223,13 +186,6 @@ pub struct ClearWorkerInputTargetsInput {
     pub worker_id: WorkerId,
     /// Exact coordinates the child cleared; each is retracted on its own.
     pub cleared: Vec<WorkerInputTarget>,
-}
-
-/// Output returned when consuming a cached child result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConsumeWorkerChildResultOutput {
-    /// Terminal result, if one was cached and consumed.
-    pub terminal: Option<WorkerTerminalResult>,
 }
 
 /// Prepared state returned by `Worker/prepare_turn` to the turn workflow.

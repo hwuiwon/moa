@@ -282,6 +282,33 @@ pub(crate) fn stable_tool_call_id(
     ToolCallId(uuid_from_hash(hasher.finalize()))
 }
 
+/// Computes a replay-stable tool-call identifier scoped to one worker model turn.
+pub(crate) fn stable_worker_tool_call_id(
+    session_id: SessionId,
+    worker_id: &str,
+    turn_id: &str,
+    generation: u64,
+    model_turn: usize,
+    index: usize,
+    tool_call: &ToolCallContent,
+) -> ToolCallId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"moa.orchestrator.worker_tool_call_id.v1");
+    update_len_prefixed(&mut hasher, session_id.0.as_bytes());
+    update_len_prefixed(&mut hasher, worker_id.as_bytes());
+    update_len_prefixed(&mut hasher, turn_id.as_bytes());
+    update_len_prefixed(&mut hasher, &generation.to_be_bytes());
+    update_len_prefixed(&mut hasher, &(model_turn as u64).to_be_bytes());
+    update_len_prefixed(&mut hasher, &(index as u64).to_be_bytes());
+    if let Some(raw_id) = tool_call.invocation.id.as_deref() {
+        update_len_prefixed(&mut hasher, raw_id.as_bytes());
+    }
+    update_len_prefixed(&mut hasher, tool_call.invocation.name.as_bytes());
+    let input = serde_json::to_vec(&tool_call.invocation.input).unwrap_or_default();
+    update_len_prefixed(&mut hasher, &input);
+    ToolCallId(uuid_from_hash(hasher.finalize()))
+}
+
 fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_be_bytes());
     hasher.update(bytes);
@@ -361,7 +388,8 @@ mod tests {
     use super::{
         TurnEvidence, allowed_tool_names, annotate_unresolved_verification, disallowed_tool_output,
         ensure_delegation_tool_schemas, meaningful_cancel_reason, stable_tool_call_id,
-        summarize_response_text, tool_input_leaks_canary, turn_outcome_for_response,
+        stable_worker_tool_call_id, summarize_response_text, tool_input_leaks_canary,
+        turn_outcome_for_response,
     };
 
     fn completion_response(
@@ -593,6 +621,37 @@ mod tests {
         assert_ne!(first, third);
         assert_ne!(first, fourth);
         assert_eq!(first.0.to_string(), "b9a3e70e-6e0e-49f8-9034-2405d5019a72");
+    }
+
+    #[test]
+    fn worker_tool_call_ids_are_owner_and_turn_scoped() {
+        // Pins: repeated provider IDs remain stable on replay but cannot deduplicate separate
+        // workers, worker turns, generations, model turns, or calls as one logical side effect.
+        let session_id = SessionId(
+            Uuid::parse_str("11111111-1111-4111-8111-111111111111")
+                .expect("fixture UUID should parse"),
+        );
+        let call = moa_core::types::completion::ToolCallContent {
+            invocation: ToolInvocation {
+                id: Some("22222222-2222-4222-8222-222222222222".to_string()),
+                name: "bash".to_string(),
+                input: json!({"command":"echo hello"}),
+            },
+            provider_metadata: None,
+        };
+        let derive = |worker_id, turn_id, generation, model_turn, index| {
+            stable_worker_tool_call_id(
+                session_id, worker_id, turn_id, generation, model_turn, index, &call,
+            )
+        };
+        let first = derive("worker-a", "turn-a", 1, 1, 0);
+
+        assert_eq!(first, derive("worker-a", "turn-a", 1, 1, 0));
+        assert_ne!(first, derive("worker-b", "turn-a", 1, 1, 0));
+        assert_ne!(first, derive("worker-a", "turn-b", 1, 1, 0));
+        assert_ne!(first, derive("worker-a", "turn-a", 2, 1, 0));
+        assert_ne!(first, derive("worker-a", "turn-a", 1, 2, 0));
+        assert_ne!(first, derive("worker-a", "turn-a", 1, 1, 1));
     }
 
     #[test]

@@ -323,6 +323,12 @@ impl MoaConfig {
                 "execution.repeated_failure_limit",
                 u64::from(execution.repeated_failure_limit),
             ),
+            (
+                "execution.max_in_flight_tasks",
+                u64::try_from(execution.max_in_flight_tasks).map_err(|_| {
+                    MoaError::ConfigError("execution.max_in_flight_tasks is too large".to_string())
+                })?,
+            ),
             ("execution.max_tasks", execution.max_tasks),
             ("execution.max_tokens", execution.max_tokens),
             ("execution.max_tool_calls", execution.max_tool_calls),
@@ -505,6 +511,7 @@ mod tests {
         "MOA_LEARNING_SEGMENTS_IDLE_GAP_MINUTES",
         "MOA_EXECUTION_PLANNER_REPAIR_ATTEMPTS",
         "MOA_EXECUTION_REPEATED_FAILURE_LIMIT",
+        "MOA_EXECUTION_MAX_IN_FLIGHT_TASKS",
         "MOA_EXECUTION_MAX_TASKS",
         "MOA_EXECUTION_MAX_TOKENS",
         "MOA_EXECUTION_MAX_TOOL_CALLS",
@@ -735,6 +742,9 @@ mod tests {
             }),
             ("execution.repeated_failure_limit", |config| {
                 config.execution.repeated_failure_limit = 0
+            }),
+            ("execution.max_in_flight_tasks", |config| {
+                config.execution.max_in_flight_tasks = 0
             }),
             ("execution.max_tasks", |config| {
                 config.execution.max_tasks = 0

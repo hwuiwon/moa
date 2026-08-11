@@ -289,13 +289,13 @@ impl Session for SessionImpl {
 
     #[tracing::instrument(skip(self, ctx, input))]
     // SAFETY: called only from Worker terminal delivery after parent dispatch authz has already checked.
-    async fn mark_child_terminal(
+    async fn record_worker_child_terminal(
         &self,
         ctx: ObjectContext<'_>,
-        input: Json<MarkWorkerChildTerminalInput>,
+        input: Json<RecordWorkerChildTerminalInput>,
     ) -> Result<(), HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
-        self.handle_mark_child_terminal(ctx, input).await
+        self.handle_record_worker_child_terminal(ctx, input).await
     }
 
     #[tracing::instrument(skip(self, ctx, input))]
@@ -322,7 +322,7 @@ impl Session for SessionImpl {
     #[tracing::instrument(skip(self, ctx, signal))]
     // SAFETY: internal child→parent control-plane write. The signaling Worker VO is
     // part of this session's task tree — it was reserved/spawned under the owning
-    // session's participant authz, exactly like register_child/mark_child_terminal. The
+    // session's participant authz, exactly like child registration/terminal delivery. The
     // handler only appends idempotently to this session's own event log and updates the
     // session's compact VO state; it reads no caller-owned data back to the caller. This
     // mirrors the established internal VO→VO write pattern on Session and adds no broad
@@ -343,20 +343,6 @@ impl Session for SessionImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, req))]
-    // SAFETY: internal generation-guarded self-tick scheduled by this Session VO; it
-    // reads only its own VO state and the bounded child/turn fan-in, and forwards the
-    // session's own owning-actor identity to the detached narration job, which re-checks
-    // Session participant authz on its gated progress read.
-    async fn narration_tick(
-        &self,
-        ctx: ObjectContext<'_>,
-        req: Json<NarrationTickRequest>,
-    ) -> Result<(), HandlerError> {
-        crate::ctx::adopt_incoming_trace_parent(&ctx);
-        self.handle_narration_tick(ctx, req).await
-    }
-
-    #[tracing::instrument(skip(self, ctx, req))]
     // SAFETY: internal generation-guarded self-call; it only renews the shared
     // admission lease for this Session while a coordinator turn remains active.
     async fn turn_admission_heartbeat(
@@ -366,21 +352,6 @@ impl Session for SessionImpl {
     ) -> Result<(), HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         self.handle_turn_admission_heartbeat(ctx, req).await
-    }
-
-    #[tracing::instrument(skip(self, ctx, req))]
-    // SAFETY: internal generation-guarded self-tick scheduled by this Session VO for its
-    // own active children. It reads only its own VO state plus the child's compact
-    // progress summary (the same informational fan-in `progress` already performs), and
-    // any stale signal it raises is recorded through `record_child_signal`, which carries
-    // the established internal child→parent control-plane authz justification.
-    async fn check_child_liveness(
-        &self,
-        ctx: ObjectContext<'_>,
-        req: Json<CheckChildLivenessRequest>,
-    ) -> Result<(), HandlerError> {
-        crate::ctx::adopt_incoming_trace_parent(&ctx);
-        self.handle_check_child_liveness(ctx, req).await
     }
 }
 

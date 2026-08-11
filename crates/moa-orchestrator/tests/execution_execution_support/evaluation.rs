@@ -167,7 +167,6 @@ fn summarize_session_events(
             | Event::WorkerSignalReceived { .. }
             | Event::WorkerParentResumeRequested { .. }
             | Event::WorkerHeartbeatStale { .. }
-            | Event::ProgressNarrated { .. }
             | Event::TurnMetrics { .. }
             | Event::MemoryRead { .. }
             | Event::MemoryWrite { .. }

@@ -192,7 +192,7 @@ updates the session to the verified contact and records the prior contact in
 | Tools | `ToolCall`, `ToolResult`, `ToolError` |
 | Action review | `ActionReviewRequested`, `ActionReviewDecided`, `ActionReviewContinuationRequested` |
 | Memory | `MemoryRead`, `MemoryWrite`, `MemoryIngest` |
-| Worker coordination | `WorkerSpawned`, `WorkerMessageSent`, `WorkerStatusChanged`, `WorkerNotificationDelivered`, `WorkerSignalReceived`, `WorkerParentResumeRequested`, `WorkerHeartbeatStale`, `ProgressNarrated` |
+| Worker coordination | `WorkerSpawned`, `WorkerMessageSent`, `WorkerStatusChanged`, `WorkerNotificationDelivered`, `WorkerSignalReceived`, `WorkerParentResumeRequested`, `WorkerHeartbeatStale` |
 | Execution runs | `ExecutionRunStarted`, `ExecutionProgress`, `ExecutionInputRequired`, `ExecutionCompleted`, `ExecutionFailed`, `ExecutionCancelled`, `ExecutionSynthesisRequested` |
 | Turn disposition | `TurnFailed` |
 | Security | `PromptInjectionCircuitTransition` |
@@ -298,25 +298,26 @@ facts store it. They also never store raw objective or classifier response text.
 
 `SegmentStarted` records segment ID, index, summary, and previous segment ID. `SegmentCompleted` records final counters and duration.
 
-`WorkerSpawned`, `WorkerMessageSent`, `WorkerStatusChanged`, and
-`WorkerNotificationDelivered` are the pre-existing spawn/steer/terminal events.
-The durable main-agent/worker coordination feature adds four:
+Worker coordination uses spawn/steer lifecycle events plus three control-plane
+events:
 
 - `WorkerSignalReceived` records one control-plane attention signal
-  (`ChildSignalKind` = `Finding`/`Blocked`/`NeedsInput`/`Failed`/`HeartbeatStale`)
+  (`ChildSignalKind` =
+  `Finding`/`Blocked`/`NeedsInput`/`Failed`/`HeartbeatStale`/`FanInSettled`)
   recorded on the owning coordinator, with `signal_id`, severity, summary, and —
   for `NeedsInput` — the awakeable `input_request_id` and `input_audience`.
 - `WorkerParentResumeRequested` records that a signal triggered a guarded
   coordinator auto-resume turn (`signal_id`, `worker_id`, `turn_id`, `reason`).
-- `WorkerHeartbeatStale` records a watchdog stale detection
-  (`last_heartbeat_at`, `threshold_ms`).
-- `ProgressNarrated` is one durable, rate-limited natural-language progress
-  update for the whole session (`source`, `text`, optional per-child `segments`,
-  `model`, `tokens_used`). It is the one intentional low-rate telemetry event;
-  `model = "none"`/`tokens_used = 0` marks the no-LLM N=1 short-circuit.
+- `WorkerHeartbeatStale` records the one stale transition produced by the
+  Worker's exact liveness deadline (`last_heartbeat_at`, `threshold_ms`).
 
-`ProgressUpdate` remains a decodable event variant for old rows, but new turn
-progress is projection state surfaced through `TurnExecution/progress` and
+`WorkerStatusChanged` and `WorkerNotificationDelivered` are appended
+idempotently by the sole Session terminal handler after validating the worker
+and admission generation. That handler emits exactly one `Failed` signal for a
+failed terminal, or at most one `FanInSettled` signal for the current child-set
+generation when its last registered child settles successfully or is cancelled
+while the coordinator is idle. `ProgressUpdate` is cadence-limited turn
+projection state surfaced through `TurnExecution/progress` and
 `Session/progress`; it is not appended as a per-tick event-log row. Heartbeats
 stay in `Worker` VO state and append an event only on the stale transition above.
 
@@ -348,18 +349,21 @@ status, attempt, generation fence, input/output/error, reserved and actual
 usage, citations, and timestamps. Atomic SQL reserves every worst-case budget
 dimension before dispatch. Generation-fenced completion prevents a stale retry
 from overwriting current state; cancellation prevents new reservations while
-leaving completed results queryable.
+leaving completed results queryable. Deterministic materialization may create
+every pending row, but pending rows remain storage-only until `ExecutionRun`
+admits them into its positive `execution.max_in_flight_tasks` window.
 
 ## Idempotent Append
 
-Control-plane signals, the heartbeat watchdog, and progress narration all run in
-Restate handlers that can be retried after a partial failure, so their appends
-must be idempotent. `AppendEventRequest` carries an optional `dedupe_key`, and
-`emit_event_record` enforces it inside the same `sessions ... FOR UPDATE` lock and
-transaction that guards the event insert: when a `dedupe_key` is present and a row
-already exists for `(session_id, dedupe_key)`, the original `sequence_num` is
-returned and no second event is inserted; otherwise the event and the dedupe row
-are inserted together. Callers that pass no key always append. Enforcing this in
+Control-plane signals, the Worker's exact stale transition, and Session-owned
+terminal delivery run in Restate handlers that can be retried after a partial
+failure, so their appends must be idempotent. `AppendEventRequest` carries an
+optional `dedupe_key`, and `emit_event_record` enforces it inside the same
+`sessions ... FOR UPDATE` lock and transaction that guards the event insert:
+when a `dedupe_key` is present and a row already exists for
+`(session_id, dedupe_key)`, the original `sequence_num` is returned and no
+second event is inserted; otherwise the event and the dedupe row are inserted
+together. Callers that pass no key always append. Enforcing this in
 `emit_event_record` (not only on the Restate wire path) means direct callers get
 the guarantee too.
 
@@ -371,8 +375,8 @@ trigger-heavy, append-only
 write-blocking, non-concurrent `CREATE UNIQUE INDEX` (refinery runs each
 migration in a transaction), which stalls writes during deploy. The dedupe path
 is INSERT-only and never weakens append-only semantics. Stable dedupe keys
-include `worker_signal:{signal_id}`, `worker_stale:{worker_id}:{last_heartbeat_at_ms}`,
-and `narration:{session_id}:{narration_seq}`.
+include `worker_signal:{signal_id}` and
+`worker_stale:{worker_id}:{last_heartbeat_at_ms}`.
 
 ## Task Segment Rows
 

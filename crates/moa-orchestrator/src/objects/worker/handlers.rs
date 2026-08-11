@@ -64,8 +64,8 @@ impl Worker for WorkerImpl {
         WorkerImpl::progress_summary(self, ctx).await
     }
 
-    // SAFETY: internal telemetry-plane write invoked only by the child's own turn
-    // workflow at the progress cadence; updates VO state only and appends no event.
+    // SAFETY: internal liveness write invoked only by the child's own turn workflow at
+    // the progress cadence; it updates this Worker's state and owns its self-deadline.
     #[tracing::instrument(skip(self, ctx, at))]
     async fn record_heartbeat(
         &self,
@@ -74,6 +74,19 @@ impl Worker for WorkerImpl {
     ) -> Result<(), HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         WorkerImpl::record_heartbeat(self, ctx, at).await
+    }
+
+    // SAFETY: internal generation-guarded self-call scheduled by this Worker VO. It
+    // reads only Worker-owned state and sends one joined control signal to its already
+    // established parent Session when the exact latest heartbeat becomes stale.
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn liveness_deadline(
+        &self,
+        ctx: ObjectContext<'_>,
+        request: Json<WorkerLivenessDeadlineRequest>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        WorkerImpl::liveness_deadline(self, ctx, request).await
     }
 
     #[tracing::instrument(skip(self, ctx))]

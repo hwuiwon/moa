@@ -109,6 +109,33 @@ The 500-task and chaos matrices remain in their nightly/heavy profiles rather
 than expanding the pull-request lane. Destructive Restate member and PVC
 replacement remains an operator-run procedure, not repository test automation.
 
+### Event-driven coordination gates
+
+Coordination tests assert persisted transitions and Restate acknowledgements,
+not elapsed quiet periods:
+
+- `worker_coordination_service_e2e` proves that successful children produce no
+  early parent resume and one `FanInSettled` resume when the current
+  child-registration generation settles, failed children produce one failure
+  resume, explicit result waiters resolve once, and restart/replay preserves the
+  same counts.
+- The worker liveness case proves one outstanding deadline, heartbeat-driven
+  deadline movement, no stale signal while terminal or awaiting input, one
+  joined stale signal after the exact deadline, and no periodic Session calls
+  while a healthy child remains active.
+- `execution_run_service_e2e` proves that a 500-item map completes with
+  `peak_live <= execution.max_in_flight_tasks`, restart after 137 completions is
+  exactly once, and pending rows have no live task invocation outside the
+  window.
+- Public execution-mutation cases stop at the committed-epoch/pre-wake and
+  wake-ack/pre-park barriers. Success is valid only after the task/run wake is
+  accepted; replay must neither increment the epoch nor resume twice.
+
+Use the `restate-recovery-pr` profile for the conversational restart matrix and
+the `execution-eval-nightly` profile for the 500-task window/recovery matrix.
+Both use deterministic local Postgres, Restate, OpenFGA, Valkey, MCP, and
+fixture-capability dependencies; neither requires a billed provider.
+
 The nextest profiles in `.config/nextest.toml` are mostly suffix-based. Keep
 new out-of-line test targets on one of these suffixes so the filters stay short:
 `*_unit.rs`, `*_offline.rs`, `*_component.rs`, `*_db.rs`, `*_db_memory.rs`,

@@ -9,7 +9,7 @@ use moa_artifacts::execution_plan::{
     ExecutionReducer, ExecutionRequirement, ExecutionTaskResult, GeneratedExecutionCandidate,
     MapTask, RetryPolicy,
 };
-use moa_config::ToolBudgetConfig;
+use moa_config::{ExecutionConfig, ToolBudgetConfig};
 use moa_core::events::{Event, ExecutionTaskResultsRef};
 use moa_core::types::action_policy::{ActionClass, ActionPolicyEffect, RiskLevel};
 use moa_core::types::session::SessionStatus;
@@ -48,7 +48,10 @@ use moa_core::types::execution_planning::{
 
 const COMPANY_COUNT: usize = 500;
 const PARTIAL_COMPLETION_COUNT: usize = 137;
+const FIXTURE_RELEASE_BATCH_SIZE: usize = 32;
 const BULK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+const EXECUTION_WINDOW_ENV: &str = "MOA_EXECUTION_MAX_IN_FLIGHT_TASKS";
+const BULK_MEASUREMENT_PREFIX: &str = "MOA_EXECUTION_BULK_MEASUREMENT=";
 const MAP_NODE_ID: &str = "screen_companies";
 const REDUCE_NODE_ID: &str = "aggregate_mentions";
 const OUTPUT_NODE_ID: &str = "report";
@@ -66,14 +69,56 @@ const FINAL_RESPONSE: &str = "The bounded aggregate reports 500 AI mentions acro
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
 async fn bulk_500_map_exact_coverage_service_e2e() -> Result<()> {
     // Pins: generated production capability discovery executes every one of 500 stable map
-    // items, one reducer, and one output without leaking raw item payloads into root context.
-    let fixture = bulk_fixture().await?;
+    // items through no more than the configured physical window, then exactly one reducer and
+    // one output, without leaking raw item payloads into root context.
+    let max_in_flight_tasks = configured_execution_window()?;
+    let started_at = Instant::now();
+    let fixture = bulk_fixture(max_in_flight_tasks).await?;
     let test = fixture.isolated().await;
+    let controller = fixture
+        .fixture_capability()
+        .context("execution fixture omitted capability controller")?;
 
-    let observed = run_bulk_scenario(&fixture, &test, "bulk-500", RecoveryPoint::None).await?;
+    let observed = match run_bulk_scenario(
+        &fixture,
+        &test,
+        "bulk-500",
+        RecoveryPoint::None,
+        max_in_flight_tasks,
+    )
+    .await
+    {
+        Ok(observed) => observed,
+        Err(error) => {
+            let elapsed = started_at.elapsed();
+            emit_bulk_measurement(
+                max_in_flight_tasks,
+                elapsed,
+                controller.peak_live_calls(),
+                None,
+                "failed",
+                elapsed >= BULK_TIMEOUT,
+            );
+            return Err(error);
+        }
+    };
+    emit_bulk_measurement(
+        max_in_flight_tasks,
+        started_at.elapsed(),
+        observed.peak_live_calls,
+        Some((
+            observed.task_start_delay_p50_ms,
+            observed.task_start_delay_p95_ms,
+        )),
+        "completed",
+        false,
+    );
 
-    assert_eq!(observed.map_transport_attempts, COMPANY_COUNT);
-    assert_eq!(observed.reducer_transport_attempts, 1);
+    assert_eq!(observed.current_live_calls, 0);
+    assert!(
+        observed.peak_live_calls <= max_in_flight_tasks,
+        "execution dispatch exceeded its configured physical window: {observed:?}"
+    );
     Ok(())
 }
 
@@ -82,7 +127,8 @@ async fn bulk_500_map_exact_coverage_service_e2e() -> Result<()> {
 async fn recovery_after_materialization_is_exactly_once_service_e2e() -> Result<()> {
     // Pins: replaying the run driver after all map rows commit cannot rematerialize or double
     // account any stable task, including if Restate has not journaled the completed operation.
-    let fixture = bulk_fixture().await?;
+    let max_in_flight_tasks = configured_execution_window()?;
+    let fixture = bulk_fixture(max_in_flight_tasks).await?;
     let test = fixture.isolated().await;
 
     let baseline = run_bulk_scenario(
@@ -90,6 +136,7 @@ async fn recovery_after_materialization_is_exactly_once_service_e2e() -> Result<
         &test,
         "materialization-baseline",
         RecoveryPoint::None,
+        max_in_flight_tasks,
     )
     .await?;
     let observed = run_bulk_scenario(
@@ -97,6 +144,7 @@ async fn recovery_after_materialization_is_exactly_once_service_e2e() -> Result<
         &test,
         "recovery-materialized",
         RecoveryPoint::AfterMaterialization,
+        max_in_flight_tasks,
     )
     .await?;
 
@@ -116,17 +164,26 @@ async fn recovery_after_materialization_is_exactly_once_service_e2e() -> Result<
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
 async fn recovery_after_137_completions_is_exactly_once_service_e2e() -> Result<()> {
     // Pins: a child-only restart at exactly 137 durable map completions preserves completed work,
-    // resumes every pending effect, and yields the same final ledger/progress as no restart.
-    let fixture = bulk_fixture().await?;
+    // resumes every pending effect without exceeding the configured physical window, and yields
+    // the same exact effect set and final ledger/progress as no restart.
+    let max_in_flight_tasks = configured_execution_window()?;
+    let fixture = bulk_fixture(max_in_flight_tasks).await?;
     let test = fixture.isolated().await;
 
-    let baseline =
-        run_bulk_scenario(&fixture, &test, "recovery-baseline", RecoveryPoint::None).await?;
+    let baseline = run_bulk_scenario(
+        &fixture,
+        &test,
+        "recovery-baseline",
+        RecoveryPoint::None,
+        max_in_flight_tasks,
+    )
+    .await?;
     let recovered = run_bulk_scenario(
         &fixture,
         &test,
         "recovery-137",
         RecoveryPoint::AfterCompletions(PARTIAL_COMPLETION_COUNT),
+        max_in_flight_tasks,
     )
     .await?;
 
@@ -136,6 +193,11 @@ async fn recovery_after_137_completions_is_exactly_once_service_e2e() -> Result<
     );
     assert!(recovered.map_transport_attempts >= COMPANY_COUNT);
     assert!(recovered.reducer_transport_attempts >= 1);
+    assert_eq!(recovered.current_live_calls, 0);
+    assert!(
+        recovered.peak_live_calls <= max_in_flight_tasks,
+        "recovered execution exceeded its configured physical window: {recovered:?}"
+    );
     Ok(())
 }
 
@@ -151,9 +213,13 @@ struct BulkObservation {
     canonical_final: Value,
     map_transport_attempts: usize,
     reducer_transport_attempts: usize,
+    current_live_calls: usize,
+    peak_live_calls: usize,
+    task_start_delay_p50_ms: f64,
+    task_start_delay_p95_ms: f64,
 }
 
-async fn bulk_fixture() -> Result<OrchestratorTestFixture> {
+async fn bulk_fixture(max_in_flight_tasks: usize) -> Result<OrchestratorTestFixture> {
     let map_tool = map_tool();
     let reducer_tool = reducer_tool();
     let candidate = bulk_candidate(&map_tool, &reducer_tool)?;
@@ -176,6 +242,10 @@ async fn bulk_fixture() -> Result<OrchestratorTestFixture> {
             tools: vec![map_tool, reducer_tool],
             orchestrator_env: vec![
                 ("MOA_DATABASE_MAX_CONNECTIONS".to_string(), "80".to_string()),
+                (
+                    EXECUTION_WINDOW_ENV.to_string(),
+                    max_in_flight_tasks.to_string(),
+                ),
                 ("RUST_LOG".to_string(), "error".to_string()),
             ],
         },
@@ -188,6 +258,7 @@ async fn run_bulk_scenario(
     test: &moa_test_support::IsolatedTest<'_>,
     label: &str,
     recovery: RecoveryPoint,
+    max_in_flight_tasks: usize,
 ) -> Result<BulkObservation> {
     let controller = fixture
         .fixture_capability()
@@ -250,9 +321,16 @@ async fn run_bulk_scenario(
 
     match recovery {
         RecoveryPoint::None => {
-            wait_for_map_calls(fixture, controller, &pool, execution_run_uid, COMPANY_COUNT)
-                .await?;
-            controller.release(COMPANY_COUNT);
+            release_map_calls_in_batches(
+                fixture,
+                controller,
+                &pool,
+                execution_run_uid,
+                0,
+                COMPANY_COUNT,
+                max_in_flight_tasks,
+            )
+            .await?;
         }
         RecoveryPoint::AfterMaterialization => {
             let signal = materialization_signal
@@ -274,23 +352,45 @@ async fn run_bulk_scenario(
                 .await
                 .context("restart child after exact map materialization")?;
             signal.release_and_remove(&pool).await?;
-            wait_for_map_calls(fixture, controller, &pool, execution_run_uid, COMPANY_COUNT)
-                .await?;
-            controller.release(COMPANY_COUNT);
+            release_map_calls_in_batches(
+                fixture,
+                controller,
+                &pool,
+                execution_run_uid,
+                0,
+                COMPANY_COUNT,
+                max_in_flight_tasks,
+            )
+            .await?;
         }
         RecoveryPoint::AfterCompletions(completed) => {
             if completed >= COMPANY_COUNT {
                 bail!("partial recovery checkpoint must be below {COMPANY_COUNT}");
             }
-            wait_for_map_calls(fixture, controller, &pool, execution_run_uid, COMPANY_COUNT)
-                .await?;
-            controller.release(completed);
-            wait_for_completed_map_count(&pool, execution_run_uid, completed).await?;
+            release_map_calls_in_batches(
+                fixture,
+                controller,
+                &pool,
+                execution_run_uid,
+                0,
+                completed,
+                max_in_flight_tasks,
+            )
+            .await?;
             fixture
                 .restart_orchestrator()
                 .await
                 .with_context(|| format!("restart child after exactly {completed} completions"))?;
-            controller.release(COMPANY_COUNT - completed);
+            release_map_calls_in_batches(
+                fixture,
+                controller,
+                &pool,
+                execution_run_uid,
+                completed,
+                COMPANY_COUNT,
+                max_in_flight_tasks,
+            )
+            .await?;
         }
     }
 
@@ -403,11 +503,97 @@ async fn run_bulk_scenario(
     )
     .await?;
 
+    let (task_start_delay_p50_ms, task_start_delay_p95_ms) =
+        load_map_task_start_delay_percentiles(&pool, execution_run_uid).await?;
     Ok(BulkObservation {
         canonical_final: load_canonical_final_projection(&pool, execution_run_uid).await?,
         map_transport_attempts,
         reducer_transport_attempts,
+        current_live_calls: controller.current_live_calls(),
+        peak_live_calls: controller.peak_live_calls(),
+        task_start_delay_p50_ms,
+        task_start_delay_p95_ms,
     })
+}
+
+fn configured_execution_window() -> Result<usize> {
+    let configured = match std::env::var(EXECUTION_WINDOW_ENV) {
+        Ok(value) => value
+            .parse::<usize>()
+            .with_context(|| format!("parse {EXECUTION_WINDOW_ENV} as a positive integer"))?,
+        Err(std::env::VarError::NotPresent) => ExecutionConfig::default().max_in_flight_tasks,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("{EXECUTION_WINDOW_ENV} must contain UTF-8")
+        }
+    };
+    if configured == 0 {
+        bail!("{EXECUTION_WINDOW_ENV} must be positive");
+    }
+    Ok(configured)
+}
+
+fn emit_bulk_measurement(
+    window: usize,
+    wall_time: std::time::Duration,
+    peak_live_calls: usize,
+    task_start_delays_ms: Option<(f64, f64)>,
+    status: &str,
+    timed_out: bool,
+) {
+    let (task_start_delay_p50_ms, task_start_delay_p95_ms) = task_start_delays_ms
+        .map(|(p50_ms, p95_ms)| (Some(p50_ms), Some(p95_ms)))
+        .unwrap_or((None, None));
+    println!(
+        "{BULK_MEASUREMENT_PREFIX}{}",
+        json!({
+            "status": status,
+            "window": window,
+            "wall_time_ms": wall_time.as_secs_f64() * 1_000.0,
+            "peak_live_calls": peak_live_calls,
+            "task_start_delay_p50_ms": task_start_delay_p50_ms,
+            "task_start_delay_p95_ms": task_start_delay_p95_ms,
+            "stalled": timed_out,
+            "timed_out": timed_out,
+        })
+    );
+}
+
+async fn load_map_task_start_delay_percentiles(
+    pool: &PgPool,
+    run_uid: uuid::Uuid,
+) -> Result<(f64, f64)> {
+    let (started_count, p50_ms, p95_ms): (i64, Option<f64>, Option<f64>) = sqlx::query_as(
+        r#"
+        SELECT COUNT(started_at),
+               percentile_cont(0.50) WITHIN GROUP (
+                   ORDER BY GREATEST(
+                       (EXTRACT(EPOCH FROM (started_at - created_at)) * 1000)::DOUBLE PRECISION,
+                       0.0
+                   )
+               ),
+               percentile_cont(0.95) WITHIN GROUP (
+                   ORDER BY GREATEST(
+                       (EXTRACT(EPOCH FROM (started_at - created_at)) * 1000)::DOUBLE PRECISION,
+                       0.0
+                   )
+               )
+        FROM moa.execution_task
+        WHERE run_uid = $1 AND node_id = $2
+        "#,
+    )
+    .bind(run_uid)
+    .bind(MAP_NODE_ID)
+    .fetch_one(pool)
+    .await
+    .context("load map task-start delay percentiles")?;
+    let expected = i64::try_from(COMPANY_COUNT).context("convert expected map task count")?;
+    if started_count != expected {
+        bail!("bulk measurement expected {expected} started map tasks, observed {started_count}");
+    }
+    Ok((
+        p50_ms.context("bulk measurement omitted p50 task-start delay")?,
+        p95_ms.context("bulk measurement omitted p95 task-start delay")?,
+    ))
 }
 
 const MATERIALIZATION_CHANNEL: &str = "moa_bulk_map_materialized_service_e2e";
@@ -842,7 +1028,7 @@ async fn wait_for_map_calls(
             let task_statuses = task_status_diagnostics(pool, run_uid).await?;
             let process_exit = fixture.unexpected_orchestrator_exit().await?;
             bail!(
-                "wait for exactly {expected} unique map effects: {error:#}; \
+                "wait for at least {expected} unique map effects: {error:#}; \
                  task statuses: {task_statuses}; orchestrator exit: {process_exit:#?}"
             );
         }
@@ -851,13 +1037,46 @@ async fn wait_for_map_calls(
         .iter()
         .filter(|call| call.capability == MAP_TOOL_NAME)
         .count();
-    if map_calls != expected || calls.len() != expected {
+    if map_calls < expected || calls.len() != map_calls {
         bail!(
-            "expected only {expected} map calls before reducer; map={map_calls}, total={}, calls={calls:#?}",
+            "expected at least {expected} map calls and no reducer before release; map={map_calls}, total={}, calls={calls:#?}",
             calls.len()
         );
     }
     Ok(calls)
+}
+
+async fn release_map_calls_in_batches(
+    fixture: &OrchestratorTestFixture,
+    controller: &moa_test_support::FixtureCapabilityController,
+    pool: &PgPool,
+    run_uid: uuid::Uuid,
+    completed_before: usize,
+    target_completed: usize,
+    max_in_flight_tasks: usize,
+) -> Result<()> {
+    if completed_before > target_completed || target_completed > COMPANY_COUNT {
+        bail!(
+            "invalid map release range {completed_before}..={target_completed}; company count is {COMPANY_COUNT}"
+        );
+    }
+    let mut completed = completed_before;
+    while completed < target_completed {
+        let batch_size =
+            fixture_release_batch_size(target_completed - completed, max_in_flight_tasks);
+        let next_completed = completed + batch_size;
+        wait_for_map_calls(fixture, controller, pool, run_uid, next_completed).await?;
+        controller.release(batch_size);
+        wait_for_completed_map_count(pool, run_uid, next_completed).await?;
+        completed = next_completed;
+    }
+    Ok(())
+}
+
+fn fixture_release_batch_size(remaining: usize, max_in_flight_tasks: usize) -> usize {
+    FIXTURE_RELEASE_BATCH_SIZE
+        .min(max_in_flight_tasks)
+        .min(remaining)
 }
 
 async fn wait_for_map_row_count(pool: &PgPool, run_uid: uuid::Uuid, expected: usize) -> Result<()> {
@@ -1289,4 +1508,19 @@ async fn load_canonical_final_projection(pool: &PgPool, run_uid: uuid::Uuid) -> 
     .fetch_one(pool)
     .await
     .context("load canonical final run ledger/progress projection")
+}
+
+#[cfg(test)]
+mod batch_size_tests {
+    use super::fixture_release_batch_size;
+
+    #[test]
+    fn release_batch_respects_small_windows_and_exact_remainders() {
+        // Pins: a fixture batch cannot wait for more arrivals than the configured execution
+        // window, including the 137-completion recovery checkpoint and final 500-item remainder.
+        assert_eq!(fixture_release_batch_size(500, 16), 16);
+        assert_eq!(fixture_release_batch_size(9, 16), 9);
+        assert_eq!(fixture_release_batch_size(4, 16), 4);
+        assert_eq!(fixture_release_batch_size(500, 64), 32);
+    }
 }

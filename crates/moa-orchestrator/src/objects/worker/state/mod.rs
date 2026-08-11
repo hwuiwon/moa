@@ -28,6 +28,8 @@ pub(super) const K_LAST_OUTCOME: &str = "last_outcome";
 pub(super) const K_NOTIFICATION_DELIVERED: &str = "notification_delivered";
 pub(super) const K_RESULT_WAITERS: &str = "result_waiters";
 pub(super) const K_LAST_HEARTBEAT_AT: &str = "last_heartbeat_at";
+pub(super) const K_LIVENESS_GENERATION: &str = "liveness_generation";
+pub(super) const K_LIVENESS_OUTSTANDING: &str = "liveness_outstanding";
 pub(super) const K_CLEANUP_GENERATION: &str = "cleanup_generation";
 pub(super) const K_CLEANUP_RELEASE_ATTEMPTS: &str = "cleanup_release_attempts";
 pub(super) const K_PENDING_INPUT_REQUESTS: &str = "pending_input_requests";
@@ -180,9 +182,16 @@ pub struct WorkerVoState {
     pub result_waiters: Vec<String>,
     /// Last telemetry-plane heartbeat timestamp, refreshed at the progress cadence.
     ///
-    /// Updated by `Worker/record_heartbeat` (VO state only, no event per tick) so
-    /// `progress_summary` and the watchdog can detect a stuck child.
+    /// Updated monotonically by `Worker/record_heartbeat` (VO state only, no event per
+    /// tick) so `progress_summary` and this Worker's own deadline can detect a stall.
     pub last_heartbeat_at: Option<DateTime<Utc>>,
+    /// Monotonic generation owning the current liveness deadline.
+    ///
+    /// Every replacement deadline advances the generation before scheduling so a
+    /// delayed call from an older heartbeat deadline cannot regain ownership.
+    pub liveness_generation: u64,
+    /// Whether exactly one generation-guarded liveness deadline is outstanding.
+    pub liveness_outstanding: bool,
     /// Generation guarding the report-then-self-clean delayed self-call.
     ///
     /// Bumped when terminal delivery schedules a cleanup tick and again on any accepted
@@ -218,6 +227,7 @@ pub struct WorkerVoState {
 
 mod coordination;
 mod lifecycle;
+pub(in crate::objects::worker) mod liveness;
 mod result_projection;
 mod storage;
 

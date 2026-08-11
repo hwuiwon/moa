@@ -201,8 +201,9 @@ eligible turn, must be called alone, and cannot be synthesized from an ordinary
 tool result. The transition does not classify again and cannot downgrade.
 Conversational `Worker` remains an interactive Inline delegation tool, not a
 bulk graph scheduler. `ExecutionRun` materializes map items as stable
-`ExecutionTask` rows and submits all ready work without an application fan-out
-cap.
+`ExecutionTask` rows, admits only the first stable undispatched rows that fit
+its positive `execution.max_in_flight_tasks` window, and leaves the remaining
+pending rows storage-only.
 
 ## Memory Retrieval
 

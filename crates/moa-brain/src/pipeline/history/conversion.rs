@@ -8,7 +8,7 @@ use moa_core::{
     types::channel::render_user_message_with_attachments, types::context::ContextMessage,
     types::context::ContextSourceRef, types::context::estimate_text_tokens,
     types::events_stream::EventRecord, types::identifiers::ToolCallId, types::tools::ToolContent,
-    types::tools::ToolOutput, types::worker::state::ChildSignalKind,
+    types::tools::ToolOutput, types::worker::signals::ChildSignalKind,
     types::worker::state::InputAudience, types::worker::state::WorkerState,
     types::worker::tool_schema::is_child_report_tool_name,
 };
@@ -361,10 +361,10 @@ pub(super) fn answered_worker_inputs(records: &[&EventRecord]) -> HashSet<String
 /// Renders a control-plane child signal as a system-visible coordinator directive.
 ///
 /// `NeedsInput` renders the child's `worker_id`, `input_request_id`, and audience so
-/// the model can answer via `provide_worker_input`; `Blocked`, `Failed`, and
-/// `HeartbeatStale` render a concise attention directive. `Finding` is intentionally
-/// omitted (returns `None`) so low-signal informational notes never crowd the recent
-/// history window or nag the coordinator across turns.
+/// the model can answer via `provide_worker_input`; `Blocked`, `Failed`,
+/// `HeartbeatStale`, and `FanInSettled` render a concise coordination directive.
+/// `Finding` is intentionally omitted (returns `None`) so low-signal informational
+/// notes never crowd the recent history window or nag the coordinator across turns.
 fn render_child_signal(
     record: &EventRecord,
     kind: ChildSignalKind,
@@ -404,11 +404,15 @@ fn render_child_signal(
                 ),
             }
         }
-        ChildSignalKind::Blocked | ChildSignalKind::Failed | ChildSignalKind::HeartbeatStale => {
+        ChildSignalKind::Blocked
+        | ChildSignalKind::Failed
+        | ChildSignalKind::HeartbeatStale
+        | ChildSignalKind::FanInSettled => {
             let kind_attr = match kind {
                 ChildSignalKind::Blocked => "blocked",
                 ChildSignalKind::Failed => "failed",
                 ChildSignalKind::HeartbeatStale => "heartbeat_stale",
+                ChildSignalKind::FanInSettled => "fan_in_settled",
                 ChildSignalKind::Finding | ChildSignalKind::NeedsInput => unreachable!(),
             };
             format!(
@@ -1074,7 +1078,7 @@ mod tests {
     fn child_signal_event(
         session: &moa_core::types::session::SessionMeta,
         sequence_num: u64,
-        kind: moa_core::types::worker::state::ChildSignalKind,
+        kind: moa_core::types::worker::signals::ChildSignalKind,
         summary: &str,
         input_request_id: Option<&str>,
         input_audience: Option<moa_core::types::worker::state::InputAudience>,
@@ -1086,7 +1090,7 @@ mod tests {
                 signal_id: moa_core::types::identifiers::AgentSignalId::new(),
                 worker_id: "child-7".to_string(),
                 kind,
-                severity: moa_core::types::worker::state::SignalSeverity::Warning,
+                severity: moa_core::types::worker::signals::SignalSeverity::Warning,
                 summary: summary.to_string(),
                 input_request_id: input_request_id.map(str::to_string),
                 input_audience,
@@ -1204,7 +1208,7 @@ mod tests {
             child_signal_event(
                 &session,
                 1,
-                moa_core::types::worker::state::ChildSignalKind::NeedsInput,
+                moa_core::types::worker::signals::ChildSignalKind::NeedsInput,
                 "needs <the> \"staging\" API key",
                 Some("req-42"),
                 Some(moa_core::types::worker::state::InputAudience::User),
@@ -1247,7 +1251,7 @@ mod tests {
             child_signal_event(
                 &session,
                 0,
-                moa_core::types::worker::state::ChildSignalKind::NeedsInput,
+                moa_core::types::worker::signals::ChildSignalKind::NeedsInput,
                 "needs a customer id",
                 Some("req-answered"),
                 Some(moa_core::types::worker::state::InputAudience::User),
@@ -1285,7 +1289,7 @@ mod tests {
         let events = vec![child_signal_event(
             &session,
             0,
-            moa_core::types::worker::state::ChildSignalKind::Blocked,
+            moa_core::types::worker::signals::ChildSignalKind::Blocked,
             "cannot reach the database",
             None,
             None,
@@ -1329,7 +1333,7 @@ mod tests {
             child_signal_event(
                 &session,
                 1,
-                moa_core::types::worker::state::ChildSignalKind::Finding,
+                moa_core::types::worker::signals::ChildSignalKind::Finding,
                 "found three candidate vendors",
                 None,
                 None,

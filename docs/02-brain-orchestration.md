@@ -351,8 +351,10 @@ outcomes own the suspension or termination.
 - task and tool subset
 - pending messages and local history
 - result waiters and cancellation reason
-- last turn summary and last heartbeat for the telemetry plane (`last_turn_summary`, `last_heartbeat_at`)
-- pending `needs_input` requests and the self-cleanup generation counter (`pending_input_requests`, `cleanup_generation`)
+- last turn summary, last heartbeat, and the generation for its one outstanding
+  liveness deadline
+- pending `needs_input` requests and the self-cleanup generation counter
+  (`pending_input_requests`, `cleanup_generation`)
 
 `Worker` admits conversational messages and starts at most one `WorkerTurnExecution` workflow per active child turn. Workflow callbacks carry the admitted `turn_id`; stale responses, tool results, approval clears, and outcomes are ignored rather than mutating a newer turn.
 
@@ -373,46 +375,41 @@ Workers support interactive, steerable delegation inside Execute/Inline. They ar
 plan nodes, map items, reducers, or the bulk DAG substrate. Work that needs an
 explicit dependency graph, durable joins, scalable map materialization, review
 waits, or exact coverage uses `ExecutionRun` and stable `ExecutionTask` rows.
-Conversational worker fan-out limits therefore do not impose an execution-map
-fan-out cap.
+Conversational worker fan-out limits are separate from the
+`execution.max_in_flight_tasks` physical window that bounds live DAG tasks.
 
-### Two coordination planes
+### Event-driven coordination
 
 Coordinator turns can return while detached children keep running. Coordination
-is split so the high-frequency path never serializes through the single-writer
-parent VO. `docs/12-restate-architecture.md` is the detailed reference.
+keeps high-frequency progress off the single-writer parent VO and gives each
+state transition one durable owner. `docs/12-restate-architecture.md` is the
+detailed reference.
 
-- **Telemetry plane (high-frequency, off the `Session` VO).** Turn progress is
-  cadence-limited workflow state surfaced through `TurnExecution/progress` and
-  `Session/progress`, not a per-tick event-log append. Heartbeats update
-  `Worker` state only; `Session/progress` reads compact per-child summaries
-  (`WorkerProgressSummary`) by bounded fan-in on demand through
-  `Worker/progress_summary`.
-- **Control plane (low-frequency, through the coordinator VO).** A narrow
-  child→parent attention signal (`ChildSignalKind` =
-  `Finding`/`Blocked`/`NeedsInput`/`Failed`/`HeartbeatStale`) is routed to the
-  owning root `Session` via `parent_session` and recorded idempotently by
-  `Session::record_child_signal`. It updates the compact `unread_child_signals`
-  projection and may start one guarded resume turn when the parent is idle.
+- Turn progress is cadence-limited and delivered directly by
+  `turn_progress::maybe_emit`; it does not schedule Session work. Heartbeats
+  update `Worker` state only and move the effective liveness deadline without
+  scheduling a second overlapping timer.
+- Model-authored `Finding`, `Blocked`, and `NeedsInput` use the awaited
+  `Session::record_child_signal` path. A Worker's exact stale deadline sends
+  `HeartbeatStale` through the same joined path. `Finding` is recorded but is
+  never resume-eligible.
+- Terminal state has one parent-side owner. The Worker durably records its
+  terminal result and resolves explicit result awakeables before awaiting
+  `Session::record_worker_child_terminal`. The Session handler validates the
+  registered worker and admission generation, caches the result, claim-checks
+  large output, and appends `WorkerStatusChanged` plus
+  `WorkerNotificationDelivered` idempotently.
+- A failed terminal produces exactly one `Failed` attention signal and guarded
+  resume. Successful or cancelled terminals produce no per-child wake. Child
+  registration advances the fan-in generation; when its last registered child
+  settles successfully or is cancelled while the coordinator is idle, Session
+  records at most one `FanInSettled` signal for that generation and starts one
+  guarded resume. When the coordinator is active, terminal facts stay cached
+  for its explicit waiter/list path and no automatic success wake is queued.
 
 `post_message` / `WorkerMessage::FollowUp` remains the parent→child primitive.
 There is no command bus and no second message queue: steering, the `needs_input`
 answer, and revival all reuse the existing message path.
-
-### Progress narration
-
-A single per-session **narrator** keeps the user informed during the detached
-window. The `Session` VO schedules a generation-guarded narration tick
-(`objects/session/narration.rs`) that never calls the model inline; when its gate
-opens it `.send()`s a detached `LLMGateway::narrate_session` job. That job reads
-the fan-in summaries and makes **one** cheapest-chat-model call covering all
-active workers plus the active coordinator step, appending one durable
-`ProgressNarrated` event per period — O(1) LLM cost regardless of fan-out. With a
-single active source it short-circuits with no LLM call (`model = "none"`).
-Narration is default-on (`progress_narration_enabled`), gated by a coarse cadence
-(`progress_narration_interval_ms`, ~20s), a content change cursor, and a
-per-window cap (`progress_narration_max_per_window`), and uses the cheapest
-catalog chat model unless `progress_narration_model` overrides it.
 
 ### Guarded parent resume and `needs_input`
 
@@ -420,13 +417,16 @@ An idle coordinator can start at most one bounded turn per resume-eligible signa
 fenced by an active-turn gate, signal-id dedupe (`pending_parent_resume_signal`),
 and a per-session resume budget (`worker_resume_max_per_window` over
 `worker_resume_window_ms`). Resume is conservative — only
-`Blocked`/`NeedsInput`/`Failed`/`HeartbeatStale` with `ParentResumePolicy::IfIdle`,
-never `Finding`/progress/plain success — and runs as the session's recorded owning
-identity. The resume turn carries `RunTurnRequest.trigger = ChildSignal`, which
-skips the synthetic user message; the brain renders the recorded
-`WorkerParentResumeRequested` as a system directive. A running coordinator turn
-also drains queued signals at context-compile time, so unread `NeedsInput`/`Blocked`
-signals reach the model even without a resume.
+`Blocked`/`NeedsInput`/`Failed`/`HeartbeatStale`/`FanInSettled` with
+`ParentResumePolicy::IfIdle`, never `Finding`, progress, or an individual plain
+success — and runs as the session's recorded owning identity. `FanInSettled` is
+valid only for the current child-registration generation and is recorded at
+most once after every child in that generation is terminal. The resume turn
+carries `RunTurnRequest.trigger = ChildSignal`, which skips the synthetic user
+message; the brain renders the recorded `WorkerParentResumeRequested` as a
+system directive. A running coordinator turn also drains queued signals at
+context-compile time, so unread `NeedsInput`/`Blocked` signals reach the model
+without an additional wake.
 
 `needs_input` is a child→parent round-trip on the same message path: the child's
 `request_input` tool registers a Restate awakeable, emits a `NeedsInput` signal
@@ -440,18 +440,21 @@ frames; the next plain user reply is forwarded by the session to the worker as
 
 ### Self-cleanup and the liveness watchdog
 
-After a child reports terminal (cached result + result-waiter awakeable + events +
-idle-wake), it schedules a generation-guarded delayed `Worker::cleanup` self-call
+After the joined terminal acknowledgement, the Worker marks parent notification
+delivered and schedules a generation-guarded delayed `Worker::cleanup` self-call
 after `worker_cleanup_grace_ms`. Cleanup checkpoints according to workspace
 policy, releases the child's ephemeral compute attachment, retains the durable
 workspace or reconciliation owner independently, removes the child from the
-parent's fan-out, and clears VO state — bottom-up and only once the result is
-durable on the parent. A follow-up that arrives during the grace
+parent's fan-out, and clears VO state. A follow-up that arrives during the grace
 window revives the child instead, and messages to a cleaned/terminal child are
-rejected rather than re-bootstrapped. Separately, the `Session` VO arms a
-generation-guarded `check_child_liveness` watchdog per active child; on a stale
-heartbeat it appends `WorkerHeartbeatStale` and raises a `HeartbeatStale` signal,
-exempting children parked on a `needs_input` request (`awaiting_input`).
+rejected rather than re-bootstrapped.
+
+Worker also owns one liveness deadline. Its first accepted task or heartbeat
+arms one delayed self-call. Later heartbeats update `last_heartbeat_at` but do
+not add timers. When the call fires, it stops for terminal or `awaiting_input`
+state, reschedules once for the exact latest-heartbeat deadline when still
+fresh, or sends one joined `HeartbeatStale` signal to Session and stops when
+genuinely stale. Session never polls Worker state to discover staleness.
 
 ## Workflows And Execution Runs
 
@@ -468,11 +471,19 @@ These are workflow-shaped because rerunning the same logical job should be
 explicit and observable.
 
 `ExecutionRun` loads the persisted canonical plan and asks the pure interpreter
-for every ready logical task. It materializes stable rows keyed by
-`(run_uid, node_id, item_key)` and submits all ready tasks durably. There is no
-application active-worker count or execution fan-out constant. Run budgets
-bound logical task count; provider pacing and governed capability or hand
-capacity queue physical work.
+for ready logical work. It materializes every stable row keyed by
+`(run_uid, node_id, item_key)`, but pending rows remain storage-only. The
+positive `execution.max_in_flight_tasks` setting (64 by default) is the physical
+window for live attached `ExecutionTask` calls and is independent of logical
+`max_tasks` and provider concurrency.
+
+On each dispatch step the run fills only open window slots with the first stable
+undispatched rows, acknowledges the processed Postgres wake epoch, and suspends
+on the matching Restate promise plus the attached calls it owns. A completed
+handle opens one slot, which the run refills before parking again. The only
+advancement sources are an already-persisted run/task transition named by a wake
+epoch or completion of an attached task call. Pending rows do not own a task
+runtime, and elapsed time never causes a scan or dispatch.
 
 `ExecutionTask` atomically reserves its worst-case integer cost, token, task,
 tool-call, retrieved-byte, and deadline allowance before dispatch. A failed
@@ -511,6 +522,13 @@ requirement and completion check passes. Terminal state emits compact aggregate
 output, citations, failures, and gaps to the owning session. The session starts
 at most one deduplicated synthesis turn for the originating user sequence; it
 does not ingest every raw map output or poll the run through the root model.
+
+Public `confirm`, `cancel`, `deliver_input`, `decide_review`,
+`deliver_signal`, and `apply_amendment` requests acknowledge success only after
+the repository mutation commits, any exact task-specific shared handler accepts
+it, and `ExecutionRun::wake` accepts the committed epoch. Task terminal outcomes
+may send their run wake detached because outcome and epoch are already committed
+and the run retains the attached child call as the second recovery path.
 
 Behavior-lab execution uses the same reserve-before-dispatch rule. An
 `ExperimentRun` requires one exact immutable `experiment_plan` revision and

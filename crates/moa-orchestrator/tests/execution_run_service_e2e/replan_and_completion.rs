@@ -30,8 +30,8 @@ use moa_execution::wire::{
 };
 use moa_execution::{ReplanStopReason, bindings::extract_map_key};
 use moa_test_support::{
-    FixtureCapabilityOptions, FixtureCapabilityOutcome, FixtureCapabilityTool, IsolatedTest,
-    OrchestratorTestFixture, TestApiClient,
+    FixtureCapabilityController, FixtureCapabilityOptions, FixtureCapabilityOutcome,
+    FixtureCapabilityTool, IsolatedTest, OrchestratorTestFixture, TestApiClient,
 };
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -618,8 +618,142 @@ async fn useful_amendment_preserves_completed_work_service_e2e() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
+async fn amendment_retries_after_persisted_epoch_before_wake_ack_service_e2e() -> Result<()> {
+    // Pins: a public amendment interrupted after its revision and wake epoch commit
+    // retries through the joined run wake without applying or resuming the plan twice.
+    let agent_a = agent_node("agent_a", "AMENDMENT_HANDOFF_AGENT_A");
+    let amendment = replacement_amendment(
+        1,
+        "agent_a",
+        agent_node("agent_b", "AMENDMENT_HANDOFF_AGENT_B"),
+        "recover the exact persisted amendment handoff",
+    );
+    let fixture = replan_fixture(
+        replan_script_with_text_agents(
+            &[("amendment-handoff-trigger", &amendment)],
+            &[
+                (
+                    "AMENDMENT_HANDOFF_AGENT_A",
+                    serde_json::to_string(&needs_replan_result("amendment-handoff-trigger"))?,
+                ),
+                (
+                    "AMENDMENT_HANDOFF_AGENT_B",
+                    serde_json::to_string(&json!({"repair": "recovered"}))?,
+                ),
+            ],
+        )?,
+        FixtureCapabilityOptions::default(),
+    )
+    .await?;
+    let test = fixture.isolated().await;
+    let started = start_compiled_run(
+        &fixture,
+        &test,
+        "amendment-handoff-recovery",
+        "recover a committed amendment before its wake acknowledgement",
+        None,
+        move |_| Ok(useful_replan_contract(agent_a)),
+    )
+    .await?;
+    await_waiting_replan(test.client(), &started.run, 1).await?;
+    assert_valid_amendment(&fixture, &started, &amendment).await?;
+
+    let pool = sqlx::PgPool::connect(&fixture.postgres_url).await?;
+    let repository = ExecutionRepository::new(pool);
+    let scope = ExecutionScope::Tenant {
+        tenant_id: started.run.tenant_id,
+    };
+    let before = repository
+        .load_run(scope, started.run.run_uid)
+        .await?
+        .context("load pre-amendment run")?;
+    fixture
+        .restart_orchestrator_with_env(vec![(
+            "MOA_EXECUTION_TEST_PAUSE_MUTATION_HANDOFF".to_string(),
+            "true".to_string(),
+        )])
+        .await
+        .context("arm the post-commit amendment handoff pause")?;
+
+    let request = ExecutionAmendmentRequest {
+        run: started.run.clone(),
+        expected_plan_revision: amendment.base_plan_revision,
+        amendment: amendment.clone(),
+    };
+    let client = fixture.client.clone();
+    let request_for_call = request.clone();
+    let interrupted = tokio::spawn(async move {
+        client
+            .post_call::<_, ExecutionMutationResponse>(
+                "/Execution/apply_amendment",
+                &request_for_call,
+            )
+            .await
+    });
+    let committed_epoch =
+        await_committed_amendment(&repository, scope, started.run.run_uid, before.wake_epoch)
+            .await?;
+    assert!(
+        !interrupted.is_finished(),
+        "public amendment returned before its joined run wake acknowledgement"
+    );
+
+    fixture
+        .hard_crash_and_restart_orchestrator()
+        .await
+        .context("crash in the persisted-amendment/pre-wake acknowledgement window")?;
+    let recovered = tokio::time::timeout(SERVICE_TIMEOUT, interrupted)
+        .await
+        .context("amendment request did not retry after orchestrator recovery")???;
+    assert_applied_or_replayed(recovered, 2);
+
+    let terminal = await_execution_terminal(test.client(), &started.run).await?;
+    assert_eq!(terminal.run.status, ExecutionRunStatus::Completed);
+    assert_eq!(terminal.run.plan_revision, 2);
+    let before_replay = repository
+        .load_run(scope, started.run.run_uid)
+        .await?
+        .context("load completed amended run")?;
+    assert!(before_replay.wake_epoch >= committed_epoch);
+    assert_replayed(
+        test.client()
+            .post_call("/Execution/apply_amendment", &request)
+            .await?,
+        2,
+    );
+    let after_replay = repository
+        .load_run(scope, started.run.run_uid)
+        .await?
+        .context("load replayed amended run")?;
+    assert_eq!(
+        after_replay.wake_epoch, before_replay.wake_epoch,
+        "replaying the exact amendment must not increment its persisted wake epoch"
+    );
+    let tasks = list_execution_tasks(test.client(), started.run.clone()).await?;
+    assert_eq!(
+        tasks
+            .tasks
+            .iter()
+            .filter(|task| task.node_id == "agent_a")
+            .count(),
+        1
+    );
+    assert_eq!(
+        tasks
+            .tasks
+            .iter()
+            .filter(|task| task.node_id == "agent_b")
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
 async fn completion_gate_missing_company_service_e2e() -> Result<()> {
-    // Pins: 499 completed map items cannot satisfy the declared 500-company universe.
+    // Pins: a bounded execution window refills until all 499 map items complete, but the
+    // missing 500th company still prevents the declared universe from completing.
     const TOOL: &str = "screen_sp500_company";
     const MAP_NODE: &str = "sp500_screen";
     const MISSING_COMPANY: &str = "SP500-COMPANY-500";
@@ -627,16 +761,21 @@ async fn completion_gate_missing_company_service_e2e() -> Result<()> {
         .map(|index| json!({"ticker": format!("SP500-COMPANY-{index:03}")}))
         .collect::<Vec<_>>();
     let actual_items = expected_items[..499].to_vec();
+    let actual_item_count = actual_items.len();
     let expected_keys = expected_items
         .iter()
         .map(|item| extract_map_key(item, "/ticker"))
         .collect::<Result<Vec<_>, _>>()?;
     let missing_key = extract_map_key(&json!({"ticker": MISSING_COMPANY}), "/ticker")?;
+    let max_in_flight_tasks = ExecutionConfig::default().max_in_flight_tasks;
     let fixture = replan_fixture(
         default_script(),
         FixtureCapabilityOptions {
             tools: vec![map_tool(TOOL, "/ticker")],
-            orchestrator_env: Vec::new(),
+            orchestrator_env: vec![(
+                "MOA_EXECUTION_MAX_IN_FLIGHT_TASKS".to_string(),
+                max_in_flight_tasks.to_string(),
+            )],
         },
     )
     .await?;
@@ -660,11 +799,11 @@ async fn completion_gate_missing_company_service_e2e() -> Result<()> {
     let controller = fixture
         .fixture_capability()
         .context("execution fixture omitted map capability controller")?;
-    let calls = controller.wait_for_calls(499, SERVICE_TIMEOUT).await?;
+    release_fixture_calls_in_window(controller, actual_item_count, max_in_flight_tasks).await?;
+    let calls = controller.calls();
     assert_eq!(calls.len(), 499);
     assert!(calls.iter().all(|call| call.capability == TOOL));
     assert!(calls.iter().all(|call| call.item_key != missing_key));
-    controller.release(499);
 
     let terminal = await_execution_terminal(test.client(), &started.run).await?;
     assert_completion_partial(&terminal, 1, 2, 500);
@@ -756,11 +895,15 @@ async fn run_silent_incomplete_universe(universe_size: usize, tool_name: &str) -
         .map(|item| extract_map_key(item, "/ticker"))
         .collect::<Result<Vec<_>, _>>()?;
     let missing_keys = expected_keys[returned_count..].to_vec();
+    let max_in_flight_tasks = ExecutionConfig::default().max_in_flight_tasks;
     let fixture = replan_fixture(
         default_script(),
         FixtureCapabilityOptions {
             tools: vec![map_tool(tool_name, "/ticker")],
-            orchestrator_env: Vec::new(),
+            orchestrator_env: vec![(
+                "MOA_EXECUTION_MAX_IN_FLIGHT_TASKS".to_string(),
+                max_in_flight_tasks.to_string(),
+            )],
         },
     )
     .await?;
@@ -788,12 +931,10 @@ async fn run_silent_incomplete_universe(universe_size: usize, tool_name: &str) -
     let controller = fixture
         .fixture_capability()
         .context("execution fixture omitted silent-universe capability controller")?;
-    let calls = controller
-        .wait_for_calls(returned_count, SERVICE_TIMEOUT)
-        .await?;
+    release_fixture_calls_in_window(controller, returned_count, max_in_flight_tasks).await?;
+    let calls = controller.calls();
     assert_eq!(calls.len(), returned_count);
     assert!(calls.iter().all(|call| call.capability == tool_name));
-    controller.release(returned_count);
 
     let terminal = await_execution_terminal(test.client(), &started.run).await?;
     assert_completion_partial(
@@ -839,6 +980,32 @@ async fn run_silent_incomplete_universe(universe_size: usize, tool_name: &str) -
         ],
     )
     .await?;
+    Ok(())
+}
+
+async fn release_fixture_calls_in_window(
+    controller: &FixtureCapabilityController,
+    total: usize,
+    max_in_flight_tasks: usize,
+) -> Result<()> {
+    if max_in_flight_tasks == 0 {
+        bail!("execution fixture window must be positive");
+    }
+    let mut released = 0;
+    while released < total {
+        let batch_size = max_in_flight_tasks.min(total - released);
+        controller
+            .wait_for_calls(released + batch_size, SERVICE_TIMEOUT)
+            .await?;
+        controller.release(batch_size);
+        released += batch_size;
+    }
+    if controller.peak_live_calls() > max_in_flight_tasks {
+        bail!(
+            "fixture capability peak {} exceeded configured execution window {max_in_flight_tasks}",
+            controller.peak_live_calls()
+        );
+    }
     Ok(())
 }
 
@@ -1590,6 +1757,38 @@ async fn await_waiting_replan(
             bail!(
                 "run {} did not reach WaitingReplan revision {revision} within {SERVICE_TIMEOUT:?}; last={last_status:?}",
                 run.run_uid
+            );
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn await_committed_amendment(
+    repository: &ExecutionRepository,
+    scope: ExecutionScope,
+    run_uid: uuid::Uuid,
+    previous_epoch: u64,
+) -> Result<u64> {
+    let deadline = Instant::now() + SERVICE_TIMEOUT;
+    loop {
+        let run = repository
+            .load_run(scope, run_uid)
+            .await?
+            .context("load amendment handoff run")?;
+        if run.plan_revision == 2 {
+            assert_eq!(
+                run.wake_epoch,
+                previous_epoch + 1,
+                "the amendment transaction must advance its wake epoch exactly once"
+            );
+            assert_eq!(run.plan_history.len(), 1);
+            return Ok(run.wake_epoch);
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "amendment did not commit within {SERVICE_TIMEOUT:?}; revision={}, epoch={}",
+                run.plan_revision,
+                run.wake_epoch
             );
         }
         tokio::time::sleep(POLL_INTERVAL).await;

@@ -5,8 +5,15 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[[bin]]
+name = "moa-sweep-skill-seeder"
+path = "src/bin/moa_sweep_skill_seeder.rs"
+required-features = ["sweep-skill-seeder"]
+
 [features]
 integration = ["orchestrator-fixture"]
+# Test-only artifact activation used by the billed persona sweep's isolated DB.
+sweep-skill-seeder = ["dep:moa-artifacts"]
 # A programmable loopback HTTP server for custom connector runtime tests.
 # It has no Docker, Restate, Postgres, or production-network dependency.
 connector-api-fixture = ["dep:reqwest"]
@@ -48,6 +55,7 @@ hex = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
 moa-authz = { workspace = true, optional = true }
 moa-authz-schema = { workspace = true, optional = true }
+moa-artifacts = { workspace = true, features = ["test-support"], optional = true }
 moa-core = { workspace = true }
 moa-config = { workspace = true, optional = true }
 moa-wire = { workspace = true }

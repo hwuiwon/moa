@@ -262,7 +262,6 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
         )
         .bind_with_options(
             LLMGatewayImpl::new(providers.clone())
-                .with_session_limits(session_limits.clone())
                 .with_runtime_cache(runtime_cache.clone())
                 .serve(),
             high_cost_internal_service_options(),

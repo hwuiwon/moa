@@ -30,8 +30,8 @@ latency; server-side Prometheus histograms (`moa_turn_step_duration_seconds`)
 attribute that latency to pipeline steps. When a metrics endpoint is supplied,
 reports also include a `resource_bill` block from
 `moa_session_events_appended_total`: total durable event rows per completed
-turn, `ProgressUpdate` rows per turn, `ProgressNarrated` rows per turn, and
-the per-event-type row split. They also include
+turn, `ProgressUpdate` rows per turn, and the per-event-type row split. They
+also include
 `event_append_phase_latency_ms` from
 `moa_session_event_append_phase_seconds{phase=...}` so `event_persist` can be
 split into bounded append-store phases such as row-lock acquisition, event

@@ -127,7 +127,7 @@ pub(in crate::objects::session::handlers) fn unread_to_resume_signal(
         kind: unread.kind,
         severity: match unread.kind {
             ChildSignalKind::Failed => SignalSeverity::Critical,
-            ChildSignalKind::Finding => SignalSeverity::Info,
+            ChildSignalKind::Finding | ChildSignalKind::FanInSettled => SignalSeverity::Info,
             ChildSignalKind::Blocked
             | ChildSignalKind::NeedsInput
             | ChildSignalKind::HeartbeatStale => SignalSeverity::Warning,

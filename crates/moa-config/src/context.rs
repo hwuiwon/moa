@@ -63,19 +63,6 @@ pub struct SessionLimitsConfig {
     pub progress_first_delay_ms: u64,
     /// Minimum interval between durable progress updates, in milliseconds.
     pub progress_interval_ms: u64,
-    /// Whether default-on natural-language progress narration is enabled.
-    pub progress_narration_enabled: bool,
-    /// Optional model id override for progress narration. `None` selects the
-    /// model catalog's cheapest chat-capable model by combined token price.
-    pub progress_narration_model: Option<String>,
-    /// Minimum interval between progress narrations, in milliseconds. Consumed by
-    /// the per-session narration tick that dispatches the narration job.
-    pub progress_narration_interval_ms: u64,
-    /// Maximum number of narrations per rolling window before the narrator backs
-    /// off. Consumed by the per-session narration tick.
-    pub progress_narration_max_per_window: u32,
-    /// Maximum output tokens for one progress-narration completion.
-    pub progress_narration_max_tokens: u32,
     /// Grace window before a terminal worker self-cleans (removes itself from the
     /// parent fan-out and clears its VO state) after reporting its result. A follow-up
     /// arriving within this window revives the child instead of letting it clean up.
@@ -121,11 +108,6 @@ impl Default for SessionLimitsConfig {
             loop_detection_threshold: 3,
             progress_first_delay_ms: 8_000,
             progress_interval_ms: 8_000,
-            progress_narration_enabled: true,
-            progress_narration_model: None,
-            progress_narration_interval_ms: 20_000,
-            progress_narration_max_per_window: 30,
-            progress_narration_max_tokens: 120,
             worker_cleanup_grace_ms: 60_000,
             worker_resume_max_per_window: 6,
             worker_resume_window_ms: 600_000,
@@ -481,17 +463,6 @@ mod tests {
     }
 
     #[test]
-    fn progress_narration_defaults_are_on_with_cheapest_model() {
-        // Pins: narration ships default-on, catalog-cheapest model, with bounded cadence/cost.
-        let limits = SessionLimitsConfig::default();
-        assert!(limits.progress_narration_enabled);
-        assert_eq!(limits.progress_narration_model, None);
-        assert_eq!(limits.progress_narration_interval_ms, 20_000);
-        assert_eq!(limits.progress_narration_max_per_window, 30);
-        assert_eq!(limits.progress_narration_max_tokens, 120);
-    }
-
-    #[test]
     fn worker_resume_budget_defaults_are_bounded() {
         // Pins: guarded parent resume ships with a finite per-window budget and window.
         let limits = SessionLimitsConfig::default();
@@ -547,33 +518,5 @@ mod tests {
             .expect("heartbeat overlay should apply");
         assert_eq!(config.session_limits.worker_heartbeat_interval_ms, 5_000);
         assert_eq!(config.session_limits.worker_heartbeat_stale_ms, 30_000);
-    }
-
-    #[test]
-    fn progress_narration_env_overlay_overrides_defaults() {
-        // Pins: each MOA_SESSION_LIMITS_PROGRESS_NARRATION_* flat env var maps to its field.
-        let overlay = EnvOverlay {
-            session_limits_progress_narration_enabled: Some(false),
-            session_limits_progress_narration_model: Some("gpt-5-nano".to_string()),
-            session_limits_progress_narration_interval_ms: Some(45_000),
-            session_limits_progress_narration_max_per_window: Some(7),
-            session_limits_progress_narration_max_tokens: Some(64),
-            ..EnvOverlay::default()
-        };
-
-        let mut config = MoaConfig::default();
-        overlay
-            .apply_to(&mut config)
-            .expect("narration overlay should apply");
-
-        let limits = &config.session_limits;
-        assert!(!limits.progress_narration_enabled);
-        assert_eq!(
-            limits.progress_narration_model.as_deref(),
-            Some("gpt-5-nano")
-        );
-        assert_eq!(limits.progress_narration_interval_ms, 45_000);
-        assert_eq!(limits.progress_narration_max_per_window, 7);
-        assert_eq!(limits.progress_narration_max_tokens, 64);
     }
 }

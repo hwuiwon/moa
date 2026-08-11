@@ -54,15 +54,6 @@ impl SessionImpl {
         }))
     }
 
-    pub(super) async fn handle_narration_tick(
-        &self,
-        ctx: ObjectContext<'_>,
-        req: Json<NarrationTickRequest>,
-    ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("Session", "narration_tick");
-        narration::run_narration_tick(&ctx, req.into_inner().generation, &self.session_limits).await
-    }
-
     pub(super) async fn handle_turn_admission_heartbeat(
         &self,
         ctx: ObjectContext<'_>,

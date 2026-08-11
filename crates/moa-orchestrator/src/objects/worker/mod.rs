@@ -16,21 +16,21 @@ use moa_core::{
     types::identifiers::TenantId, types::identifiers::UserId, types::model::ModelCapabilities,
     types::session::SessionMeta, types::session::SessionStatus, types::session::TurnOutcome,
     types::session::UserMessage, types::tools::TrustedSandboxFileManifestRef,
-    types::worker::commands::AttachWorkerResultWaiterInput,
-    types::worker::commands::AttachWorkerResultWaiterOutput,
-    types::worker::commands::MarkWorkerChildTerminalInput,
-    types::worker::commands::RemoveWorkerResultWaiterInput,
     types::worker::commands::UserReplyDeliveryAck, types::worker::commands::WorkerToolRecord,
     types::worker::commands::WorkerTurnOutcomeRecord,
     types::worker::commands::WorkerTurnPreparation,
-    types::worker::commands::WorkerTurnResponseRecord, types::worker::state::ChildSignalKind,
-    types::worker::state::ParentResumePolicy, types::worker::state::SignalSeverity,
-    types::worker::state::WorkerChildRef, types::worker::state::WorkerId,
-    types::worker::state::WorkerInputTarget, types::worker::state::WorkerMessage,
-    types::worker::state::WorkerPendingInput, types::worker::state::WorkerProgressSummary,
-    types::worker::state::WorkerResult, types::worker::state::WorkerSignal,
+    types::worker::commands::WorkerTurnResponseRecord, types::worker::signals::ChildSignalKind,
+    types::worker::signals::ParentResumePolicy, types::worker::signals::SignalSeverity,
+    types::worker::signals::WorkerSignal, types::worker::state::WorkerChildRef,
+    types::worker::state::WorkerId, types::worker::state::WorkerInputTarget,
+    types::worker::state::WorkerMessage, types::worker::state::WorkerPendingInput,
+    types::worker::state::WorkerProgressSummary, types::worker::state::WorkerResult,
     types::worker::state::WorkerState, types::worker::state::WorkerStatus,
     types::worker::state::WorkerTerminalResult,
+    types::worker::terminal::AttachWorkerResultWaiterInput,
+    types::worker::terminal::AttachWorkerResultWaiterOutput,
+    types::worker::terminal::RecordWorkerChildTerminalInput,
+    types::worker::terminal::RemoveWorkerResultWaiterInput,
     types::worker::tool_schema::child_report_tool_schemas,
 };
 use moa_hands::ToolCatalogPin;
@@ -50,6 +50,7 @@ use crate::vo::{
 };
 use crate::worker_dispatch::MAX_WORKER_DEPTH;
 use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_observability::runtime_metrics::record_worker_terminal_parent_ack;
 
 mod handlers;
 mod persistence;
@@ -57,10 +58,11 @@ mod request;
 mod state;
 
 use crate::workflows::errors::moa_error_to_handler_error;
-use persistence::{persist_parent_session_event, render_user_message};
+use persistence::render_user_message;
 use request::{build_completion_request, synthetic_session_meta};
 use state::MAX_TURNS_PER_POST;
 pub use state::WorkerVoState;
+use state::liveness::WorkerLivenessDecision;
 
 /// Maximum one-turn runner iterations a worker workflow may execute before failing.
 pub(crate) const MAX_WORKER_TURNS_PER_WORKFLOW: usize = MAX_TURNS_PER_POST;
@@ -84,8 +86,13 @@ pub trait Worker {
     #[shared]
     async fn progress_summary() -> Result<Json<WorkerProgressSummary>, HandlerError>;
 
-    /// Refreshes the telemetry-plane heartbeat timestamp (VO state only, no event).
+    /// Advances the heartbeat and arms the Worker-owned deadline when needed.
     async fn record_heartbeat(at: Json<DateTime<Utc>>) -> Result<(), HandlerError>;
+
+    /// Evaluates this Worker's generation-guarded heartbeat deadline.
+    async fn liveness_deadline(
+        request: Json<WorkerLivenessDeadlineRequest>,
+    ) -> Result<(), HandlerError>;
 
     /// Returns the terminal child result when the child has finished.
     #[shared]
@@ -214,6 +221,13 @@ pub struct CleanupRequest {
     /// generation no longer matches the VO's current `cleanup_generation` is stale —
     /// the child was revived or the cleanup was rescheduled — and is ignored.
     pub generation: u64,
+}
+
+/// Internal payload for one generation-guarded Worker-owned liveness deadline.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkerLivenessDeadlineRequest {
+    /// Generation that owned the single outstanding slot when this call was scheduled.
+    pub expected_generation: u64,
 }
 
 /// Concrete `Worker` virtual object implementation.

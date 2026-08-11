@@ -15,9 +15,8 @@ use crate::types::{
     observability::CacheReport, provider::ModelTier, security::InjectionSignal,
     security::SecurityCircuitTransition, security::ToolCapabilityId,
     security::ToolOutputAssessment, session::SessionStatus, tools::SecuredToolOutput,
-    tools::ToolOutput, worker::state::ChildSignalKind, worker::state::InputAudience,
-    worker::state::NarrationSegment, worker::state::NarrationSource, worker::state::SignalSeverity,
-    worker::state::WorkerId, worker::state::WorkerState,
+    tools::ToolOutput, worker::signals::ChildSignalKind, worker::signals::SignalSeverity,
+    worker::state::InputAudience, worker::state::WorkerId, worker::state::WorkerState,
 };
 
 /// Durable reference to the complete task-result source for one execution run.
@@ -727,24 +726,6 @@ pub enum Event {
         /// Stale threshold, in milliseconds, that was exceeded.
         threshold_ms: u64,
     },
-    /// One durable, rate-limited natural-language progress narration for the session.
-    ///
-    /// Emitted by the per-session narrator: one merged update per period covering
-    /// all active workers (and the active coordinator step). Carries
-    /// `model`/`tokens_used` for cost observability.
-    ProgressNarrated {
-        /// Source attributed to the merged narration (`Coordinator` for the merge).
-        source: NarrationSource,
-        /// Merged human-readable update streamed to the user.
-        text: String,
-        /// Optional per-source breakdown produced by the same single call.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        segments: Vec<NarrationSegment>,
-        /// Model used for the narration call (`"none"` for the 0-call short-circuit).
-        model: String,
-        /// Tokens consumed by the narration call (`0` for the short-circuit).
-        tokens_used: u32,
-    },
     /// Memory read operation.
     MemoryRead {
         /// Logical page path.
@@ -818,9 +799,9 @@ pub enum Event {
 /// turn work is still pending without any wildcard fallback. Because the
 /// classification match is exhaustive, adding a new [`Event`] variant fails to
 /// compile until its effect is declared deliberately — closing the class of
-/// bugs where an asynchronously appended passive event (for example a detached
-/// `ProgressNarrated` or a watchdog `WorkerHeartbeatStale` landing just after a
-/// `ToolResult`) silently masked pending work and stalled the turn loop.
+/// bugs where an asynchronously appended passive event (for example a watchdog
+/// `WorkerHeartbeatStale` landing just after a `ToolResult`) silently masked
+/// pending work and stalled the turn loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ProcessingEffect {
     /// The event carries unaddressed work: if it is the newest meaningful event
@@ -885,7 +866,7 @@ impl Event {
 
             // Neutrals: passive telemetry, liveness, enrichment, and lifecycle
             // breadcrumbs. Several are appended asynchronously off the turn path
-            // (ProgressNarrated, WorkerHeartbeatStale, TurnMetrics, CacheReport,
+            // (WorkerHeartbeatStale, TurnMetrics, CacheReport,
             // MemoryRead, MemoryIngest, BrainThinking); classifying them transparent
             // is precisely what stops a late append from masking pending work.
             Self::SessionCreated { .. }
@@ -912,7 +893,6 @@ impl Event {
             | Self::TurnMetrics { .. }
             | Self::WorkerSignalReceived { .. }
             | Self::WorkerHeartbeatStale { .. }
-            | Self::ProgressNarrated { .. }
             // The continuation turn is dispatched durably by the owning Session or
             // Worker VO at the moment this fact is appended, so the tail scan must not
             // treat the fact itself as unaddressed work. Classifying it transparent also
@@ -1604,17 +1584,6 @@ mod tests {
                 EventType::WorkerHeartbeatStale,
                 "WorkerHeartbeatStale",
             ),
-            (
-                Event::ProgressNarrated {
-                    source: NarrationSource::Coordinator,
-                    text: "Searching the pricing docs".to_string(),
-                    segments: Vec::new(),
-                    model: "none".to_string(),
-                    tokens_used: 0,
-                },
-                EventType::ProgressNarrated,
-                "ProgressNarrated",
-            ),
         ];
 
         for (event, expected_type, expected_name) in events {
@@ -1701,8 +1670,8 @@ mod tests {
     fn processing_effect_classifies_scheduling_contract() {
         // Pins: the turn-scheduling classification (F04). Triggers carry pending work;
         // terminals conclude or suspend the loop; the asynchronously appended passive
-        // vectors (ProgressNarrated, WorkerHeartbeatStale, TurnMetrics, CacheReport,
-        // MemoryRead/Ingest, BrainThinking) are Neutral so they cannot mask a trigger.
+        // vectors (WorkerHeartbeatStale, TurnMetrics, CacheReport, MemoryRead/Ingest,
+        // BrainThinking) are Neutral so they cannot mask a trigger.
         use crate::events::ProcessingEffect;
 
         let triggers = [
@@ -1760,13 +1729,6 @@ mod tests {
         }
 
         let neutrals = [
-            Event::ProgressNarrated {
-                source: NarrationSource::Coordinator,
-                text: "working".to_string(),
-                segments: Vec::new(),
-                model: "none".to_string(),
-                tokens_used: 0,
-            },
             Event::WorkerHeartbeatStale {
                 worker_id: "child-1".to_string(),
                 last_heartbeat_at: Utc::now(),

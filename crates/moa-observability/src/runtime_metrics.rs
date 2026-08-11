@@ -41,11 +41,58 @@ const APPROVAL_WAIT_DURATION_SECONDS_BUCKETS: &[f64] = &[
     0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0, 7200.0,
     14400.0, 28800.0, 86400.0,
 ];
+const COORDINATION_ACK_DURATION_SECONDS_BUCKETS: &[f64] = &[
+    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+    120.0, 300.0,
+];
+const EXECUTION_TASK_COUNT_BUCKETS: &[f64] = &[
+    0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0,
+];
 const GENAI_CLIENT_TOKEN_USAGE_METRIC: &str = "gen_ai.client.token.usage";
 const GENAI_CLIENT_OPERATION_DURATION_METRIC: &str = "gen_ai.client.operation.duration";
 const GENAI_CLIENT_TIME_TO_FIRST_CHUNK_METRIC: &str = "gen_ai.client.operation.time_to_first_chunk";
 const OTEL_METRIC_EXPORT_INTERVAL_ENV: &str = "OTEL_METRIC_EXPORT_INTERVAL";
 const DEFAULT_OTLP_METRIC_EXPORT_INTERVAL: Duration = Duration::from_secs(120);
+
+/// Bounded outcomes for one worker terminal delivery to its owning session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerTerminalDeliveryResult {
+    /// The session accepted and persisted the terminal delivery.
+    Accepted,
+    /// The session had already accepted the same terminal delivery.
+    Duplicate,
+}
+
+impl WorkerTerminalDeliveryResult {
+    /// Returns the stable low-cardinality result label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Duplicate => "duplicate",
+        }
+    }
+}
+
+/// Bounded terminal kinds that can settle a conversational worker fan-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerFanInSettledKind {
+    /// The final outstanding child completed successfully.
+    Completed,
+    /// The final outstanding child settled through cancellation.
+    Cancelled,
+}
+
+impl WorkerFanInSettledKind {
+    /// Returns the stable low-cardinality terminal-kind label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
 
 /// Bounded sandbox-provider classes permitted on workspace metric labels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -619,6 +666,22 @@ const HISTOGRAM_BOUNDARIES: &[(&str, &[f64])] = &[
         APPROVAL_WAIT_DURATION_SECONDS_BUCKETS,
     ),
     (
+        "moa_worker_terminal_parent_ack_seconds",
+        COORDINATION_ACK_DURATION_SECONDS_BUCKETS,
+    ),
+    (
+        "moa_execution_mutation_run_wake_ack_seconds",
+        COORDINATION_ACK_DURATION_SECONDS_BUCKETS,
+    ),
+    (
+        "moa_execution_dispatch_batch_size",
+        EXECUTION_TASK_COUNT_BUCKETS,
+    ),
+    (
+        "moa_execution_owned_in_flight_tasks",
+        EXECUTION_TASK_COUNT_BUCKETS,
+    ),
+    (
         "moa_sandbox_provision_seconds",
         SERVICE_DURATION_SECONDS_BUCKETS,
     ),
@@ -872,6 +935,50 @@ pub fn record_tool_reprovision(provider: &str) {
 /// Records one end-to-end turn latency sample.
 pub fn record_turn_latency(duration: Duration) {
     histogram!("moa_turn_latency_seconds").record(duration.as_secs_f64());
+}
+
+/// Records worker-terminal-to-parent acknowledgement latency.
+///
+/// The duration begins when the Worker starts its joined terminal handoff and
+/// ends when the owning Session acknowledges the persisted delivery.
+pub fn record_worker_terminal_parent_ack(duration: Duration) {
+    histogram!("moa_worker_terminal_parent_ack_seconds").record(duration.as_secs_f64());
+}
+
+/// Records persisted-execution-mutation-to-run-wake acknowledgement latency.
+///
+/// The duration begins after the user-facing mutation commits and ends when
+/// the exact `ExecutionRun` wake is acknowledged by Restate.
+pub fn record_execution_mutation_run_wake_ack(duration: Duration) {
+    histogram!("moa_execution_mutation_run_wake_ack_seconds").record(duration.as_secs_f64());
+}
+
+/// Records how many ready execution tasks were dispatched in one bounded refill.
+pub fn record_execution_dispatch_batch_size(size: usize) {
+    histogram!("moa_execution_dispatch_batch_size").record(size as f64);
+}
+
+/// Records the number of task calls currently owned by one `ExecutionRun`.
+pub fn record_execution_owned_in_flight_tasks(count: usize) {
+    histogram!("moa_execution_owned_in_flight_tasks").record(count as f64);
+}
+
+/// Records whether one worker terminal delivery was accepted or deduplicated.
+pub fn record_worker_terminal_delivery(result: WorkerTerminalDeliveryResult) {
+    counter!(
+        "moa_worker_terminal_deliveries_total",
+        "result" => result.as_str()
+    )
+    .increment(1);
+}
+
+/// Records the terminal kind that settled one conversational worker fan-in.
+pub fn record_worker_fan_in_settled(kind: WorkerFanInSettledKind) {
+    counter!(
+        "moa_worker_fan_in_settled_total",
+        "kind" => kind.as_str()
+    )
+    .increment(1);
 }
 
 /// Records one aggregate turn-step duration sample.
@@ -1393,6 +1500,30 @@ fn register_metric_descriptions() {
         "End-to-end turn latency in seconds."
     );
     describe_histogram!(
+        "moa_worker_terminal_parent_ack_seconds",
+        "Worker-terminal-to-parent acknowledgement latency in seconds."
+    );
+    describe_histogram!(
+        "moa_execution_mutation_run_wake_ack_seconds",
+        "Persisted execution mutation to ExecutionRun wake acknowledgement latency in seconds."
+    );
+    describe_histogram!(
+        "moa_execution_dispatch_batch_size",
+        "Ready execution tasks dispatched by one bounded ExecutionRun refill."
+    );
+    describe_histogram!(
+        "moa_execution_owned_in_flight_tasks",
+        "Task calls owned by an ExecutionRun after a bounded dispatch refill."
+    );
+    describe_counter!(
+        "moa_worker_terminal_deliveries_total",
+        "Worker terminal deliveries by bounded acceptance result."
+    );
+    describe_counter!(
+        "moa_worker_fan_in_settled_total",
+        "Conversational worker fan-in settlements by bounded terminal kind."
+    );
+    describe_histogram!(
         TURN_STEP_DURATION_METRIC,
         "Aggregate per-turn step duration in seconds, labeled by documented turn step."
     );
@@ -1581,6 +1712,9 @@ mod tests {
             "gen_ai.client.token.usage",
             "moa_approval_wait_seconds",
             "moa_cache_hit_rate",
+            "moa_execution_dispatch_batch_size",
+            "moa_execution_mutation_run_wake_ack_seconds",
+            "moa_execution_owned_in_flight_tasks",
             "moa_knowledge_ingestion_step_duration_seconds",
             "moa_lineage_durable_append_seconds",
             "moa_retrieval_cache_hit_seconds",
@@ -1593,6 +1727,7 @@ mod tests {
             "moa_tool_call_duration_seconds",
             "moa_turn_latency_seconds",
             "moa_turn_step_duration_seconds",
+            "moa_worker_terminal_parent_ack_seconds",
         ]
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
@@ -1615,7 +1750,7 @@ mod tests {
     }
 
     #[test]
-    fn otlp_drops_append_phase_but_exports_retained_histograms() {
+    fn otlp_drops_append_phase_but_exports_retained_coordination_histograms() {
         // Pins: append-phase timing remains a Prometheus-only load-test
         // diagnostic while ordinary retained service histograms still flow to
         // OTLP through the same view configuration used in production.
@@ -1633,6 +1768,10 @@ mod tests {
 
         histogram!(SESSION_EVENT_APPEND_PHASE_METRIC, "phase" => "commit").record(0.002);
         histogram!("moa_turn_latency_seconds").record(0.025);
+        record_worker_terminal_parent_ack(Duration::from_millis(4));
+        record_execution_mutation_run_wake_ack(Duration::from_millis(5));
+        record_execution_dispatch_batch_size(32);
+        record_execution_owned_in_flight_tasks(64);
         provider
             .force_flush()
             .expect("in-memory metric exporter should flush");
@@ -1647,14 +1786,92 @@ mod tests {
             .map(|metric| metric.name())
             .collect::<std::collections::BTreeSet<_>>();
 
-        assert!(
-            names.contains("moa_turn_latency_seconds"),
-            "a retained histogram must still export through OTLP: {names:?}"
-        );
+        for metric in [
+            "moa_turn_latency_seconds",
+            "moa_worker_terminal_parent_ack_seconds",
+            "moa_execution_mutation_run_wake_ack_seconds",
+            "moa_execution_dispatch_batch_size",
+            "moa_execution_owned_in_flight_tasks",
+        ] {
+            assert!(
+                names.contains(metric),
+                "retained histogram {metric} must export through OTLP: {names:?}"
+            );
+        }
         assert!(
             !names.contains(SESSION_EVENT_APPEND_PHASE_METRIC),
             "append-phase timing must not export through OTLP: {names:?}"
         );
+    }
+
+    #[test]
+    fn coordination_metrics_export_descriptions_and_bounded_labels() {
+        // Pins: coordination handoffs and bounded dispatch observations reach
+        // Prometheus with descriptions, while counter labels come only from
+        // their closed-vocabulary enums and no runtime identifiers are exposed.
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            register_metric_descriptions();
+            record_worker_terminal_parent_ack(Duration::from_millis(4));
+            record_execution_mutation_run_wake_ack(Duration::from_millis(5));
+            record_execution_dispatch_batch_size(32);
+            record_execution_owned_in_flight_tasks(64);
+            record_worker_terminal_delivery(WorkerTerminalDeliveryResult::Accepted);
+            record_worker_terminal_delivery(WorkerTerminalDeliveryResult::Duplicate);
+            record_worker_fan_in_settled(WorkerFanInSettledKind::Completed);
+            record_worker_fan_in_settled(WorkerFanInSettledKind::Cancelled);
+        });
+        let rendered = handle.render();
+
+        let coordination_metrics = [
+            "moa_worker_terminal_parent_ack_seconds",
+            "moa_execution_mutation_run_wake_ack_seconds",
+            "moa_execution_dispatch_batch_size",
+            "moa_execution_owned_in_flight_tasks",
+            "moa_worker_terminal_deliveries_total",
+            "moa_worker_fan_in_settled_total",
+        ];
+        for metric in coordination_metrics {
+            assert!(
+                rendered.contains(&format!("# HELP {metric} ")),
+                "coordination metric {metric} should export a HELP description; rendered:\n{rendered}"
+            );
+        }
+
+        let coordination_series = rendered
+            .lines()
+            .filter(|line| {
+                coordination_metrics
+                    .iter()
+                    .any(|metric| line.starts_with(metric))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for label in [
+            "result=\"accepted\"",
+            "result=\"duplicate\"",
+            "kind=\"completed\"",
+            "kind=\"cancelled\"",
+        ] {
+            assert!(
+                coordination_series.contains(label),
+                "coordination series should include bounded label `{label}`:\n{coordination_series}"
+            );
+        }
+        for forbidden in [
+            "session_id",
+            "worker_id",
+            "run_id",
+            "run_uid",
+            "task_id",
+            "task_uid",
+        ] {
+            assert!(
+                !coordination_series.contains(forbidden),
+                "coordination series must not carry high-cardinality label `{forbidden}`:\n{coordination_series}"
+            );
+        }
     }
 
     #[test]

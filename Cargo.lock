@@ -4553,6 +4553,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "moa-artifacts",
  "moa-authz",
  "moa-authz-schema",
  "moa-config",

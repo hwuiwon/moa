@@ -2,6 +2,86 @@
 
 use super::*;
 
+impl WorkerFanInState {
+    /// Loads the independent Session-owned worker fan-in key.
+    pub async fn load<R: VoReader>(reader: &R) -> Result<Self, HandlerError> {
+        Ok(reader
+            .get_json(K_WORKER_FAN_IN_STATE)
+            .await?
+            .unwrap_or_default())
+    }
+
+    /// Persists the independent Session-owned worker fan-in key.
+    pub fn persist(&self, ctx: &ObjectContext<'_>) {
+        ctx.set(K_WORKER_FAN_IN_STATE, Json::from(self.clone()));
+    }
+
+    /// Advances the fan-in generation after a child registration succeeds.
+    pub fn register_child(&mut self, children: &[WorkerChildRef]) {
+        self.generation = self.generation.saturating_add(1);
+        self.failure_generation = if children.iter().any(|child| {
+            child
+                .terminal
+                .as_ref()
+                .is_some_and(|terminal| terminal.state == WorkerState::Failed)
+        }) {
+            self.generation
+        } else {
+            0
+        };
+    }
+
+    /// Suppresses a success/cancelled fan-in wake for the current child-set generation.
+    pub fn suppress_current_generation(&mut self) {
+        self.failure_generation = self.generation;
+    }
+
+    /// Caches one validated terminal delivery and computes the one-shot fan-in transition.
+    pub fn record_terminal(
+        &mut self,
+        state: &mut SessionVoState,
+        input: &RecordWorkerChildTerminalInput,
+    ) -> WorkerTerminalRecord {
+        let Some(child_index) = state
+            .children
+            .iter()
+            .position(|child| child.id == input.worker_id)
+        else {
+            return WorkerTerminalRecord::Duplicate;
+        };
+        if self.terminal_deliveries.iter().any(|delivery| {
+            delivery.worker_id == input.worker_id && delivery.generation >= input.generation
+        }) {
+            return WorkerTerminalRecord::Duplicate;
+        }
+
+        state.remove_child_terminal_blob(&input.worker_id);
+        state.children[child_index].terminal = Some(input.terminal.clone());
+        self.terminal_deliveries
+            .retain(|delivery| delivery.worker_id != input.worker_id);
+        self.terminal_deliveries.push(WorkerTerminalDeliveryFence {
+            worker_id: input.worker_id.clone(),
+            generation: input.generation,
+        });
+        if self.terminal_deliveries.len() > MAX_WORKER_TERMINAL_DELIVERY_FENCES {
+            self.terminal_deliveries.remove(0);
+        }
+        if input.terminal.state == WorkerState::Failed {
+            self.suppress_current_generation();
+        }
+
+        let all_settled = !state.children.is_empty()
+            && state.children.iter().all(|child| child.terminal.is_some());
+        let settled = if all_settled && self.settled_generation != self.generation {
+            self.settled_generation = self.generation;
+            (self.failure_generation != self.generation).then_some(input.terminal.state)
+        } else {
+            None
+        };
+        WorkerTerminalRecord::Accepted { settled }
+    }
+}
+
 impl SessionVoState {
     /// Loads only the child-refs key for hot read-only child polls.
     pub(in crate::objects::session) async fn load_children<R: VoReader>(
@@ -19,22 +99,6 @@ impl SessionVoState {
         true
     }
 
-    /// Caches a terminal child result until the parent consumes it.
-    pub fn mark_child_terminal(&mut self, input: MarkWorkerChildTerminalInput) -> bool {
-        let Some(child) = self
-            .children
-            .iter_mut()
-            .find(|child| child.id == input.worker_id)
-        else {
-            return false;
-        };
-        if child.terminal.is_some() {
-            return false;
-        }
-        child.terminal = Some(input.terminal);
-        true
-    }
-
     /// Removes and returns a cached terminal child result.
     pub fn consume_child_terminal(&mut self, worker_id: &str) -> Option<WorkerTerminalResult> {
         let index = self
@@ -48,8 +112,6 @@ impl SessionVoState {
     pub fn remove_child(&mut self, worker_id: &str) -> bool {
         let before = self.children.len();
         self.children.retain(|child| child.id != worker_id);
-        // Drop any outstanding liveness watchdog for the now-removed child.
-        self.clear_child_liveness(worker_id);
         // A child that left the fan-out can no longer be answered, so any reply target
         // it still advertises would swallow the next plain user message.
         self.clear_worker_input_targets_for_worker(worker_id);

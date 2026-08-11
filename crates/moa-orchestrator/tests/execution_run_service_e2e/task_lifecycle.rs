@@ -19,6 +19,7 @@ use moa_core::{
     events::Event,
     types::{
         action_policy::{ActionPolicyEffect, ActionReviewStatus, ActionRuleScope},
+        context::MessageRole,
         execution_planning::{ExecutionSourceProvenance, GeneratedPlanPlannerProvenance},
         identifiers::{SessionId, TenantId},
     },
@@ -37,9 +38,11 @@ use moa_execution::{
         ExecutionTerminalEvidence, LogicalTask, LogicalTaskKind,
     },
     wire::{
-        ExecutionCancelRequest, ExecutionInputRequest, ExecutionMutationResponse,
-        ExecutionPlanningContextRequest, ExecutionPlanningContextResponse, ExecutionRunRequest,
-        ExecutionStartRequest, ExecutionStartResponse, ExecutionStatusResponse,
+        ExecutionCancelRequest, ExecutionConfirmRequest, ExecutionConflictReason,
+        ExecutionInputRequest, ExecutionMutationResponse, ExecutionPlanningContextRequest,
+        ExecutionPlanningContextResponse, ExecutionReviewDecision, ExecutionReviewDecisionRequest,
+        ExecutionRunRequest, ExecutionSignalRequest, ExecutionStartRequest, ExecutionStartResponse,
+        ExecutionStatusResponse,
     },
 };
 use moa_orchestrator::services::{
@@ -59,13 +62,20 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::evaluation::{assert_execution_eval_case, assert_repository_execution_eval_case};
-use crate::execution_execution_support::fixtures::{
-    POLL_INTERVAL, SERVICE_TIMEOUT, await_execution_terminal, list_execution_tasks,
+use crate::execution_execution_support::{
+    assertions::journal_requests,
+    fixtures::{POLL_INTERVAL, SERVICE_TIMEOUT, await_execution_terminal, list_execution_tasks},
 };
 
 const CAPABILITY_NODE_ID: &str = "capability";
 const OUTPUT_NODE_ID: &str = "output";
 const REQUIREMENT_ID: &str = "result";
+
+#[derive(Clone, Copy)]
+enum ExternalWaitKind {
+    Review,
+    Signal,
+}
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
@@ -99,7 +109,7 @@ async fn execution_eval_rate_limit_reuses_task_identity_service_e2e() -> Result<
         ActionPolicyEffect::Allow,
     )
     .await?;
-    let run = start_service_run(&fixture, &prepared).await?;
+    let run = start_service_run(&fixture, &prepared, false).await?;
     let controller = fixture_capability(&fixture)?;
 
     let first = controller.wait_for_calls(1, SERVICE_TIMEOUT).await?;
@@ -205,7 +215,7 @@ async fn execution_eval_wrong_schema_is_invalid_output_service_e2e() -> Result<(
             "properties": {"result": {"type": "string"}}
         }),
     )?;
-    let run = start_service_run(&fixture, &prepared).await?;
+    let run = start_service_run(&fixture, &prepared, false).await?;
     let controller = fixture_capability(&fixture)?;
     controller.wait_for_calls(1, SERVICE_TIMEOUT).await?;
     controller.release(1);
@@ -254,7 +264,8 @@ async fn execution_eval_wrong_schema_is_invalid_output_service_e2e() -> Result<(
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
 async fn terminal_failure_does_not_retry_service_e2e() -> Result<()> {
-    // Pins: a one-attempt terminalized tool error makes exactly one dispatch and no new generation.
+    // Pins: a one-attempt terminalized tool error makes exactly one dispatch and no new generation,
+    // including after the completed run is replayed through the public start path.
     let tool_name = "lifecycle_terminal_probe";
     let fixture = execution_fixture(
         tool_name,
@@ -272,7 +283,7 @@ async fn terminal_failure_does_not_retry_service_e2e() -> Result<()> {
         ActionPolicyEffect::Allow,
     )
     .await?;
-    let run = start_service_run(&fixture, &prepared).await?;
+    let run = start_service_run(&fixture, &prepared, false).await?;
     let controller = fixture_capability(&fixture)?;
     let calls = controller.wait_for_calls(1, SERVICE_TIMEOUT).await?;
     assert_eq!(calls.len(), 1);
@@ -298,6 +309,188 @@ async fn terminal_failure_does_not_retry_service_e2e() -> Result<()> {
     assert_eq!(controller.transport_attempts().len(), 1);
     assert_eq!(terminal.run.budget_ledger.consumed.tasks, 1);
     assert_eq!(terminal.run.budget_ledger.consumed.tool_calls, 1);
+    replay_run_through_public_start(&fixture, &run).await?;
+    assert_eq!(controller.calls().len(), 1);
+    assert_eq!(controller.transport_attempts().len(), 1);
+    assert_eq!(controller.current_live_calls(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
+async fn confirmation_retries_after_persisted_epoch_before_wake_ack_service_e2e() -> Result<()> {
+    // Pins: confirmation cannot return after its run transition commits but before the exact
+    // run wake is accepted; process recovery replays the confirmation without another epoch.
+    let tool_name = "lifecycle_confirmation_handoff_probe";
+    let fixture = confirmation_execution_fixture(tool_name).await?;
+    let prepared = prepare_capability_run(
+        &fixture,
+        "confirmation-handoff-recovery",
+        tool_name,
+        no_retry(),
+        ActionPolicyEffect::Allow,
+    )
+    .await?;
+    let prepared = recompile_as_agent(prepared, "CONFIRMATION_HANDOFF_AGENT")?;
+    let run = start_service_run(&fixture, &prepared, true).await?;
+    let before_confirmation = load_run(&run).await?;
+    assert_eq!(
+        before_confirmation.status,
+        ExecutionRunStatus::AwaitingConfirmation
+    );
+    fixture
+        .restart_orchestrator_with_env(vec![(
+            "MOA_EXECUTION_TEST_PAUSE_MUTATION_HANDOFF".to_string(),
+            "true".to_string(),
+        )])
+        .await
+        .context("arm the post-commit confirmation handoff pause")?;
+
+    let request = ExecutionConfirmRequest {
+        run: run.request.clone(),
+        expected_plan_hash: prepared.compiled.plan.plan_hash,
+        approved_budget: prepared.planning.snapshot.budget.clone(),
+    };
+    let client = fixture.client.clone();
+    let request_for_call = request.clone();
+    let interrupted = tokio::spawn(async move {
+        client
+            .post_call::<_, ExecutionMutationResponse>("/Execution/confirm", &request_for_call)
+            .await
+    });
+
+    let committed_epoch = await_committed_run_status(
+        &run,
+        ExecutionRunStatus::Queued,
+        before_confirmation.wake_epoch,
+    )
+    .await?;
+    assert!(
+        !interrupted.is_finished(),
+        "public confirmation returned before its joined run wake acknowledgement"
+    );
+    fixture
+        .hard_crash_and_restart_orchestrator()
+        .await
+        .context("crash in the persisted-confirmation/pre-wake acknowledgement window")?;
+    let recovered = tokio::time::timeout(SERVICE_TIMEOUT, interrupted)
+        .await
+        .context("confirmation request did not retry after orchestrator recovery")???;
+    assert!(matches!(
+        recovered,
+        ExecutionMutationResponse::Applied { .. } | ExecutionMutationResponse::Replayed { .. }
+    ));
+
+    let provider_requests = journal_requests(
+        fixture
+            .wait_for_scripted_requests(1, SERVICE_TIMEOUT)
+            .await?,
+    )?;
+    assert_eq!(provider_requests.len(), 1);
+    assert!(
+        provider_requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("CONFIRMATION_HANDOFF_AGENT"))
+    );
+    let terminal = await_execution_terminal(&fixture.client, &run.request).await?;
+    assert_terminal(
+        &terminal,
+        ExecutionRunStatus::Completed,
+        ExecutionTerminalCause::Completion { limit_stop: None },
+        1,
+        1,
+    );
+    let before_replay = load_run(&run).await?;
+    assert!(before_replay.wake_epoch >= committed_epoch);
+    let replayed: ExecutionMutationResponse = fixture
+        .client
+        .post_call("/Execution/confirm", &request)
+        .await?;
+    assert!(matches!(
+        replayed,
+        ExecutionMutationResponse::Conflict {
+            reason: ExecutionConflictReason::InvalidStatus
+        }
+    ));
+    assert_eq!(load_run(&run).await?.wake_epoch, before_replay.wake_epoch);
+    let controller = fixture_capability(&fixture)?;
+    assert!(controller.calls().is_empty());
+    assert!(controller.transport_attempts().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
+async fn wake_ack_before_park_failure_loses_no_wake_or_task_service_e2e() -> Result<()> {
+    // Pins: a task outcome committed while ExecutionRun fails after acknowledging its current
+    // epoch but before parking is recovered from the persisted epoch/owned-call paths exactly once.
+    let tool_name = "lifecycle_wake_ack_before_park_probe";
+    let fixture = execution_fixture(
+        tool_name,
+        success_outcomes(),
+        vec![
+            (
+                "MOA_EXECUTION_TEST_SKIP_SESSION_DELIVERY".to_string(),
+                "true".to_string(),
+            ),
+            (
+                "MOA_EXECUTION_TEST_WAKE_HANDOFF".to_string(),
+                "crash_once".to_string(),
+            ),
+        ],
+    )
+    .await?;
+    let prepared = prepare_capability_run(
+        &fixture,
+        "wake-ack-before-park-recovery",
+        tool_name,
+        no_retry(),
+        ActionPolicyEffect::Allow,
+    )
+    .await?;
+    let run = start_service_run(&fixture, &prepared, false).await?;
+    let controller = fixture_capability(&fixture)?;
+    controller.wait_for_calls(1, SERVICE_TIMEOUT).await?;
+    let acknowledged_epoch = await_positive_processed_wake_epoch(&run).await?;
+
+    controller.release(1);
+    let terminal = await_execution_terminal(&fixture.client, &run.request).await?;
+    assert_terminal(
+        &terminal,
+        ExecutionRunStatus::Completed,
+        ExecutionTerminalCause::Completion { limit_stop: None },
+        1,
+        1,
+    );
+    let persisted = load_run(&run).await?;
+    assert!(persisted.processed_wake_epoch >= acknowledged_epoch);
+    let tasks = list_execution_tasks(&fixture.client, run.request.clone()).await?;
+    assert_eq!(tasks.tasks.len(), 2);
+    assert_eq!(
+        tasks
+            .tasks
+            .iter()
+            .filter(|task| task.node_id == CAPABILITY_NODE_ID)
+            .count(),
+        1
+    );
+    assert_eq!(
+        tasks
+            .tasks
+            .iter()
+            .filter(|task| task.node_id == OUTPUT_NODE_ID)
+            .count(),
+        1
+    );
+    assert!(
+        tasks.tasks.iter().all(|task| {
+            task.status == ExecutionTaskStatus::Completed && task.outcome.is_some()
+        })
+    );
+    assert_eq!(controller.calls().len(), 1);
+    assert_eq!(controller.transport_attempts().len(), 1);
+    assert_eq!(controller.current_live_calls(), 0);
     Ok(())
 }
 
@@ -438,11 +631,172 @@ async fn cancellation_releases_reservations_and_prevents_dispatch_service_e2e() 
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn input_resume_preserves_attempt_and_history_service_e2e() -> Result<()> {
-    // Pins: the public input mutation preserves attempt one, appends one payload at generation
-    // two, and replays without dispatching an unowned task or duplicating durable history.
-    let tool_name = "lifecycle_input_probe";
+async fn cancellation_retries_after_persisted_epoch_before_wake_ack_service_e2e() -> Result<()> {
+    // Pins: a process crash after the cancellation fence commits but before the
+    // joined run wake acknowledges cannot return success or advance the epoch twice;
+    // an already-admitted late effect remains authoritative under RetainEffects.
+    let tool_name = "lifecycle_cancel_handoff_probe";
     let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
+    fixture
+        .restart_orchestrator_with_env(vec![(
+            "MOA_EXECUTION_TEST_PAUSE_MUTATION_HANDOFF".to_string(),
+            "true".to_string(),
+        )])
+        .await
+        .context("arm the post-commit execution-mutation handoff pause")?;
+    let prepared = prepare_capability_run(
+        &fixture,
+        "cancellation-handoff-recovery",
+        tool_name,
+        no_retry(),
+        ActionPolicyEffect::Allow,
+    )
+    .await?;
+    let run = start_service_run(&fixture, &prepared, false).await?;
+    let controller = fixture_capability(&fixture)?;
+    controller.wait_for_calls(1, SERVICE_TIMEOUT).await?;
+    let before_cancel = load_run(&run).await?;
+    let cancel_request = ExecutionCancelRequest {
+        run: run.request.clone(),
+        reason: "crash after durable cancellation fence".to_string(),
+    };
+    let client = fixture.client.clone();
+    let request_for_call = cancel_request.clone();
+    let interrupted = tokio::spawn(async move {
+        client
+            .post_call::<_, ExecutionMutationResponse>("/Execution/cancel", &request_for_call)
+            .await
+    });
+
+    let committed_epoch =
+        await_committed_cancellation_fence(&run, before_cancel.wake_epoch).await?;
+    assert!(
+        !interrupted.is_finished(),
+        "public cancellation returned before its joined run wake acknowledgement"
+    );
+
+    fixture
+        .hard_crash_and_restart_orchestrator()
+        .await
+        .context("crash in the persisted-epoch/pre-wake acknowledgement window")?;
+    let recovered = tokio::time::timeout(SERVICE_TIMEOUT, interrupted)
+        .await
+        .context("cancel request did not retry after orchestrator recovery")???;
+    assert!(matches!(
+        recovered,
+        ExecutionMutationResponse::Applied { .. } | ExecutionMutationResponse::Replayed { .. }
+    ));
+
+    controller.release(1);
+    let terminal = await_execution_terminal(&fixture.client, &run.request).await?;
+    assert_terminal(
+        &terminal,
+        ExecutionRunStatus::Cancelled,
+        ExecutionTerminalCause::Cancellation,
+        0,
+        1,
+    );
+    let before_replay = load_run(&run).await?;
+    assert!(before_replay.wake_epoch >= committed_epoch);
+    let replayed: ExecutionMutationResponse = fixture
+        .client
+        .post_call("/Execution/cancel", &cancel_request)
+        .await?;
+    assert!(matches!(
+        replayed,
+        ExecutionMutationResponse::Replayed { .. }
+    ));
+    let after_replay = load_run(&run).await?;
+    assert_eq!(
+        after_replay.wake_epoch, before_replay.wake_epoch,
+        "replaying the exact cancellation must not increment its persisted wake epoch"
+    );
+    let task = load_task(&run).await?;
+    assert_eq!(task.generation, 1);
+    assert_eq!(task.status, ExecutionTaskStatus::Completed);
+    assert_eq!(controller.calls().len(), 1);
+    let attempts = controller.transport_attempts();
+    assert_eq!(attempts.len(), 2);
+    assert!(!attempts[0].is_replay);
+    assert!(attempts[1].is_replay);
+    assert_eq!(attempts[0].invocation_id, attempts[1].invocation_id);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
+async fn public_mutation_waits_for_run_wake_handler_ack_service_e2e() -> Result<()> {
+    // Pins: public mutations join ExecutionRun/wake through its handler acknowledgement;
+    // replacing the shared `.call()` with `.send()` returns while this gate is still held.
+    let tool_name = "lifecycle_joined_wake_ack_probe";
+    let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
+    let prepared = prepare_capability_run(
+        &fixture,
+        "joined-wake-acknowledgement",
+        tool_name,
+        no_retry(),
+        ActionPolicyEffect::Allow,
+    )
+    .await?;
+    let run = start_service_run(&fixture, &prepared, false).await?;
+    let controller = fixture_capability(&fixture)?;
+    controller.wait_for_calls(1, SERVICE_TIMEOUT).await?;
+    let before_cancel = load_run(&run).await?;
+    fixture
+        .restart_orchestrator_with_env(vec![(
+            "MOA_EXECUTION_TEST_DELAY_WAKE_ACK".to_string(),
+            "true".to_string(),
+        )])
+        .await
+        .context("arm the integration-only run wake acknowledgement gate")?;
+
+    let request = ExecutionCancelRequest {
+        run: run.request.clone(),
+        reason: "prove the public mutation joins its run wake".to_string(),
+    };
+    let client = fixture.client.clone();
+    let request_for_call = request.clone();
+    let response = tokio::spawn(async move {
+        client
+            .post_call::<_, ExecutionMutationResponse>("/Execution/cancel", &request_for_call)
+            .await
+    });
+    let committed_epoch =
+        await_committed_cancellation_fence(&run, before_cancel.wake_epoch).await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !response.is_finished(),
+        "public cancellation returned before ExecutionRun/wake acknowledged the call"
+    );
+    let accepted = tokio::time::timeout(SERVICE_TIMEOUT, response)
+        .await
+        .context("cancellation did not cross the run wake acknowledgement gate")???;
+    assert!(matches!(
+        accepted,
+        ExecutionMutationResponse::Applied { .. } | ExecutionMutationResponse::Replayed { .. }
+    ));
+
+    controller.release(1);
+    let terminal = await_execution_terminal(&fixture.client, &run.request).await?;
+    assert_terminal(
+        &terminal,
+        ExecutionRunStatus::Cancelled,
+        ExecutionTerminalCause::Cancellation,
+        0,
+        1,
+    );
+    assert!(load_run(&run).await?.wake_epoch >= committed_epoch);
+    assert_eq!(controller.calls().len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
+async fn input_resume_preserves_attempt_and_history_service_e2e() -> Result<()> {
+    // Pins: the public input mutation acknowledges the exact parked ExecutionTask and run wake,
+    // preserves attempt one across a post-commit crash, and replays without duplicating history.
+    let tool_name = "lifecycle_input_probe";
+    let fixture = input_execution_fixture(tool_name).await?;
     let prepared = prepare_capability_run(
         &fixture,
         "input-resume",
@@ -451,22 +805,19 @@ async fn input_resume_preserves_attempt_and_history_service_e2e() -> Result<()> 
         ActionPolicyEffect::Allow,
     )
     .await?;
-    let run = create_direct_run(&prepared, prepared.planning.snapshot.budget.clone(), None).await?;
-    reserve_and_mark_running(&run).await?;
-    let waiting = ExecutionTaskOutcome {
-        schema_version: 1,
-        usage: zero_usage(),
-        result: ExecutionTaskResult::NeedsInput {
-            question: "Which source should be used?".to_string(),
-            audience: InputAudience::User,
-        },
-    };
-    assert!(matches!(
-        run.repository
-            .record_task_outcome(run.scope, run.run_uid, run.task_id, 1, waiting)
-            .await?,
-        TaskOutcomeWrite::Applied { .. }
-    ));
+    let prepared = recompile_as_agent(prepared, "ANSWER_AFTER_INPUT_AGENT")?;
+    let run = start_service_run(&fixture, &prepared, false).await?;
+    let waiting = await_task_status(&run, ExecutionTaskStatus::WaitingInput).await?;
+    assert_eq!(waiting.attempt, 1);
+    assert_eq!(waiting.generation, 1);
+    let before_input = load_run(&run).await?;
+    fixture
+        .restart_orchestrator_with_env(vec![(
+            "MOA_EXECUTION_TEST_PAUSE_MUTATION_HANDOFF".to_string(),
+            "true".to_string(),
+        )])
+        .await
+        .context("arm the post-commit input handoff pause")?;
     let input = json!({"source": "analyst-notes"});
     let request = ExecutionInputRequest {
         tenant_id: run.tenant_id,
@@ -479,17 +830,73 @@ async fn input_resume_preserves_attempt_and_history_service_e2e() -> Result<()> 
         input: input.clone(),
     };
 
-    let applied: ExecutionMutationResponse = fixture
-        .client
-        .post_call("/Execution/deliver_input", &request)
-        .await?;
-    assert!(matches!(applied, ExecutionMutationResponse::Applied { .. }));
-    let resumed = load_task(&run).await?;
+    let client = fixture.client.clone();
+    let request_for_call = request.clone();
+    let interrupted = tokio::spawn(async move {
+        client
+            .post_call::<_, ExecutionMutationResponse>(
+                "/Execution/deliver_input",
+                &request_for_call,
+            )
+            .await
+    });
+    let (resumed, committed_epoch) =
+        await_task_generation(&run, 2, before_input.wake_epoch).await?;
+    assert_eq!(resumed.status, ExecutionTaskStatus::Running);
     assert_eq!(resumed.attempt, 1);
     assert_eq!(resumed.generation, 2);
-    assert_eq!(resumed.status, ExecutionTaskStatus::Running);
+    assert!(
+        resumed.current_outcome.is_none(),
+        "the resumed generation must not retain the prior NeedsInput outcome"
+    );
     assert_eq!(resumed.resume_input_history, vec![input.clone()]);
     assert_eq!(resumed.generation_history.len(), 2);
+    assert!(
+        !interrupted.is_finished(),
+        "public input delivery returned before its task and run acknowledgements"
+    );
+    fixture
+        .hard_crash_and_restart_orchestrator()
+        .await
+        .context("crash in the persisted-input/pre-wake acknowledgement window")?;
+    let recovered = tokio::time::timeout(SERVICE_TIMEOUT, interrupted)
+        .await
+        .context("input request did not retry after orchestrator recovery")???;
+    assert!(matches!(
+        recovered,
+        ExecutionMutationResponse::Applied { .. } | ExecutionMutationResponse::Replayed { .. }
+    ));
+    let provider_requests = journal_requests(
+        fixture
+            .wait_for_scripted_requests(2, SERVICE_TIMEOUT)
+            .await?,
+    )?;
+    assert_eq!(provider_requests.len(), 2);
+    let resumed_prompt = provider_requests[1]
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::User)
+        .context("resumed task-agent request omitted its user prompt")?;
+    let resumed_prompt: Value = serde_json::from_str(&resumed_prompt.content)
+        .context("decode resumed task-agent prompt")?;
+    assert_eq!(
+        resumed_prompt,
+        json!({
+            "resolved_input": {"case": "input-resume"},
+            "resume_inputs": [input.clone()],
+        })
+    );
+
+    let terminal = await_execution_terminal(&fixture.client, &run.request).await?;
+    assert_terminal(
+        &terminal,
+        ExecutionRunStatus::Completed,
+        ExecutionTerminalCause::Completion { limit_stop: None },
+        1,
+        1,
+    );
+    let before_replay = load_run(&run).await?;
+    assert!(before_replay.wake_epoch >= committed_epoch);
 
     let replayed: ExecutionMutationResponse = fixture
         .client
@@ -504,10 +911,195 @@ async fn input_resume_preserves_attempt_and_history_service_e2e() -> Result<()> 
     assert_eq!(after_replay.generation, 2);
     assert_eq!(after_replay.resume_input_history, vec![input]);
     assert_eq!(after_replay.generation_history, resumed.generation_history);
-    assert_eq!(after_replay.outcome_audit, resumed.outcome_audit);
+    assert_eq!(load_run(&run).await?.wake_epoch, before_replay.wake_epoch);
     let controller = fixture_capability(&fixture)?;
     assert!(controller.calls().is_empty());
     assert!(controller.transport_attempts().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
+async fn explicit_review_retries_after_persisted_epoch_before_ack_service_e2e() -> Result<()> {
+    // Pins: an approved Review node returns only after its exact task promise and run wake are
+    // acknowledged; a post-commit crash neither loses the decision nor duplicates its outcome.
+    let tool_name = "lifecycle_explicit_review_handoff_probe";
+    let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
+    let prepared = prepare_capability_run(
+        &fixture,
+        "explicit-review-handoff-recovery",
+        tool_name,
+        no_retry(),
+        ActionPolicyEffect::Allow,
+    )
+    .await?;
+    let prepared = recompile_as_external_wait(prepared, ExternalWaitKind::Review)?;
+    let run = start_service_run(&fixture, &prepared, false).await?;
+    let waiting = await_task_status(&run, ExecutionTaskStatus::Running).await?;
+    assert_eq!(waiting.generation, 1);
+    let before_review = await_run_status(&run, ExecutionRunStatus::WaitingReview).await?;
+    fixture
+        .restart_orchestrator_with_env(vec![(
+            "MOA_EXECUTION_TEST_PAUSE_MUTATION_HANDOFF".to_string(),
+            "true".to_string(),
+        )])
+        .await
+        .context("arm the post-commit explicit-review handoff pause")?;
+
+    let payload = json!({"result": "approved"});
+    let request = ExecutionReviewDecisionRequest {
+        tenant_id: run.tenant_id,
+        contact_id: None,
+        run_uid: run.run_uid,
+        task_id: run.task_id,
+        expected_generation: 1,
+        decision: ExecutionReviewDecision::Approved {
+            payload: payload.clone(),
+        },
+    };
+    let client = fixture.client.clone();
+    let request_for_call = request.clone();
+    let interrupted = tokio::spawn(async move {
+        client
+            .post_call::<_, ExecutionMutationResponse>(
+                "/Execution/decide_review",
+                &request_for_call,
+            )
+            .await
+    });
+    let (completed, committed_epoch) =
+        await_task_completion(&run, before_review.wake_epoch, &payload).await?;
+    assert!(
+        !interrupted.is_finished(),
+        "public review decision returned before its task and run acknowledgements"
+    );
+    fixture
+        .hard_crash_and_restart_orchestrator()
+        .await
+        .context("crash in the persisted-review/pre-acknowledgement window")?;
+    let recovered = tokio::time::timeout(SERVICE_TIMEOUT, interrupted)
+        .await
+        .context("review decision did not retry after orchestrator recovery")???;
+    assert!(matches!(
+        recovered,
+        ExecutionMutationResponse::Applied { .. } | ExecutionMutationResponse::Replayed { .. }
+    ));
+    assert_eq!(completed.generation, 1);
+    assert_eq!(completed.outcome_audit.len(), 1);
+
+    let terminal = await_execution_terminal(&fixture.client, &run.request).await?;
+    assert_terminal(
+        &terminal,
+        ExecutionRunStatus::Completed,
+        ExecutionTerminalCause::Completion { limit_stop: None },
+        1,
+        1,
+    );
+    let before_replay = load_run(&run).await?;
+    assert!(before_replay.wake_epoch >= committed_epoch);
+    let replayed: ExecutionMutationResponse = fixture
+        .client
+        .post_call("/Execution/decide_review", &request)
+        .await?;
+    assert!(matches!(
+        replayed,
+        ExecutionMutationResponse::Replayed { .. }
+    ));
+    let after_replay = load_task(&run).await?;
+    assert_eq!(after_replay.outcome_audit, completed.outcome_audit);
+    assert_eq!(load_run(&run).await?.wake_epoch, before_replay.wake_epoch);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
+async fn external_signal_retries_after_persisted_epoch_before_ack_service_e2e() -> Result<()> {
+    // Pins: a named WaitSignal node returns only after its exact task promise and run wake are
+    // acknowledged; a post-commit crash neither loses the payload nor duplicates its outcome.
+    let tool_name = "lifecycle_external_signal_handoff_probe";
+    let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
+    let prepared = prepare_capability_run(
+        &fixture,
+        "external-signal-handoff-recovery",
+        tool_name,
+        no_retry(),
+        ActionPolicyEffect::Allow,
+    )
+    .await?;
+    let prepared = recompile_as_external_wait(prepared, ExternalWaitKind::Signal)?;
+    let run = start_service_run(&fixture, &prepared, false).await?;
+    let waiting = await_task_status(&run, ExecutionTaskStatus::Running).await?;
+    assert_eq!(waiting.generation, 1);
+    let before_signal = await_run_status(&run, ExecutionRunStatus::WaitingReview).await?;
+    fixture
+        .restart_orchestrator_with_env(vec![(
+            "MOA_EXECUTION_TEST_PAUSE_MUTATION_HANDOFF".to_string(),
+            "true".to_string(),
+        )])
+        .await
+        .context("arm the post-commit external-signal handoff pause")?;
+
+    let payload = json!({"result": "signal-delivered"});
+    let request = ExecutionSignalRequest {
+        tenant_id: run.tenant_id,
+        contact_id: None,
+        run_uid: run.run_uid,
+        task_id: run.task_id,
+        expected_generation: 1,
+        signal_name: "fixture-ready".to_string(),
+        payload: payload.clone(),
+    };
+    let client = fixture.client.clone();
+    let request_for_call = request.clone();
+    let interrupted = tokio::spawn(async move {
+        client
+            .post_call::<_, ExecutionMutationResponse>(
+                "/Execution/deliver_signal",
+                &request_for_call,
+            )
+            .await
+    });
+    let (completed, committed_epoch) =
+        await_task_completion(&run, before_signal.wake_epoch, &payload).await?;
+    assert!(
+        !interrupted.is_finished(),
+        "public signal delivery returned before its task and run acknowledgements"
+    );
+    fixture
+        .hard_crash_and_restart_orchestrator()
+        .await
+        .context("crash in the persisted-signal/pre-acknowledgement window")?;
+    let recovered = tokio::time::timeout(SERVICE_TIMEOUT, interrupted)
+        .await
+        .context("signal delivery did not retry after orchestrator recovery")???;
+    assert!(matches!(
+        recovered,
+        ExecutionMutationResponse::Applied { .. } | ExecutionMutationResponse::Replayed { .. }
+    ));
+    assert_eq!(completed.generation, 1);
+    assert_eq!(completed.outcome_audit.len(), 1);
+
+    let terminal = await_execution_terminal(&fixture.client, &run.request).await?;
+    assert_terminal(
+        &terminal,
+        ExecutionRunStatus::Completed,
+        ExecutionTerminalCause::Completion { limit_stop: None },
+        1,
+        1,
+    );
+    let before_replay = load_run(&run).await?;
+    assert!(before_replay.wake_epoch >= committed_epoch);
+    let replayed: ExecutionMutationResponse = fixture
+        .client
+        .post_call("/Execution/deliver_signal", &request)
+        .await?;
+    assert!(matches!(
+        replayed,
+        ExecutionMutationResponse::Replayed { .. }
+    ));
+    let after_replay = load_task(&run).await?;
+    assert_eq!(after_replay.outcome_audit, completed.outcome_audit);
+    assert_eq!(load_run(&run).await?.wake_epoch, before_replay.wake_epoch);
     Ok(())
 }
 
@@ -574,7 +1166,7 @@ async fn artifact_required_admin_review_reaches_durable_dispatch() -> Result<()>
             }
         }
 
-        let run = start_service_run(&fixture, &prepared).await?;
+        let run = start_service_run(&fixture, &prepared, false).await?;
         let persisted = load_run(&run).await?;
         let persisted_capability = persisted
             .catalog
@@ -660,7 +1252,7 @@ async fn action_review_terminal_states_deliver_once_service_e2e() -> Result<()> 
         ActionPolicyEffect::AdminReview,
     )
     .await?;
-    let cleared_run = start_service_run(&fixture, &cleared).await?;
+    let cleared_run = start_service_run(&fixture, &cleared, false).await?;
     let cleared_review =
         await_execution_review(&fixture, cleared_run.tenant_id, cleared_run.task_id).await?;
     let client = fixture.client.clone();
@@ -713,7 +1305,7 @@ async fn action_review_terminal_states_deliver_once_service_e2e() -> Result<()> 
         ActionPolicyEffect::AdminReview,
     )
     .await?;
-    let denied_run = start_service_run(&fixture, &denied).await?;
+    let denied_run = start_service_run(&fixture, &denied, false).await?;
     let denied_review =
         await_execution_review(&fixture, denied_run.tenant_id, denied_run.task_id).await?;
     fixture
@@ -758,7 +1350,7 @@ async fn action_review_terminal_states_deliver_once_service_e2e() -> Result<()> 
         ActionPolicyEffect::AdminReview,
     )
     .await?;
-    let timed_out_run = start_service_run(&fixture, &timed_out).await?;
+    let timed_out_run = start_service_run(&fixture, &timed_out, false).await?;
     let timed_out_review =
         await_execution_review(&fixture, timed_out_run.tenant_id, timed_out_run.task_id).await?;
     sqlx::query(
@@ -1102,6 +1694,68 @@ async fn direct_execution_fixture(
     .await
 }
 
+async fn input_execution_fixture(tool_name: &str) -> Result<OrchestratorTestFixture> {
+    let needs_input = serde_json::to_string(&ExecutionTaskResult::NeedsInput {
+        question: "Which source should be used?".to_string(),
+        audience: InputAudience::User,
+    })?;
+    let completed = serde_json::to_string(&json!({"result": "used analyst notes"}))?;
+    OrchestratorTestFixture::with_execution_fixture(
+        json!({
+            "default": {"content": needs_input, "tool_calls": []},
+            "keyed": [{
+                "match": "analyst-notes",
+                "completion": {"content": completed, "tool_calls": []}
+            }]
+        }),
+        FixtureCapabilityOptions {
+            tools: vec![FixtureCapabilityTool {
+                name: tool_name.to_string(),
+                description: "Unused catalog seed for the input-resume fixture".to_string(),
+                input_schema: json!({"type": "object"}),
+                item_key_pointer: None,
+                idempotent: true,
+                outcomes: success_outcomes(),
+            }],
+            orchestrator_env: vec![(
+                "MOA_EXECUTION_TEST_SKIP_SESSION_DELIVERY".to_string(),
+                "true".to_string(),
+            )],
+        },
+    )
+    .await
+}
+
+async fn confirmation_execution_fixture(tool_name: &str) -> Result<OrchestratorTestFixture> {
+    let completed = serde_json::to_string(&json!({"result": "confirmed"}))?;
+    OrchestratorTestFixture::with_execution_fixture(
+        json!({
+            "default": {"content": completed, "tool_calls": []}
+        }),
+        FixtureCapabilityOptions {
+            tools: vec![FixtureCapabilityTool {
+                name: tool_name.to_string(),
+                description: "Unused catalog seed for the confirmation fixture".to_string(),
+                input_schema: json!({"type": "object"}),
+                item_key_pointer: None,
+                idempotent: true,
+                outcomes: success_outcomes(),
+            }],
+            orchestrator_env: vec![
+                (
+                    "MOA_EXECUTION_TEST_SKIP_SESSION_DELIVERY".to_string(),
+                    "true".to_string(),
+                ),
+                (
+                    "MOA_EXECUTION_UNATTENDED_MAX_COST_MICROUSD".to_string(),
+                    "0".to_string(),
+                ),
+            ],
+        },
+    )
+    .await
+}
+
 async fn prepare_capability_run(
     fixture: &OrchestratorTestFixture,
     label: &str,
@@ -1440,9 +2094,144 @@ fn recompile_with_node_output_schema(
     Ok(prepared)
 }
 
+fn recompile_as_agent(
+    mut prepared: PreparedCapabilityRun,
+    instructions: &str,
+) -> Result<PreparedCapabilityRun> {
+    let output_schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["result"],
+        "properties": {"result": {"type": "string"}}
+    });
+    let plan = ExecutionPlanDefinition {
+        cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+        input_schema: json!({"type": "object", "additionalProperties": false}),
+        output_schema: output_schema.clone(),
+        nodes: vec![
+            ExecutionNode {
+                id: CAPABILITY_NODE_ID.to_string(),
+                requirement_ids: vec![REQUIREMENT_ID.to_string()],
+                depends_on: Vec::new(),
+                when: None,
+                input: json!({"case": "input-resume"}),
+                output_schema: output_schema.clone(),
+                operation: ExecutionOperation::Agent {
+                    instructions: instructions.to_string(),
+                    skill_refs: Vec::new(),
+                    capability_refs: Vec::new(),
+                    max_turns: 1,
+                },
+                compensation: None,
+                retry: no_retry(),
+                budget: None,
+            },
+            ExecutionNode {
+                id: OUTPUT_NODE_ID.to_string(),
+                requirement_ids: vec![REQUIREMENT_ID.to_string()],
+                depends_on: vec![CAPABILITY_NODE_ID.to_string()],
+                when: None,
+                input: json!({}),
+                output_schema,
+                operation: ExecutionOperation::Output {
+                    value: json!({"$ref": "$.nodes.capability.output"}),
+                },
+                compensation: None,
+                retry: no_retry(),
+                budget: None,
+            },
+        ],
+    };
+    let outcome = compile(CompileExecutionRequest {
+        goal: lifecycle_goal(prepared.compiled.goal.objective.clone()),
+        plan,
+        run_input: json!({}),
+        catalog: prepared.planning.snapshot.catalog.clone(),
+        authorization: prepared.planning.snapshot.authorization.clone(),
+        approved_budget: prepared.planning.snapshot.budget.clone(),
+        config: moa_config::ExecutionConfig::default(),
+        now: moa_test_support::fixtures::pg_now(),
+    });
+    prepared.compiled = outcome
+        .compiled
+        .with_context(|| format!("compile lifecycle agent plan: {:?}", outcome.report.issues))?;
+    Ok(prepared)
+}
+
+fn recompile_as_external_wait(
+    mut prepared: PreparedCapabilityRun,
+    wait: ExternalWaitKind,
+) -> Result<PreparedCapabilityRun> {
+    let output_schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["result"],
+        "properties": {"result": {"type": "string"}}
+    });
+    let operation = match wait {
+        ExternalWaitKind::Review => ExecutionOperation::Review {
+            prompt: "Approve the deterministic fixture result".to_string(),
+        },
+        ExternalWaitKind::Signal => ExecutionOperation::WaitSignal {
+            signal_name: "fixture-ready".to_string(),
+        },
+    };
+    let plan = ExecutionPlanDefinition {
+        cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+        input_schema: json!({"type": "object", "additionalProperties": false}),
+        output_schema: output_schema.clone(),
+        nodes: vec![
+            ExecutionNode {
+                id: CAPABILITY_NODE_ID.to_string(),
+                requirement_ids: vec![REQUIREMENT_ID.to_string()],
+                depends_on: Vec::new(),
+                when: None,
+                input: json!({}),
+                output_schema: output_schema.clone(),
+                operation,
+                compensation: None,
+                retry: no_retry(),
+                budget: None,
+            },
+            ExecutionNode {
+                id: OUTPUT_NODE_ID.to_string(),
+                requirement_ids: vec![REQUIREMENT_ID.to_string()],
+                depends_on: vec![CAPABILITY_NODE_ID.to_string()],
+                when: None,
+                input: json!({}),
+                output_schema,
+                operation: ExecutionOperation::Output {
+                    value: json!({"$ref": "$.nodes.capability.output"}),
+                },
+                compensation: None,
+                retry: no_retry(),
+                budget: None,
+            },
+        ],
+    };
+    let outcome = compile(CompileExecutionRequest {
+        goal: lifecycle_goal(prepared.compiled.goal.objective.clone()),
+        plan,
+        run_input: json!({}),
+        catalog: prepared.planning.snapshot.catalog.clone(),
+        authorization: prepared.planning.snapshot.authorization.clone(),
+        approved_budget: prepared.planning.snapshot.budget.clone(),
+        config: moa_config::ExecutionConfig::default(),
+        now: moa_test_support::fixtures::pg_now(),
+    });
+    prepared.compiled = outcome.compiled.with_context(|| {
+        format!(
+            "compile external-wait lifecycle plan: {:?}",
+            outcome.report.issues
+        )
+    })?;
+    Ok(prepared)
+}
+
 async fn start_service_run(
     fixture: &OrchestratorTestFixture,
     prepared: &PreparedCapabilityRun,
+    confirmation_required: bool,
 ) -> Result<RunningCapabilityRun> {
     let start_request = ExecutionStartRequest {
         tenant_id: prepared.tenant_id,
@@ -1462,7 +2251,7 @@ async fn start_service_run(
         .await
         .context("start lifecycle run through Execution service")?;
     assert!(started.created);
-    assert!(!started.confirmation_required);
+    assert_eq!(started.confirmation_required, confirmation_required);
     let task_id = ExecutionTaskId::derive(started.run.run_uid, CAPABILITY_NODE_ID, "")?;
     Ok(RunningCapabilityRun {
         tenant_id: prepared.tenant_id,
@@ -1696,6 +2485,195 @@ async fn reserve_and_mark_running(run: &RunningCapabilityRun) -> Result<()> {
         TransitionOutcome::Applied(_)
     ));
     Ok(())
+}
+
+async fn await_committed_cancellation_fence(
+    run: &RunningCapabilityRun,
+    previous_epoch: u64,
+) -> Result<u64> {
+    let deadline = Instant::now() + SERVICE_TIMEOUT;
+    loop {
+        let persisted = load_run(run).await?;
+        if persisted
+            .pending_terminal
+            .as_ref()
+            .is_some_and(|pending| pending.status == ExecutionRunStatus::Cancelled)
+        {
+            assert_eq!(
+                persisted.wake_epoch,
+                previous_epoch + 1,
+                "the cancellation transaction must advance its wake epoch exactly once"
+            );
+            return Ok(persisted.wake_epoch);
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "cancellation fence did not commit within {SERVICE_TIMEOUT:?}; run={persisted:#?}"
+            );
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn await_committed_run_status(
+    run: &RunningCapabilityRun,
+    expected: ExecutionRunStatus,
+    previous_epoch: u64,
+) -> Result<u64> {
+    let persisted = await_run_status(run, expected).await?;
+    assert_eq!(
+        persisted.wake_epoch,
+        previous_epoch + 1,
+        "the {expected:?} transaction must advance its wake epoch exactly once"
+    );
+    Ok(persisted.wake_epoch)
+}
+
+async fn await_run_status(
+    run: &RunningCapabilityRun,
+    expected: ExecutionRunStatus,
+) -> Result<ExecutionRunRecord> {
+    let deadline = Instant::now() + SERVICE_TIMEOUT;
+    loop {
+        let persisted = load_run(run).await?;
+        if persisted.status == expected {
+            return Ok(persisted);
+        }
+        if persisted.status.is_terminal() {
+            bail!("run became terminal before reaching {expected:?}: {persisted:#?}");
+        }
+        if Instant::now() >= deadline {
+            bail!("run did not reach {expected:?} within {SERVICE_TIMEOUT:?}: {persisted:#?}");
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn await_positive_processed_wake_epoch(run: &RunningCapabilityRun) -> Result<u64> {
+    let deadline = Instant::now() + SERVICE_TIMEOUT;
+    loop {
+        let persisted = load_run(run).await?;
+        if persisted.processed_wake_epoch > 0 {
+            return Ok(persisted.processed_wake_epoch);
+        }
+        if persisted.status.is_terminal() {
+            bail!("run terminalized before acknowledging a wake epoch: {persisted:#?}");
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "run did not acknowledge a positive wake epoch within {SERVICE_TIMEOUT:?}: {persisted:#?}"
+            );
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn await_task_generation(
+    run: &RunningCapabilityRun,
+    expected_generation: u64,
+    previous_epoch: u64,
+) -> Result<(ExecutionTaskRecord, u64)> {
+    let deadline = Instant::now() + SERVICE_TIMEOUT;
+    loop {
+        let task = load_task(run).await?;
+        let persisted = load_run(run).await?;
+        if task.generation == expected_generation {
+            assert!(
+                persisted.wake_epoch > previous_epoch,
+                "the task-generation transition must advance the run wake epoch"
+            );
+            return Ok((task, persisted.wake_epoch));
+        }
+        if task.generation > expected_generation || task.status.is_terminal() {
+            bail!("task passed generation {expected_generation} before acknowledgement: {task:#?}");
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "task did not reach generation {expected_generation} within {SERVICE_TIMEOUT:?}: {task:#?}"
+            );
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn await_task_completion(
+    run: &RunningCapabilityRun,
+    previous_epoch: u64,
+    expected_output: &Value,
+) -> Result<(ExecutionTaskRecord, u64)> {
+    let deadline = Instant::now() + SERVICE_TIMEOUT;
+    loop {
+        let task = load_task(run).await?;
+        let persisted = load_run(run).await?;
+        if task.status == ExecutionTaskStatus::Completed {
+            assert!(matches!(
+                task.current_outcome.as_ref().map(|outcome| &outcome.result),
+                Some(ExecutionTaskResult::Completed { output, citations })
+                    if output == expected_output && citations.is_empty()
+            ));
+            assert_eq!(
+                persisted.wake_epoch,
+                previous_epoch + 1,
+                "the external-wait completion must advance its wake epoch exactly once"
+            );
+            return Ok((task, persisted.wake_epoch));
+        }
+        if task.status.is_terminal() {
+            bail!("external wait terminalized without completion: {task:#?}");
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "external wait did not complete within {SERVICE_TIMEOUT:?}: run={persisted:#?}; task={task:#?}"
+            );
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn await_task_status(
+    run: &RunningCapabilityRun,
+    expected: ExecutionTaskStatus,
+) -> Result<ExecutionTaskRecord> {
+    let deadline = Instant::now() + SERVICE_TIMEOUT;
+    loop {
+        let Some(task) = run
+            .repository
+            .load_task(run.scope, run.run_uid, run.task_id)
+            .await?
+        else {
+            let persisted = load_run(run).await?;
+            if persisted.status.is_terminal() {
+                bail!(
+                    "run terminalized before task {} materialized as {expected:?}: {persisted:#?}",
+                    run.task_id
+                );
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "task {} did not materialize for run {} within {SERVICE_TIMEOUT:?}; run={persisted:#?}",
+                    run.task_id,
+                    run.run_uid
+                );
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+            continue;
+        };
+        if task.status == expected {
+            return Ok(task);
+        }
+        if task.status.is_terminal() {
+            bail!("task became terminal before reaching {expected:?}: {task:#?}");
+        }
+        if Instant::now() >= deadline {
+            let persisted = load_run(run).await?;
+            bail!(
+                "task {} for run {} did not reach {expected:?} within {SERVICE_TIMEOUT:?}; run={persisted:#?}; task={task:#?}",
+                run.task_id,
+                run.run_uid
+            );
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
 }
 
 async fn replay_run_through_public_start(

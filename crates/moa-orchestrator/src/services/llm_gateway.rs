@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use moa_config::SessionLimitsConfig;
 use moa_core::{
     error::MoaError,
     events::Event,
@@ -38,7 +37,6 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use crate::objects::ingestion::IngestionVOClient;
-use crate::services::narration::NarrateSessionRequest;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::workflows::errors::moa_error_to_handler_error;
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -143,13 +141,6 @@ pub trait LLMGateway {
 
     /// Fences provider I/O owned by one cancelled workflow.
     async fn cancel_owner(request: Json<LLMCompletionOwner>) -> Result<(), HandlerError>;
-
-    /// Produces at most one durable progress narration for a session.
-    ///
-    /// Invoked as a detached job by the per-session narration tick. Hosted on
-    /// this service to reuse its provider registry and avoid a new Restate
-    /// binding; the narration logic lives in [`crate::services::narration`].
-    async fn narrate_session(request: Json<NarrateSessionRequest>) -> Result<(), HandlerError>;
 }
 
 /// Completion request plus the downward-only resource slice admitted for it.
@@ -234,7 +225,6 @@ impl CompletionAuditContext {
 #[derive(Clone)]
 pub struct LLMGatewayImpl {
     providers: Arc<ProviderRegistry>,
-    session_limits: Option<SessionLimitsConfig>,
     runtime_cache: Option<Arc<dyn RuntimeCacheStore>>,
 }
 
@@ -244,16 +234,8 @@ impl LLMGatewayImpl {
     pub fn new(providers: Arc<ProviderRegistry>) -> Self {
         Self {
             providers,
-            session_limits: None,
             runtime_cache: None,
         }
-    }
-
-    /// Supplies the session limits used by progress narration.
-    #[must_use]
-    pub fn with_session_limits(mut self, session_limits: SessionLimitsConfig) -> Self {
-        self.session_limits = Some(session_limits);
-        self
     }
 
     /// Supplies the shared runtime cache used to fence cancelled provider I/O.
@@ -355,8 +337,8 @@ pub(crate) enum LLMCompletionAction {
     RootOutputGuardrail { turn: usize },
     /// One worker model-loop turn.
     WorkerModel { turn: usize },
-    /// One execution-task model-loop turn.
-    ExecutionTaskModel { turn: u32 },
+    /// One execution-task generation and model-loop turn.
+    ExecutionTaskModel { generation: u64, turn: u32 },
     /// One execution amendment generation or repair attempt.
     ExecutionAmendment {
         run_uid: Uuid,
@@ -376,7 +358,9 @@ impl LLMCompletionAction {
             Self::RootModel { turn } => format!("root-model:{turn}"),
             Self::RootOutputGuardrail { turn } => format!("root-output-guardrail:{turn}"),
             Self::WorkerModel { turn } => format!("worker-model:{turn}"),
-            Self::ExecutionTaskModel { turn } => format!("execution-task-model:{turn}"),
+            Self::ExecutionTaskModel { generation, turn } => {
+                format!("execution-task-model:{generation}:{turn}")
+            }
             Self::ExecutionAmendment {
                 run_uid,
                 plan_revision,
@@ -730,24 +714,6 @@ impl LLMGateway for LLMGatewayImpl {
         .await?;
         Ok(())
     }
-
-    #[tracing::instrument(skip(self, ctx, request))]
-    // SAFETY: dispatched as a detached job by the per-session narration tick, which forwards the session participant identity used to authorize the gated progress read.
-    async fn narrate_session(
-        &self,
-        ctx: Context<'_>,
-        request: Json<NarrateSessionRequest>,
-    ) -> Result<(), HandlerError> {
-        crate::ctx::adopt_incoming_trace_parent(&ctx);
-        annotate_restate_handler_span("LLMGateway", "narrate_session");
-        crate::services::narration::run_narration_job(
-            &ctx,
-            self,
-            self.session_limits.as_ref(),
-            request.into_inner(),
-        )
-        .await
-    }
 }
 
 /// Returns whether a completion request defers visible `BrainResponse` persistence to its caller.
@@ -966,11 +932,47 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        COMPLETION_OWNER_METADATA_KEY, CompletionAuditContext, LLMCompletionOwner,
-        MEMORY_WRITE_BARRIER_METADATA_KEY, USER_TURN_METADATA_KEY, attach_completion_owner,
-        bound_completion_request, cancelled_completion_response, session_turn_from_audit_context,
+        COMPLETION_OWNER_METADATA_KEY, CompletionAuditContext, LLMCompletionAction,
+        LLMCompletionOwner, MEMORY_WRITE_BARRIER_METADATA_KEY, USER_TURN_METADATA_KEY,
+        attach_completion_owner, bound_completion_request, cancelled_completion_response,
+        completion_idempotency_key, session_turn_from_audit_context,
         session_turn_from_completion_request, should_persist_brain_response, take_completion_owner,
     };
+
+    #[test]
+    fn execution_task_completion_keys_are_generation_scoped_offline() {
+        // Pins: replaying one task generation retains its paid completion, while a resumed
+        // generation with the same turn ordinal dispatches a distinct logical action.
+        let invocation_id = "execution-task-invocation";
+        let generation_one = completion_idempotency_key(
+            invocation_id,
+            LLMCompletionAction::ExecutionTaskModel {
+                generation: 1,
+                turn: 0,
+            },
+        );
+        let generation_one_replay = completion_idempotency_key(
+            invocation_id,
+            LLMCompletionAction::ExecutionTaskModel {
+                generation: 1,
+                turn: 0,
+            },
+        );
+        let generation_two = completion_idempotency_key(
+            invocation_id,
+            LLMCompletionAction::ExecutionTaskModel {
+                generation: 2,
+                turn: 0,
+            },
+        );
+
+        assert_eq!(generation_one, generation_one_replay);
+        assert_eq!(
+            generation_one,
+            "moa:llm-completion:v1:execution-task-invocation:execution-task-model:1:0"
+        );
+        assert_ne!(generation_one, generation_two);
+    }
 
     #[test]
     fn completion_owner_is_typed_stripped_and_zero_usage_offline() {

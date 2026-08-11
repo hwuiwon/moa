@@ -11,6 +11,7 @@ use moa_core::{
     types::worker::state::WorkerMessage,
 };
 
+use super::liveness::WorkerLivenessDecision;
 use super::{
     ClaimedHistoryEntry, HISTORY_CLAIM_CHECK_THRESHOLD_BYTES, HISTORY_INLINE_TAIL,
     INPUT_DELIVERY_HISTORY_LIMIT, WORKER_BUDGET_EXHAUSTED_MESSAGE, WorkerHistoryEntry,
@@ -104,6 +105,20 @@ fn follow_up_queues_message() {
 
     assert_eq!(state.pending.len(), 2);
     assert_eq!(state.pending[1].text, "continue");
+}
+
+#[test]
+fn new_admission_generation_reopens_terminal_parent_delivery() {
+    // Pins: terminal acknowledgement is generation-scoped. A child revived during
+    // cleanup grace must report its later terminal generation instead of inheriting
+    // the acknowledgement bit from its previous result.
+    let mut state = WorkerVoState {
+        notification_delivered: true,
+        ..WorkerVoState::default()
+    };
+
+    assert_eq!(state.advance_generation(), 1);
+    assert!(!state.notification_delivered);
 }
 
 #[test]
@@ -291,6 +306,81 @@ fn progress_summary_reports_state_and_heartbeat_fields() {
         awaiting.awaiting_input,
         "a pending request_input must surface awaiting_input"
     );
+}
+
+#[test]
+fn worker_liveness_arms_once_and_heartbeat_moves_the_effective_deadline() {
+    // Pins: the first accepted heartbeat owns one deadline, overlapping heartbeat writes
+    // schedule nothing, older writes cannot move time backwards, and the fired deadline
+    // follows the newest heartbeat rather than the original schedule.
+    use chrono::{Duration, Utc};
+
+    let mut state = WorkerVoState::default();
+    state
+        .initialize(&initial_task())
+        .expect("initial task should seed state");
+    let first = Utc::now();
+    state.observe_heartbeat(first);
+    let (first_generation, first_deadline) = state
+        .arm_liveness_deadline(60_000)
+        .expect("first heartbeat arms liveness");
+    assert_eq!(first_deadline, first + Duration::milliseconds(60_000));
+    assert_eq!(state.arm_liveness_deadline(60_000), None);
+
+    let latest = first + Duration::milliseconds(30_000);
+    state.observe_heartbeat(latest);
+    state.observe_heartbeat(first - Duration::milliseconds(1));
+    assert_eq!(state.last_heartbeat_at, Some(latest));
+    assert_eq!(
+        state.liveness_decision(first_deadline, 60_000),
+        WorkerLivenessDecision::Reschedule {
+            deadline_at: latest + Duration::milliseconds(60_000)
+        }
+    );
+
+    let replacement = state.replace_liveness_deadline();
+    assert!(replacement > first_generation);
+    assert!(!state.liveness_generation_matches(first_generation));
+    assert!(state.liveness_generation_matches(replacement));
+}
+
+#[test]
+fn worker_liveness_stops_for_input_or_terminal_and_stales_once() {
+    // Pins: a running worker crossing the exact latest deadline is stale, while
+    // awaiting-input and terminal workers stop the outstanding chain and cannot emit
+    // a false stale signal. Clearing the slot makes a replayed tick a no-op.
+    use chrono::{Duration, Utc};
+
+    let mut state = WorkerVoState::default();
+    state
+        .initialize(&initial_task())
+        .expect("initial task should seed state");
+    let heartbeat = Utc::now();
+    state.observe_heartbeat(heartbeat);
+    let (generation, _) = state
+        .arm_liveness_deadline(60_000)
+        .expect("running worker arms liveness");
+    assert_eq!(
+        state.liveness_decision(heartbeat + Duration::milliseconds(60_000), 60_000),
+        WorkerLivenessDecision::Stale {
+            last_heartbeat_at: heartbeat
+        }
+    );
+
+    state.register_input_request(pending_input("req-1", "turn-1", 1, "awakeable-1"));
+    assert_eq!(
+        state.liveness_decision(heartbeat + Duration::milliseconds(600_000), 60_000),
+        WorkerLivenessDecision::Stop
+    );
+    state.pending_input_requests.clear();
+    state.apply_turn_outcome(TurnOutcome::Idle);
+    assert_eq!(
+        state.liveness_decision(heartbeat + Duration::milliseconds(600_000), 60_000),
+        WorkerLivenessDecision::Stop
+    );
+
+    state.stop_liveness_deadline();
+    assert!(!state.liveness_generation_matches(generation));
 }
 
 #[test]

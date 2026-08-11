@@ -9,7 +9,6 @@ fixture parser/schema/hash check alone and is the form CI executes.
 """
 
 import argparse
-import base64
 import concurrent.futures
 import contextlib
 import datetime as dt
@@ -106,6 +105,7 @@ REPORT_REPO = Path(
         / f"{RUN_DATE}-moa-100-persona-baseline.md",
     )
 )
+SKILL_SEEDER = ROOT / "target/debug/moa-sweep-skill-seeder"
 
 print_lock = threading.Lock()
 
@@ -332,9 +332,13 @@ def start_orchestrator(env):
             "MOA_PROVIDERS_CONCURRENCY_SCOPE": "local",
             # Sweep model is routed through the OpenAI provider credential.
             "MOA_OPENAI_MAX_CONCURRENT_REQUESTS": PROVIDER_MAX_IN_FLIGHT,
+            # This process owns a disposable isolated DB and never survives the
+            # sweep, so persistent KMS material would add state without value.
+            "MOA_KMS_ALLOW_EPHEMERAL": "true",
             "RUST_LOG": os.environ.get("RUST_LOG", "info,moa_orchestrator=info"),
         }
     )
+    add_rust_dylib_path(child_env)
     child_env.pop("MOA_COHERE_API_KEY", None)
     binary = ROOT / "target/debug/moa-orchestrator-bin"
     if not binary.exists():
@@ -575,6 +579,17 @@ def turn_message_body(case, user_message, ordinal):
     }
 
 
+def start_session_turn(session_id, body, headers, *, timeout=90):
+    """Admit a new or follow-up message through the canonical Session handler."""
+    return http_json(
+        "POST",
+        f"{INGRESS}/Session/{session_id}/start_turn",
+        body,
+        headers=headers,
+        timeout=timeout,
+    )
+
+
 SKILLS = [
     (
         "finance-reporting",
@@ -618,31 +633,55 @@ def skill_content(name, description, tags):
     return f'''---\nname: {name}\ndescription: "{description}"\nmetadata:\n  moa-tags: "{tags}"\n  moa-estimated-tokens: "180"\n---\n# {name}\n\nUse this skill when the current user request matches the description. Follow these steps:\n\n1. Restate the user's goal in concrete terms.\n2. Identify any missing inputs without blocking when reasonable assumptions are possible.\n3. Produce the requested work product in an operator-ready format.\n4. Call out risks, checks, owners, or next actions when they matter.\n5. Keep the final response concise unless the user asks for detail.\n'''
 
 
-def import_skills(tenant_id, identity_id):
-    headers = build_headers(identity_id, tenant_id)
-    packages = []
+def add_rust_dylib_path(env):
+    """Make directly executed prefer-dynamic Rust binaries runnable on macOS."""
+    if sys.platform != "darwin" or env.get("DYLD_FALLBACK_LIBRARY_PATH"):
+        return
+    target_libdir = run(
+        ["rustc", "--print", "target-libdir"], timeout=30
+    ).stdout.strip()
+    if not target_libdir:
+        raise RuntimeError("rustc returned an empty target library directory")
+    env["DYLD_FALLBACK_LIBRARY_PATH"] = target_libdir
+
+
+def import_skills(tenant_id, database_url):
+    """Seed active skills through the canonical artifact release fixture path."""
+    skills = []
     for name, desc, tags in SKILLS:
-        content = skill_content(name, desc, tags).encode("utf-8")
-        packages.append(
+        skills.append(
             {
                 "name": name,
                 "description": desc,
-                "files": [
-                    {
-                        "path": "SKILL.md",
-                        "content_base64": base64.b64encode(content).decode("ascii"),
-                        "content_type": "text/markdown",
-                        "executable": False,
-                    }
-                ],
-                "source_uri": None,
-                "metadata": {},
+                "tags": [tag.strip() for tag in tags.split(",")],
+                "skill_markdown": skill_content(name, desc, tags),
             }
         )
-    body = {"scope": {"tenant": {"tenant_id": tenant_id}}, "packages": packages}
-    return http_json(
-        "POST", f"{INGRESS}/Skills/import", body, headers=headers, timeout=120
+    if not SKILL_SEEDER.exists():
+        raise RuntimeError(f"missing sweep skill seeder binary at {SKILL_SEEDER}")
+    child_env = os.environ.copy()
+    child_env["MOA_DATABASE_URL"] = database_url
+    add_rust_dylib_path(child_env)
+    result = subprocess.run(
+        [str(SKILL_SEEDER)],
+        cwd=ROOT,
+        env=child_env,
+        input=json.dumps({"tenant_id": tenant_id, "skills": skills}),
+        timeout=180,
+        text=True,
+        capture_output=True,
     )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "sweep skill seeder failed:\n"
+            f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+        )
+    response = json.loads(result.stdout)
+    if response.get("count") != len(skills):
+        raise RuntimeError(
+            f"sweep skill seeder activated {response.get('count')} of {len(skills)} skills"
+        )
+    return response
 
 
 def list_skills(tenant_id, identity_id):
@@ -1166,20 +1205,13 @@ def run_case(case):
             timeout=60,
         )
         body = turn_message_body(case, case["request"], 0)
-        start_resp = http_json(
-            "POST",
-            f"{INGRESS}/Session/{session_id}/start_turn",
-            body,
-            headers=headers,
-            timeout=90,
-        )
+        start_resp = start_session_turn(session_id, body, headers)
         if case.get("interrupt"):
             time.sleep(1.2)
-            queued_resp = http_json(
-                "POST",
-                f"{INGRESS}/Session/{session_id}/queue_message",
+            queued_resp = start_session_turn(
+                session_id,
                 turn_message_body(case, "Actually, keep it to five bullets.", 1),
-                headers=headers,
+                headers,
                 timeout=60,
             )
         if case.get("cancel"):
@@ -1643,6 +1675,21 @@ def main():
         ],
         timeout=600,
     )
+    log("building sweep skill seeder")
+    run(
+        [
+            "cargo",
+            "build",
+            "-p",
+            "moa-test-support",
+            "--bin",
+            "moa-sweep-skill-seeder",
+            "--features",
+            "sweep-skill-seeder",
+            "--locked",
+        ],
+        timeout=600,
+    )
     template, db_name, db_url, admin_db_url = setup_database()
     env_info = {
         "template": template,
@@ -1670,7 +1717,7 @@ def main():
         IDENTITY_ID = str(uuid.uuid4())
         grant_operator(env, IDENTITY_ID, TENANT_ID)
         log(f"created sweep tenant={TENANT_ID} identity={IDENTITY_ID}")
-        imported = import_skills(TENANT_ID, IDENTITY_ID)
+        imported = import_skills(TENANT_ID, db_url)
         skill_list = list_skills(TENANT_ID, IDENTITY_ID)
         skill_count = (
             len(

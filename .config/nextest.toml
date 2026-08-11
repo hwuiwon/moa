@@ -79,7 +79,7 @@ binary(/^(agent_artifacts_service_e2e|consolidate_service_e2e|session_store_serv
 inherits = "default"
 test-threads = 1
 default-filter = '''
-binary(/^(session_turn_lifecycle_service_e2e|turn_execution_smoke_service_e2e|worker_coordination_service_e2e)$/)
+binary(/^(session_turn_lifecycle_service_e2e|turn_execution_smoke_service_e2e)$/)
   - test(/recovery_matrix_/)
 '''
 
@@ -97,9 +97,9 @@ binary(/^orchestrator_fixture_service_e2e$/)
   | binary(/^turn_terminal_failure_service_e2e$/)
 '''
 
-# Small deterministic crash/replay cases run serially on pull requests. Large
-# fan-out, A/B rollout, node-loss, and chaos scenarios remain in their existing
-# local/nightly lanes.
+# Small deterministic crash/replay and worker-deadline cases run serially on
+# pull requests. Large fan-out, A/B rollout, node-loss, and chaos scenarios
+# remain in their existing local/nightly lanes.
 [profile.restate-recovery-pr]
 inherits = "default"
 test-threads = 1
@@ -109,6 +109,7 @@ package(moa-orchestrator)
   & (
       (binary(/^recovery_matrix_sandbox_workspace_service_e2e$/)
         & test(/recovery_matrix_sandbox_workspace_/))
+      | binary(/^worker_coordination_service_e2e$/)
       | (test(/recovery_matrix_/) - binary(/^sandbox_workspace_soak_service_e2e$/))
     )
 '''

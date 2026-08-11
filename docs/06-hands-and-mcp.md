@@ -363,10 +363,12 @@ fences provider compute. Siblings never share a writable workspace or hand:
 This Worker model remains for conversational delegation in `act`; Worker is not
 an execution-plan node or bulk DAG primitive. A sandbox-using `ExecutionTask`
 gets the same isolation and generation-fenced recovery under its task identity.
-Dynamic map execution has no application hand/worker fan-out cap: every stable
-logical item is submitted after atomic budget reservation, while Restate
-concurrency and provider pacing determine how many physical sandboxes run at
-once.
+Dynamic map execution materializes every stable logical item deterministically
+after atomic budget reservation,
+but only the positive `execution.max_in_flight_tasks` window owns live attached
+task calls and therefore live task sandboxes. Pending rows remain storage-only;
+provider pacing and governed hand capacity apply independent limits within the
+run-owned window.
 
 Before the LLM call for a turn, the context pipeline selects relevant skills.
 The selected trusted sandbox file references are copied into `ToolCallRequest`.

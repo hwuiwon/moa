@@ -39,6 +39,14 @@ impl VoState for WorkerVoState {
                 .unwrap_or_default(),
             result_waiters: reader.get_json(K_RESULT_WAITERS).await?.unwrap_or_default(),
             last_heartbeat_at: reader.get_json(K_LAST_HEARTBEAT_AT).await?,
+            liveness_generation: reader
+                .get_json(K_LIVENESS_GENERATION)
+                .await?
+                .unwrap_or_default(),
+            liveness_outstanding: reader
+                .get_json(K_LIVENESS_OUTSTANDING)
+                .await?
+                .unwrap_or_default(),
             cleanup_generation: reader
                 .get_json(K_CLEANUP_GENERATION)
                 .await?
@@ -100,6 +108,13 @@ impl VoState for WorkerVoState {
         );
         set_or_clear_vec(ctx, K_RESULT_WAITERS, &self.result_waiters);
         set_or_clear_opt(ctx, K_LAST_HEARTBEAT_AT, self.last_heartbeat_at.as_ref());
+        set_or_clear_scalar(ctx, K_LIVENESS_GENERATION, self.liveness_generation, 0);
+        set_or_clear_scalar(
+            ctx,
+            K_LIVENESS_OUTSTANDING,
+            self.liveness_outstanding,
+            false,
+        );
         set_or_clear_scalar(ctx, K_CLEANUP_GENERATION, self.cleanup_generation, 0);
         set_or_clear_scalar(
             ctx,
@@ -239,6 +254,20 @@ impl VoState for WorkerVoState {
             K_LAST_HEARTBEAT_AT,
             self.last_heartbeat_at.as_ref(),
             baseline.last_heartbeat_at.as_ref(),
+        );
+        set_changed_scalar(
+            ctx,
+            K_LIVENESS_GENERATION,
+            self.liveness_generation,
+            &baseline.liveness_generation,
+            0,
+        );
+        set_changed_scalar(
+            ctx,
+            K_LIVENESS_OUTSTANDING,
+            self.liveness_outstanding,
+            &baseline.liveness_outstanding,
+            false,
         );
         set_changed_scalar(
             ctx,

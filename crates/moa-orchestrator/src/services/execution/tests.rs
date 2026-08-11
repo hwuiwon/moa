@@ -3,10 +3,10 @@
 use super::capability_catalog::{
     build_capability_response, build_skill_regression_compile_authority, single_tool_estimate,
 };
-use super::handlers::validate_start_source_provenance;
 use super::planning_context::{
     PlanningSkillContext, build_planning_skill_context, skill_revision_ref,
 };
+use super::start::validate_start_source_provenance;
 use super::support::{
     durable_amendment_operation_fingerprints, durable_failure_fingerprint_counts,
     persisted_input_audience, validate_external_wait_payload,

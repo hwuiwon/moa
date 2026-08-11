@@ -166,17 +166,17 @@ where
 
 /// Schedules a generation-guarded delayed self-call on the current virtual object.
 ///
-/// This is the shared mechanism behind periodic VO ticks. It issues one Restate
+/// This is the shared mechanism behind generation-fenced VO deadlines. It issues one Restate
 /// delayed send back to `handler` on the *same* object key, carrying `generation` so
-/// a tick scheduled before a reconfiguration can be recognized as stale and ignored
+/// a call scheduled before a state transition can be recognized as stale and ignored
 /// when it eventually fires. The idempotency key combines the object, handler, key,
-/// generation, and a per-tick `nonce`, so a replayed handler never double-schedules
-/// the same logical tick while successive ticks stay distinct.
+/// generation, and a per-call `nonce`, so a replayed handler never double-schedules
+/// the same logical deadline while successive deadlines stay distinct.
 ///
 /// Modeled on the `CronJob` virtual object's delayed self-tick — same
 /// `idempotency_key` + `send_after` Restate SDK calls — but kept generic over the
-/// target handler, generation, payload, and delay so the progress-narration tick and,
-/// later, the heartbeat/stale watchdog share one scheduler rather than diverging.
+/// target handler, generation, payload, and delay so virtual objects share one
+/// replay-safe scheduler rather than implementing divergent deadline machinery.
 pub(crate) fn schedule_generation_guarded_self_call<T>(
     ctx: &ObjectContext<'_>,
     object_name: &str,

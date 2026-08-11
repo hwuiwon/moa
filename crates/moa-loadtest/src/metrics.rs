@@ -9,7 +9,6 @@ const METRICS_SCRAPE_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_EVENTS_APPENDED_METRIC: &str = "moa_session_events_appended_total";
 const TURN_ADMISSION_LIVE_METRIC: &str = "moa_turn_admission_live";
 const PROGRESS_UPDATE_EVENT_TYPE: &str = "ProgressUpdate";
-const PROGRESS_NARRATED_EVENT_TYPE: &str = "ProgressNarrated";
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RuntimeMetricsSnapshot {
@@ -188,11 +187,6 @@ pub(crate) fn resource_bill_delta_report(
         .find(|item| item.event_type == PROGRESS_UPDATE_EVENT_TYPE)
         .map(|item| item.rows)
         .unwrap_or_default();
-    let progress_narrated_rows = event_rows_by_type
-        .iter()
-        .find(|item| item.event_type == PROGRESS_NARRATED_EVENT_TYPE)
-        .map(|item| item.rows)
-        .unwrap_or_default();
     ResourceBillReport {
         durable_event_rows,
         durable_event_rows_per_successful_operation: per_successful_operation(
@@ -202,11 +196,6 @@ pub(crate) fn resource_bill_delta_report(
         progress_update_rows,
         progress_update_rows_per_successful_operation: per_successful_operation(
             progress_update_rows,
-            successful_operations,
-        ),
-        progress_narrated_rows,
-        progress_narrated_rows_per_successful_operation: per_successful_operation(
-            progress_narrated_rows,
             successful_operations,
         ),
         event_rows_by_type,
@@ -569,19 +558,16 @@ moa_session_events_appended_total{event_type="ProgressUpdate"} 6
 moa_session_events_appended_total{event_type="UserMessage"} 14
 moa_session_events_appended_total{event_type="BrainResponse"} 14
 moa_session_events_appended_total{event_type="ProgressUpdate"} 6
-moa_session_events_appended_total{event_type="ProgressNarrated"} 2
 "#,
         );
 
         let report = resource_bill_delta_report(Some(&before), Some(&after), 4);
 
-        assert_eq!(report.durable_event_rows, 10);
-        assert_eq!(report.durable_event_rows_per_successful_operation, 2.5);
+        assert_eq!(report.durable_event_rows, 8);
+        assert_eq!(report.durable_event_rows_per_successful_operation, 2.0);
         assert_eq!(report.progress_update_rows, 0);
         assert_eq!(report.progress_update_rows_per_successful_operation, 0.0);
-        assert_eq!(report.progress_narrated_rows, 2);
-        assert_eq!(report.progress_narrated_rows_per_successful_operation, 0.5);
-        assert_eq!(report.event_rows_by_type.len(), 3);
+        assert_eq!(report.event_rows_by_type.len(), 2);
     }
 
     #[test]

@@ -306,20 +306,6 @@ const SENDERS: &[SenderManifestEntry] = &[
         "run"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/session/liveness.rs",
-        "fetch_child_summary",
-        TRACE_HELPER,
-        "WorkerClient",
-        "progress_summary"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/objects/session/liveness.rs",
-        "raise_child_stale",
-        TRACE_HELPER,
-        "SessionClient",
-        "record_child_signal"
-    ),
-    sender!(
         "crates/moa-orchestrator/src/objects/session/mod.rs",
         "append_session_event_deduped",
         TRACE_HELPER,
@@ -341,27 +327,6 @@ const SENDERS: &[SenderManifestEntry] = &[
         "turn_admission_heartbeat"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/session/narration.rs",
-        "collect_active_marker_sources",
-        TRACE_HELPER,
-        "TurnExecutionClient",
-        "progress"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/objects/session/narration.rs",
-        "collect_active_marker_sources",
-        TRACE_HELPER,
-        "WorkerClient",
-        "progress_summary"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/objects/session/narration.rs",
-        "run_narration_tick",
-        TRACE_HELPER,
-        "LLMGatewayClient",
-        "narrate_session"
-    ),
-    sender!(
         "crates/moa-orchestrator/src/objects/session/persistence.rs",
         "sync_status",
         TRACE_HELPER,
@@ -377,10 +342,10 @@ const SENDERS: &[SenderManifestEntry] = &[
     ),
     sender!(
         "crates/moa-orchestrator/src/objects/worker/handlers/coordination.rs",
-        "cache_parent_terminal_result",
+        "deliver_terminal_notification_once",
         TRACE_HELPER,
         "SessionClient",
-        "mark_child_terminal"
+        "record_worker_child_terminal"
     ),
     sender!(
         "crates/moa-orchestrator/src/objects/worker/handlers/admission.rs",
@@ -397,18 +362,25 @@ const SENDERS: &[SenderManifestEntry] = &[
         "request_cancel"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/worker/handlers/coordination.rs",
-        "append_action_review_continuation_fact",
+        "crates/moa-orchestrator/src/objects/worker/handlers/admission.rs",
+        "emit_worker_heartbeat_stale",
         TRACE_HELPER,
         "RestateSessionStoreClient",
         "append_event"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/worker/handlers/coordination.rs",
-        "emit_terminal_idle_wake",
+        "crates/moa-orchestrator/src/objects/worker/handlers/admission.rs",
+        "emit_worker_heartbeat_stale",
         TRACE_HELPER,
         "SessionClient",
         "record_child_signal"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/objects/worker/handlers/coordination.rs",
+        "append_action_review_continuation_fact",
+        TRACE_HELPER,
+        "RestateSessionStoreClient",
+        "append_event"
     ),
     sender!(
         "crates/moa-orchestrator/src/objects/worker/handlers/turn.rs",
@@ -444,13 +416,6 @@ const SENDERS: &[SenderManifestEntry] = &[
         TRACE_HELPER,
         "WorkerTurnExecutionClient",
         "run"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/objects/worker/persistence.rs",
-        "persist_parent_session_event",
-        TRACE_HELPER,
-        "RestateSessionStoreClient",
-        "append_event"
     ),
     sender!(
         "crates/moa-orchestrator/src/services/action_review_dispatcher.rs",
@@ -623,7 +588,7 @@ const SENDERS: &[SenderManifestEntry] = &[
     ),
     sender!(
         "crates/moa-orchestrator/src/services/execution/support.rs",
-        "send_run_wake",
+        "call_run_wake",
         TRACE_HELPER,
         "ExecutionRunClient",
         "wake"
@@ -718,20 +683,6 @@ const SENDERS: &[SenderManifestEntry] = &[
         TRACE_HELPER,
         "IngestionVOClient",
         "ingest_turn"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/services/narration.rs",
-        "append_narration",
-        TRACE_HELPER,
-        "RestateSessionStoreClient",
-        "append_event"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/services/narration.rs",
-        "load_session_progress",
-        IDENTITY_TRACE_HELPER,
-        "SessionClient",
-        "progress"
     ),
     sender!(
         "crates/moa-orchestrator/src/services/security_events.rs",
@@ -1350,13 +1301,6 @@ const SENDERS: &[SenderManifestEntry] = &[
         TRACE_HELPER,
         "RestateSessionStoreClient",
         "get_active_segment"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/worker_turn_execution.rs",
-        "emit_failed_child_signal_if_needed",
-        TRACE_HELPER,
-        "SessionClient",
-        "record_child_signal"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/worker_turn_execution.rs",

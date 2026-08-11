@@ -1,6 +1,7 @@
 //! Shared execution-service mutation handoff types and conversion helpers.
 
 use super::*;
+use moa_observability::runtime_metrics::record_execution_mutation_run_wake_ack;
 
 pub(super) fn scoped_catalog_error(
     error: crate::connector_catalog::ScopedConnectorCatalogError,
@@ -537,29 +538,13 @@ pub(super) fn execution_run_started_delivery(
     }
 }
 
-pub(super) fn send_run_wake(
-    ctx: &Context<'_>,
-    run_uid: uuid::Uuid,
-    wake_epoch: u64,
-    reason: ExecutionRunWakeReason,
-) {
-    crate::restate_identity::replay_safe_request(
-        ctx.workflow_client::<ExecutionRunClient>(run_uid.to_string())
-            .wake(Json::from(ExecutionRunWakeRequest {
-                run_uid,
-                wake_epoch,
-                reason,
-            })),
-    )
-    .send();
-}
-
 /// Joins the run wake handoff before an externally visible mutation returns.
 pub(super) async fn call_run_wake(
     ctx: &Context<'_>,
     run_uid: uuid::Uuid,
     wake_epoch: u64,
     reason: ExecutionRunWakeReason,
+    handoff_started: std::time::Instant,
 ) -> Result<(), HandlerError> {
     crate::restate_identity::replay_safe_request(
         ctx.workflow_client::<ExecutionRunClient>(run_uid.to_string())
@@ -571,8 +556,22 @@ pub(super) async fn call_run_wake(
     )
     .call()
     .await
-    .map_err(HandlerError::from)
+    .map_err(HandlerError::from)?;
+    record_execution_mutation_run_wake_ack(handoff_started.elapsed());
+    Ok(())
 }
+
+#[cfg(feature = "integration")]
+pub(super) async fn pause_execution_mutation_handoff_for_test() {
+    if std::env::var("MOA_EXECUTION_TEST_PAUSE_MUTATION_HANDOFF").as_deref() == Ok("true") {
+        // Deliberately not journaled: the integration fixture kills the process in
+        // this post-commit window, then recovery retries against an unpaused binary.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    }
+}
+
+#[cfg(not(feature = "integration"))]
+pub(super) async fn pause_execution_mutation_handoff_for_test() {}
 
 pub(super) fn invalid_execution_request(message: impl Into<String>) -> HandlerError {
     TerminalError::new_with_code(400, message.into()).into()

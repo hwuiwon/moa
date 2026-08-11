@@ -92,10 +92,6 @@ pub struct ResourceBillReport {
     pub progress_update_rows: u64,
     /// Durable `ProgressUpdate` rows per successful operation.
     pub progress_update_rows_per_successful_operation: f64,
-    /// Durable `ProgressNarrated` rows appended during the measured run.
-    pub progress_narrated_rows: u64,
-    /// Durable `ProgressNarrated` rows per successful operation.
-    pub progress_narrated_rows_per_successful_operation: f64,
     /// Durable event rows split by event type.
     pub event_rows_by_type: Vec<EventAppendTypeReport>,
 }
@@ -574,7 +570,7 @@ pub fn render_human_report(report: &LoadTestReport) -> String {
     if report.resource_bill.durable_event_rows > 0 {
         let _ = writeln!(
             &mut output,
-            "Resource Bill:\n  durable event rows: {} ({:.2}/successful operation) | ProgressUpdate: {} ({:.2}/successful operation) | ProgressNarrated: {} ({:.2}/successful operation)",
+            "Resource Bill:\n  durable event rows: {} ({:.2}/successful operation) | ProgressUpdate: {} ({:.2}/successful operation)",
             report.resource_bill.durable_event_rows,
             report
                 .resource_bill
@@ -582,11 +578,7 @@ pub fn render_human_report(report: &LoadTestReport) -> String {
             report.resource_bill.progress_update_rows,
             report
                 .resource_bill
-                .progress_update_rows_per_successful_operation,
-            report.resource_bill.progress_narrated_rows,
-            report
-                .resource_bill
-                .progress_narrated_rows_per_successful_operation
+                .progress_update_rows_per_successful_operation
         );
     }
     let _ = writeln!(

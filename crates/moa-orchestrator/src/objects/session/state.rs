@@ -4,9 +4,9 @@ use super::*;
 use moa_core::traits::Identity;
 use moa_core::{
     types::identifiers::AgentSignalId, types::security::SecurityCircuitState,
-    types::worker::state::ChildSignalKind, types::worker::state::ParentResumePolicy,
-    types::worker::state::UnreadChildSignal, types::worker::state::WorkerInputTarget,
-    types::worker::state::WorkerSignal,
+    types::worker::signals::ChildSignalKind, types::worker::signals::ParentResumePolicy,
+    types::worker::signals::UnreadChildSignal, types::worker::signals::WorkerSignal,
+    types::worker::state::WorkerInputTarget,
 };
 
 mod execution;
@@ -51,20 +51,11 @@ pub(super) const K_STATUS: &str = "status";
 pub(super) const K_CHILDREN: &str = "children";
 pub(super) const K_LAST_TURN_SUMMARY: &str = "last_turn_summary";
 pub(super) const K_CURRENT_SEGMENT: &str = "current_segment";
-pub(super) const K_NARRATION_TICK_GENERATION: &str = "narration_tick_generation";
-pub(super) const K_NARRATION_TICK_OUTSTANDING: &str = "narration_tick_outstanding";
-pub(super) const K_NARRATION_SEQ: &str = "narration_seq";
-pub(super) const K_LAST_NARRATED_MARKER: &str = "last_narrated_marker";
-pub(super) const K_LAST_NARRATION_AT: &str = "last_narration_at";
-pub(super) const K_NARRATION_WINDOW_START: &str = "narration_window_start";
-pub(super) const K_NARRATION_WINDOW_COUNT: &str = "narration_window_count";
 pub(super) const K_OWNING_IDENTITY: &str = "owning_identity";
 pub(super) const K_UNREAD_CHILD_SIGNALS: &str = "unread_child_signals";
 pub(super) const K_PENDING_PARENT_RESUME_SIGNAL: &str = "pending_parent_resume_signal";
 pub(super) const K_RESUME_BUDGET: &str = "resume_budget";
 pub(super) const K_RESUME_TURN: &str = "resume_turn";
-pub(super) const K_CHILD_LIVENESS_GENERATION: &str = "child_liveness_generation";
-pub(super) const K_CHILD_LIVENESS: &str = "child_liveness";
 pub(super) const K_CHILD_TERMINAL_BLOBS: &str = "child_terminal_blobs";
 pub(super) const K_ACTIVE_EXECUTION_RUNS: &str = "active_execution_runs";
 pub(super) const K_PENDING_USER_REPLY_TARGETS: &str = "pending_user_reply_targets";
@@ -169,20 +160,6 @@ pub struct ResumeTurnContext {
     pub turn_id: String,
     /// Unread signal ids consumed by this resume turn at dispatch time.
     pub consumed_signal_ids: Vec<AgentSignalId>,
-}
-
-/// Per-active-child liveness-watchdog scheduling state held on the Session VO.
-///
-/// One entry exists while a per-child `check_child_liveness` delayed self-call is
-/// outstanding. `generation` is drawn from the session-wide monotonic
-/// [`SessionVoState::child_liveness_generation`] counter so a tick scheduled by a
-/// superseded arming is recognized as stale and ignored when it fires.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ChildLivenessState {
-    /// Child worker this watchdog entry tracks.
-    pub worker_id: WorkerId,
-    /// Scheduling generation of the currently outstanding liveness check.
-    pub generation: u64,
 }
 
 /// Exact aggregate tuple used for execution-progress delta gating.
@@ -317,24 +294,8 @@ pub struct SessionVoState {
     pub last_turn_summary: Option<String>,
     /// Active task segment, when one has been created for the session.
     pub current_segment: Option<ActiveSegment>,
-    /// Current progress-narration scheduling generation. Bumped on each active-edge
-    /// (re)start so a delayed tick scheduled by a superseded generation is ignored.
-    pub narration_tick_generation: u64,
-    /// Whether a narration tick is scheduled and not yet stopped. Guarantees a single
-    /// outstanding tick so `register_child`/turn-start edges cannot fan out overlapping ticks.
-    pub narration_tick_outstanding: bool,
-    /// Monotonic narration sequence used to build the `narration:{session}:{seq}` dedupe key.
-    pub narration_seq: u64,
-    /// Change cursor (semantic marker) of the most recently narrated active sources.
-    pub last_narrated_marker: Option<String>,
-    /// Journaled instant of the most recent narration dispatch, for the interval gate.
-    pub last_narration_at: Option<DateTime<Utc>>,
-    /// Rolling narration window start, for the per-window cost cap.
-    pub narration_window_start: Option<DateTime<Utc>>,
-    /// Narrations dispatched in the current rolling window.
-    pub narration_window_count: u32,
-    /// Owning participant identity captured for self-originated narration reads. Sourced
-    /// from the first verified turn participant, falling back to session metadata.
+    /// Owning participant identity captured from the first verified turn.
+    /// Used by authenticated resume, review, and execution flows.
     pub owning_identity: Option<Identity>,
     /// Recent unread child→parent control-plane signals, capped to a small window.
     ///
@@ -352,14 +313,6 @@ pub struct SessionVoState {
     /// In-flight guarded coordinator resume turn and its dispatch-time unread snapshot,
     /// drained on `record_turn_outcome` when that turn completes.
     pub resume_turn: Option<ResumeTurnContext>,
-    /// Session-wide monotonic counter minting one liveness-check generation per arming.
-    ///
-    /// Monotonic so a re-armed (or re-registered) child never reuses a prior
-    /// generation, making any stray in-flight tick from before a clear/re-arm
-    /// recognizable as stale.
-    pub child_liveness_generation: u64,
-    /// Per-child outstanding liveness-watchdog checks (single-outstanding per child).
-    pub child_liveness: Vec<ChildLivenessState>,
     /// Claim-check references for terminal child outputs offloaded from `children`.
     ///
     /// One entry per terminal child whose output exceeded

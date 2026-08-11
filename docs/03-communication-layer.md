@@ -124,7 +124,7 @@ This avoids losing information when a client disconnects or a messaging process 
 - approval requests and decisions
 - segment start/completion events
 - memory and checkpoint events
-- worker progress narration, attention signals, and stale notices
+- cadence-limited worker progress, attention signals, fan-in settlement, and stale notices
 - execution-run start, aggregate progress, exact input requests, and terminal status
 - status snapshots from the Restate-backed orchestrator
 
@@ -156,21 +156,16 @@ turn. Terminal delivery requests at most one guarded synthesis turn linked to
 the originating user sequence and run ID.
 
 When a coordinator turn delegates to workers, the stream stays open across the
-**detached window**. `session_message_terminal_done` closes only when the started
-turn has completed **and** `Session/progress.child_progress` shows no non-terminal
-child; with no children it collapses to the previous turn-completion-only close.
-While children run, the stream keeps emitting transient active-turn progress and
-durable coordination frames mapped from the new `Event` variants:
-`progress_narration` (`ProgressNarrated`, the
-primary user-facing liveness, rendered in the assistant's voice), `worker_signal`
-(`WorkerSignalReceived`), `worker_resume` (`WorkerParentResumeRequested`),
-and `worker_stale` (`WorkerHeartbeatStale`); terminal
-`WorkerNotificationDelivered` stays on the generic `session_event` frame. During
-event silence with an active descendant, the edge also emits a templated, **non-durable**
-`working` frame (active child summary + elapsed seconds) after a fixed 10s
-interval, so the user never sees a frozen screen even when narration correctly
-skips a no-change period or is disabled. `child_progress` is built by bounded
-fan-in (active children only, capped) so the projection stays compact.
+**detached window**. Cadence-limited `ProgressUpdate` events provide progress
+directly from active turns; neither progress delivery nor stream completion
+causes Session to poll Worker state. Durable coordination frames include
+`worker_signal` (`WorkerSignalReceived`), `worker_resume`
+(`WorkerParentResumeRequested`), and `worker_stale`
+(`WorkerHeartbeatStale`); terminal `WorkerNotificationDelivered` stays on the
+generic `session_event` frame. The Session-owned terminal handler records those
+terminal facts and at most one `FanInSettled` signal for the current child
+registration generation, so the stream can close the detached window from
+durable events rather than repeated child-summary reads.
 
 This detached-worker window is specific to interactive delegation in `act`.
 Conversational `Worker` remains steerable and bounded, but it is not the bulk
@@ -246,6 +241,13 @@ request identifies an activated skill's exact pinned `execution_plan` template
 revision plus objective and structured input, then enters the session-originated
 planning/admission path. Model-facing clients submit neither a compiled-plan
 identifier nor raw graph JSON.
+
+Every accepted public execution mutation is a joined acknowledgement. The
+service commits the repository transition first, awaits the exact task handler
+when the mutation is task-specific, and awaits the run wake for the committed
+epoch before returning success. A caller retry after failure between commit and
+wake acknowledgement replays the same mutation and epoch rather than observing
+an early success or causing a second resume.
 
 ### Edge-to-ingress forwarding
 

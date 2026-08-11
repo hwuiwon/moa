@@ -51,7 +51,6 @@ mod tests {
         types::provider::ModelTier,
         types::session::SessionMeta,
         types::tools::ToolOutput,
-        types::worker::state::NarrationSource,
     };
 
     use super::session_requires_processing;
@@ -111,36 +110,12 @@ mod tests {
         }
     }
 
-    fn progress_narrated_event() -> Event {
-        Event::ProgressNarrated {
-            source: NarrationSource::Coordinator,
-            text: "still working".to_string(),
-            segments: Vec::new(),
-            model: "none".to_string(),
-            tokens_used: 0,
-        }
-    }
-
     fn stale_heartbeat_event() -> Event {
         Event::WorkerHeartbeatStale {
             worker_id: "worker-1".to_string(),
             last_heartbeat_at: Utc::now(),
             threshold_ms: 30_000,
         }
-    }
-
-    #[test]
-    fn detached_narration_does_not_mask_pending_tool_result() {
-        // Pins: F04 — default-on `ProgressNarrated` is appended by a detached job that can
-        // land just after a `ToolResult`. It must not end the tool loop with work pending.
-        let session = SessionMeta::default();
-        let events = vec![
-            record(1, tool_result_event()),
-            record(2, progress_narrated_event()),
-        ];
-
-        assert!(session_requires_processing(&session, &events));
-        assert_eq!(events[1].event_type, EventType::ProgressNarrated);
     }
 
     #[test]
@@ -254,8 +229,8 @@ mod tests {
 
     #[test]
     fn terminal_brain_response_requires_no_processing() {
-        // Pins: a completed assistant response ends the turn loop even when passive
-        // telemetry (`ProgressNarrated`) is appended after it.
+        // Pins: a completed assistant response ends the turn loop even when a passive
+        // liveness event is appended after it.
         let session = SessionMeta::default();
         let events = vec![
             record(
@@ -266,7 +241,7 @@ mod tests {
                 },
             ),
             record(2, brain_response_event()),
-            record(3, progress_narrated_event()),
+            record(3, stale_heartbeat_event()),
         ];
 
         assert!(!session_requires_processing(&session, &events));
@@ -277,10 +252,7 @@ mod tests {
         // Pins: a tail of only passive liveness/telemetry events requires no turn, so a
         // late async append on an otherwise-idle session does not resurrect the loop.
         let session = SessionMeta::default();
-        let events = vec![
-            record(1, stale_heartbeat_event()),
-            record(2, progress_narrated_event()),
-        ];
+        let events = vec![record(1, stale_heartbeat_event())];
 
         assert!(!session_requires_processing(&session, &events));
     }

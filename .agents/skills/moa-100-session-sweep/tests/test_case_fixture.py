@@ -14,6 +14,7 @@ import contextlib
 import copy
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -261,6 +262,45 @@ class RunnerIntegrationTests(unittest.TestCase):
         self.assertEqual(len(cases), 100)
         self.assertEqual(provenance["case_count"], 100)
 
+    def test_skill_seeding_uses_artifact_fixture_binary_not_removed_service(self):
+        with tempfile.TemporaryDirectory(prefix="moa_sweep_seeder_") as directory:
+            seeder = Path(directory) / "moa-sweep-skill-seeder"
+            seeder.touch()
+            completed = subprocess.CompletedProcess(
+                [str(seeder)],
+                0,
+                stdout=json.dumps(
+                    {
+                        "count": len(self.runner.SKILLS),
+                        "names": [skill[0] for skill in self.runner.SKILLS],
+                    }
+                ),
+                stderr="",
+            )
+            with unittest.mock.patch.object(self.runner, "SKILL_SEEDER", seeder):
+                with unittest.mock.patch.object(
+                    self.runner.subprocess, "run", return_value=completed
+                ) as invoked:
+                    result = self.runner.import_skills(
+                        "00000000-0000-4000-8000-000000000001",
+                        "postgres://fixture.invalid/sweep",
+                    )
+
+        self.assertEqual(result["count"], len(self.runner.SKILLS))
+        command = invoked.call_args.args[0]
+        self.assertEqual(command, [str(seeder)])
+        self.assertNotIn("Skills/import", " ".join(command))
+        payload = json.loads(invoked.call_args.kwargs["input"])
+        self.assertEqual(len(payload["skills"]), len(self.runner.SKILLS))
+        self.assertEqual(
+            [skill["name"] for skill in payload["skills"]],
+            [skill[0] for skill in self.runner.SKILLS],
+        )
+        self.assertEqual(
+            invoked.call_args.kwargs["env"]["MOA_DATABASE_URL"],
+            "postgres://fixture.invalid/sweep",
+        )
+
     def test_turn_message_bodies_carry_stable_unique_client_message_ids(self):
         cases, _ = self.runner.parse_cases()
         case = cases[0]
@@ -288,6 +328,25 @@ class RunnerIntegrationTests(unittest.TestCase):
         self.assertNotEqual(start["client_message_id"], queued["client_message_id"])
         next_case = self.runner.turn_message_body(cases[1], cases[1]["request"], 0)
         self.assertNotEqual(start["client_message_id"], next_case["client_message_id"])
+
+    def test_initial_and_interrupt_messages_use_the_same_session_admission_path(self):
+        body = {"client_message_id": "message-1"}
+        headers = {"authorization": "Bearer test"}
+        with unittest.mock.patch.object(
+            self.runner, "http_json", return_value={"accepted": True}
+        ) as request:
+            result = self.runner.start_session_turn(
+                "session-1", body, headers, timeout=12
+            )
+
+        self.assertEqual(result, {"accepted": True})
+        request.assert_called_once_with(
+            "POST",
+            f"{self.runner.INGRESS}/Session/session-1/start_turn",
+            body,
+            headers=headers,
+            timeout=12,
+        )
 
     def test_validate_cases_flag_exits_zero_and_creates_no_run_dir(self):
         buf = io.StringIO()

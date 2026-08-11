@@ -134,49 +134,6 @@ impl SessionVoState {
         self.pending_parent_resume_signal = None;
         true
     }
-
-    /// Arms a single-outstanding liveness check for one active child.
-    ///
-    /// Returns the new monotonic generation to schedule with when a check is newly
-    /// armed, or `None` when one is already outstanding for the child (so overlapping
-    /// active edges cannot fan out multiple checks). The generation is drawn from the
-    /// session-wide monotonic counter so it never collides with a superseded arming.
-    pub fn arm_child_liveness(&mut self, worker_id: &str) -> Option<u64> {
-        if self
-            .child_liveness
-            .iter()
-            .any(|entry| entry.worker_id == worker_id)
-        {
-            return None;
-        }
-        self.child_liveness_generation = self.child_liveness_generation.wrapping_add(1);
-        let generation = self.child_liveness_generation;
-        self.child_liveness.push(ChildLivenessState {
-            worker_id: worker_id.to_string(),
-            generation,
-        });
-        Some(generation)
-    }
-
-    /// Returns whether a fired liveness check still owns scheduling for its child.
-    ///
-    /// A check is live only when an entry for the child is outstanding and its
-    /// generation matches; a superseded or cleared check no-ops.
-    #[must_use]
-    pub fn liveness_generation_matches(&self, worker_id: &str, generation: u64) -> bool {
-        self.child_liveness
-            .iter()
-            .any(|entry| entry.worker_id == worker_id && entry.generation == generation)
-    }
-
-    /// Clears the outstanding liveness check for one child (terminal/stale/removed).
-    ///
-    /// Removing the entry is safe because re-arming draws a fresh generation from the
-    /// monotonic counter, so any stray in-flight tick can never match the re-armed child.
-    pub fn clear_child_liveness(&mut self, worker_id: &str) {
-        self.child_liveness
-            .retain(|entry| entry.worker_id != worker_id);
-    }
 }
 
 /// Whether a signal kind must be preserved over informational kinds during unread-cap
@@ -197,5 +154,6 @@ pub(in crate::objects::session) fn signal_kind_is_resume_eligible(kind: ChildSig
             | ChildSignalKind::NeedsInput
             | ChildSignalKind::Failed
             | ChildSignalKind::HeartbeatStale
+            | ChildSignalKind::FanInSettled
     )
 }

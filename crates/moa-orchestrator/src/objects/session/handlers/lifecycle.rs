@@ -35,6 +35,13 @@ impl SessionImpl {
             .iter()
             .map(|run| run.run_uid)
             .collect::<Vec<_>>();
+        if scope.cancels_task_tree() {
+            // The user cancelled this whole child set. Its final Cancelled delivery remains a
+            // durable terminal fact, but it must not synthesize a FanInSettled coordinator turn.
+            let mut fan_in = WorkerFanInState::load(&ctx).await?;
+            fan_in.suppress_current_generation();
+            fan_in.persist(&ctx);
+        }
         // A cancelled task tree can answer nothing, so every reply target its children
         // advertised is retracted here rather than waiting on each child's own clear:
         // the cascade below is detached, and until it lands the next plain user message

@@ -6,11 +6,12 @@ use super::{
     CHILD_OUTPUT_CLAIM_CHECK_THRESHOLD_BYTES, CoordinatorPendingInput, PendingUserReplyTarget,
     SessionVoState,
 };
+use crate::objects::session::{WorkerFanInState, WorkerTerminalRecord};
 use moa_core::{
     types::events_stream::ClaimCheck, types::identifiers::AgentSignalId,
-    types::worker::commands::MarkWorkerChildTerminalInput, types::worker::state::ChildSignalKind,
-    types::worker::state::UnreadChildSignal, types::worker::state::WorkerChildRef,
-    types::worker::state::WorkerInputTarget,
+    types::worker::signals::ChildSignalKind, types::worker::signals::UnreadChildSignal,
+    types::worker::state::WorkerChildRef, types::worker::state::WorkerInputTarget,
+    types::worker::terminal::RecordWorkerChildTerminalInput,
 };
 
 fn test_meta() -> moa_core::types::session::SessionMeta {
@@ -45,6 +46,20 @@ fn pending_child(id: &str) -> moa_core::types::worker::state::WorkerChildRef {
         task_hash: format!("hash-{id}"),
         budget_tokens: 128,
         terminal: None,
+    }
+}
+
+fn terminal_input(
+    worker_id: &str,
+    generation: u64,
+    terminal: moa_core::types::worker::state::WorkerTerminalResult,
+) -> RecordWorkerChildTerminalInput {
+    RecordWorkerChildTerminalInput {
+        worker_id: worker_id.to_string(),
+        generation,
+        terminal,
+        signal_id: AgentSignalId::new(),
+        created_at: Utc::now(),
     }
 }
 
@@ -136,6 +151,8 @@ fn session_child_terminal_result_is_consumed_once() {
         budget_tokens: 128,
         terminal: None,
     });
+    let mut fan_in = WorkerFanInState::default();
+    fan_in.register_child(&state.children);
     let terminal = moa_core::types::worker::state::WorkerTerminalResult {
         state: moa_core::types::worker::state::WorkerState::Completed,
         result: moa_core::types::worker::state::WorkerResult {
@@ -148,21 +165,153 @@ fn session_child_terminal_result_is_consumed_once() {
         },
     };
 
-    assert!(state.mark_child_terminal(
-        moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
-            worker_id: "child-1".to_string(),
-            terminal: terminal.clone(),
+    let input = terminal_input("child-1", 1, terminal.clone());
+    assert_eq!(
+        fan_in.record_terminal(&mut state, &input),
+        WorkerTerminalRecord::Accepted {
+            settled: Some(moa_core::types::worker::state::WorkerState::Completed)
         }
-    ));
-    assert!(!state.mark_child_terminal(
-        moa_core::types::worker::commands::MarkWorkerChildTerminalInput {
-            worker_id: "child-1".to_string(),
-            terminal: terminal.clone(),
-        }
-    ));
+    );
+    assert_eq!(
+        fan_in.record_terminal(&mut state, &input),
+        WorkerTerminalRecord::Duplicate
+    );
     assert_eq!(state.consume_child_terminal("child-1"), Some(terminal));
     assert_eq!(state.consume_child_terminal("child-1"), None);
     assert!(!state.owns_child("child-1"));
+}
+
+#[test]
+fn worker_fan_in_settles_only_after_every_registered_child() {
+    // Pins: successful detached fan-out produces no early settlement and one exact
+    // settlement when the final registered child reaches terminal state.
+    let mut state = SessionVoState::default();
+    let mut fan_in = WorkerFanInState::default();
+    for worker_id in ["child-1", "child-2", "child-3"] {
+        assert!(state.register_child(pending_child(worker_id)));
+        fan_in.register_child(&state.children);
+    }
+    assert_eq!(fan_in.generation, 3);
+
+    for worker_id in ["child-1", "child-2"] {
+        assert_eq!(
+            fan_in.record_terminal(
+                &mut state,
+                &terminal_input(worker_id, 1, worker_terminal(worker_id, "done")),
+            ),
+            WorkerTerminalRecord::Accepted { settled: None },
+            "N-1 terminal children must not settle fan-in"
+        );
+    }
+    let final_input = terminal_input("child-3", 1, worker_terminal("child-3", "done"));
+    assert_eq!(
+        fan_in.record_terminal(&mut state, &final_input),
+        WorkerTerminalRecord::Accepted {
+            settled: Some(moa_core::types::worker::state::WorkerState::Completed)
+        }
+    );
+    assert_eq!(fan_in.settled_generation, fan_in.generation);
+    assert_eq!(
+        fan_in.record_terminal(&mut state, &final_input),
+        WorkerTerminalRecord::Duplicate,
+        "a replay cannot settle the same registration generation twice"
+    );
+    assert_eq!(fan_in.terminal_deliveries.len(), 3);
+}
+
+#[test]
+fn failed_child_suppresses_later_success_settlement_for_generation() {
+    // Pins: a failure wakes immediately through its own signal; removing that failed
+    // child during cleanup cannot make a later successful sibling emit a second
+    // FanInSettled wake for the same registration generation.
+    let mut state = SessionVoState::default();
+    let mut fan_in = WorkerFanInState::default();
+    for worker_id in ["failed-child", "successful-child"] {
+        assert!(state.register_child(pending_child(worker_id)));
+        fan_in.register_child(&state.children);
+    }
+    let mut failed = worker_terminal("failed-child", "failed");
+    failed.state = moa_core::types::worker::state::WorkerState::Failed;
+    failed.result.success = false;
+    failed.result.error = Some("worker failed".to_string());
+    assert_eq!(
+        fan_in.record_terminal(&mut state, &terminal_input("failed-child", 1, failed)),
+        WorkerTerminalRecord::Accepted { settled: None }
+    );
+    assert!(state.remove_child("failed-child"));
+
+    assert_eq!(
+        fan_in.record_terminal(
+            &mut state,
+            &terminal_input(
+                "successful-child",
+                1,
+                worker_terminal("successful-child", "done"),
+            ),
+        ),
+        WorkerTerminalRecord::Accepted { settled: None },
+        "the already-signaled failure suppresses a second success wake"
+    );
+    assert_eq!(fan_in.failure_generation, fan_in.generation);
+    assert_eq!(fan_in.settled_generation, fan_in.generation);
+}
+
+#[test]
+fn task_tree_cancellation_suppresses_cancelled_fan_in_settlement() {
+    // Pins: cancelling the whole task tree records child terminal facts without waking a new
+    // coordinator turn when the last cancelled child settles the current fan-in generation.
+    let mut state = SessionVoState::default();
+    let mut fan_in = WorkerFanInState::default();
+    for worker_id in ["child-1", "child-2"] {
+        assert!(state.register_child(pending_child(worker_id)));
+        fan_in.register_child(&state.children);
+    }
+    fan_in.suppress_current_generation();
+
+    for worker_id in ["child-1", "child-2"] {
+        let mut terminal = worker_terminal(worker_id, "cancelled");
+        terminal.state = moa_core::types::worker::state::WorkerState::Cancelled;
+        terminal.result.success = false;
+        assert_eq!(
+            fan_in.record_terminal(&mut state, &terminal_input(worker_id, 1, terminal)),
+            WorkerTerminalRecord::Accepted { settled: None }
+        );
+    }
+    assert_eq!(fan_in.failure_generation, fan_in.generation);
+    assert_eq!(fan_in.settled_generation, fan_in.generation);
+}
+
+#[test]
+fn newer_worker_terminal_generation_replaces_its_cached_result_once() {
+    // Pins: a revived worker may deliver a later admission generation, while a replay
+    // or stale delivery for an already-accepted generation never creates another cache entry.
+    let mut state = SessionVoState::default();
+    assert!(state.register_child(pending_child("child")));
+    let mut fan_in = WorkerFanInState::default();
+    fan_in.register_child(&state.children);
+    let first = terminal_input("child", 1, worker_terminal("child", "first"));
+    assert!(matches!(
+        fan_in.record_terminal(&mut state, &first),
+        WorkerTerminalRecord::Accepted { .. }
+    ));
+
+    let second = terminal_input("child", 2, worker_terminal("child", "second"));
+    assert!(matches!(
+        fan_in.record_terminal(&mut state, &second),
+        WorkerTerminalRecord::Accepted { .. }
+    ));
+    assert_eq!(
+        state.children[0]
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.result.output.as_str()),
+        Some("second")
+    );
+    assert_eq!(fan_in.terminal_deliveries.len(), 1);
+    assert_eq!(
+        fan_in.record_terminal(&mut state, &first),
+        WorkerTerminalRecord::Duplicate
+    );
 }
 
 #[test]
@@ -177,8 +326,8 @@ fn session_owns_only_registered_child_signals() {
         terminal: None,
     });
     let root_signal = resume_signal(
-        moa_core::types::worker::state::ChildSignalKind::Blocked,
-        moa_core::types::worker::state::ParentResumePolicy::IfIdle,
+        moa_core::types::worker::signals::ChildSignalKind::Blocked,
+        moa_core::types::worker::signals::ParentResumePolicy::IfIdle,
     );
     let mut missing_signal = root_signal.clone();
     missing_signal.worker_id = "missing".to_string();
@@ -189,9 +338,9 @@ fn session_owns_only_registered_child_signals() {
 
 fn unread_entry(
     signal_id: moa_core::types::identifiers::AgentSignalId,
-    kind: moa_core::types::worker::state::ChildSignalKind,
-) -> moa_core::types::worker::state::UnreadChildSignal {
-    moa_core::types::worker::state::UnreadChildSignal {
+    kind: moa_core::types::worker::signals::ChildSignalKind,
+) -> moa_core::types::worker::signals::UnreadChildSignal {
+    moa_core::types::worker::signals::UnreadChildSignal {
         signal_id,
         worker_id: "child".to_string(),
         kind,
@@ -201,15 +350,15 @@ fn unread_entry(
 }
 
 fn resume_signal(
-    kind: moa_core::types::worker::state::ChildSignalKind,
-    resume_policy: moa_core::types::worker::state::ParentResumePolicy,
-) -> moa_core::types::worker::state::WorkerSignal {
-    moa_core::types::worker::state::WorkerSignal {
+    kind: moa_core::types::worker::signals::ChildSignalKind,
+    resume_policy: moa_core::types::worker::signals::ParentResumePolicy,
+) -> moa_core::types::worker::signals::WorkerSignal {
+    moa_core::types::worker::signals::WorkerSignal {
         signal_id: moa_core::types::identifiers::AgentSignalId::new(),
         worker_id: "child".to_string(),
         parent_session: moa_core::types::identifiers::SessionId::new(),
         kind,
-        severity: moa_core::types::worker::state::SignalSeverity::Warning,
+        severity: moa_core::types::worker::signals::SignalSeverity::Warning,
         summary: "needs attention".to_string(),
         payload: serde_json::Value::Null,
         created_at: Utc::now(),
@@ -225,7 +374,7 @@ fn unread_child_signal_push_is_idempotent_by_signal_id() {
     let signal_id = moa_core::types::identifiers::AgentSignalId::new();
     let entry = unread_entry(
         signal_id,
-        moa_core::types::worker::state::ChildSignalKind::Finding,
+        moa_core::types::worker::signals::ChildSignalKind::Finding,
     );
 
     assert!(state.push_unread_child_signal(entry.clone()));
@@ -237,7 +386,7 @@ fn unread_child_signal_push_is_idempotent_by_signal_id() {
 fn unread_child_signal_cap_evicts_findings_before_action_required() {
     // Pins: when the unread window overflows, NeedsInput/Blocked are preserved while
     // informational Findings are evicted first.
-    use moa_core::types::worker::state::ChildSignalKind;
+    use moa_core::types::worker::signals::ChildSignalKind;
     let mut state = SessionVoState::default();
 
     let blocked_id = moa_core::types::identifiers::AgentSignalId::new();
@@ -282,7 +431,7 @@ fn resume_gate_arms_only_when_idle_eligible_and_under_budget() {
     // coordinator on a resume-eligible IfIdle signal under budget, and never
     // dispatches a turn (it only mutates VO state).
     use moa_core::{
-        types::worker::state::ChildSignalKind, types::worker::state::ParentResumePolicy,
+        types::worker::signals::ChildSignalKind, types::worker::signals::ParentResumePolicy,
     };
     let now = Utc::now();
 
@@ -296,6 +445,20 @@ fn resume_gate_arms_only_when_idle_eligible_and_under_budget() {
         TEST_RESUME_WINDOW_MS
     ));
     assert_eq!(idle.pending_parent_resume_signal, Some(signal.signal_id));
+
+    let mut settled = SessionVoState::default();
+    let settled_signal = resume_signal(ChildSignalKind::FanInSettled, ParentResumePolicy::IfIdle);
+    assert!(settled.maybe_arm_parent_resume(
+        &settled_signal,
+        None,
+        now,
+        TEST_RESUME_MAX,
+        TEST_RESUME_WINDOW_MS
+    ));
+    assert_eq!(
+        settled.pending_parent_resume_signal,
+        Some(settled_signal.signal_id)
+    );
 
     let mut busy = SessionVoState::default();
     assert!(!busy.maybe_arm_parent_resume(
@@ -347,7 +510,7 @@ fn resume_gate_does_not_rearm_once_a_resume_turn_is_active() {
     // Pins: after a resume is dispatched (turn active), a repeated delivery of the
     // same signal does not arm a second resume — the active-turn gate blocks it.
     use moa_core::{
-        types::worker::state::ChildSignalKind, types::worker::state::ParentResumePolicy,
+        types::worker::signals::ChildSignalKind, types::worker::signals::ParentResumePolicy,
     };
     let now = Utc::now();
     let signal = resume_signal(ChildSignalKind::Blocked, ParentResumePolicy::IfIdle);
@@ -394,69 +557,10 @@ fn resume_budget_window_resets_after_elapsed_window() {
 }
 
 #[test]
-fn child_liveness_is_single_outstanding_with_monotonic_generations() {
-    // Pins: arming a child's liveness check is single-outstanding (a second arm while
-    // one is outstanding is a no-op), generations are monotonic so a re-armed child
-    // never reuses a prior generation, and a fired check only matches the live
-    // generation of an outstanding entry.
-    let mut state = SessionVoState::default();
-
-    let first = state
-        .arm_child_liveness("child-1")
-        .expect("first arm schedules a check");
-    // Single-outstanding: a second arm while one is outstanding does not reschedule.
-    assert_eq!(state.arm_child_liveness("child-1"), None);
-    // The live generation matches; a superseded/older generation does not.
-    assert!(state.liveness_generation_matches("child-1", first));
-    assert!(!state.liveness_generation_matches("child-1", first.wrapping_sub(1)));
-    assert!(!state.liveness_generation_matches("missing", first));
-
-    // A distinct active child gets its own, strictly newer generation.
-    let other = state
-        .arm_child_liveness("child-2")
-        .expect("second child arms independently");
-    assert_ne!(first, other);
-
-    // Clearing (terminal/stale/removed) stops scheduling; a stray tick no longer matches.
-    state.clear_child_liveness("child-1");
-    assert!(!state.liveness_generation_matches("child-1", first));
-
-    // Re-arming after a clear draws a fresh, strictly newer generation, so any stray
-    // in-flight tick carrying `first` can never match the re-armed child.
-    let rearmed = state
-        .arm_child_liveness("child-1")
-        .expect("re-arm after clear schedules a new check");
-    assert_ne!(first, rearmed);
-    assert!(rearmed > other);
-    assert!(!state.liveness_generation_matches("child-1", first));
-    assert!(state.liveness_generation_matches("child-1", rearmed));
-}
-
-#[test]
-fn remove_child_clears_outstanding_liveness_check() {
-    // Pins: removing a child (e.g. on self-clean) drops its outstanding liveness
-    // watchdog so a later fired check recognizes it as superseded.
-    let mut state = SessionVoState::default();
-    state.register_child(moa_core::types::worker::state::WorkerChildRef {
-        id: "child-1".to_string(),
-        task_hash: "hash-1".to_string(),
-        budget_tokens: 128,
-        terminal: None,
-    });
-    let generation = state
-        .arm_child_liveness("child-1")
-        .expect("active child arms a liveness check");
-    assert!(state.liveness_generation_matches("child-1", generation));
-
-    assert!(state.remove_child("child-1"));
-    assert!(!state.liveness_generation_matches("child-1", generation));
-}
-
-#[test]
 fn clear_resume_on_outcome_drains_only_dispatch_snapshot() {
     // Pins: completing the resume turn drains exactly the dispatch-time unread
     // snapshot and clears the pending signal, leaving mid-turn arrivals queued.
-    use moa_core::types::worker::state::ChildSignalKind;
+    use moa_core::types::worker::signals::ChildSignalKind;
     let now = Utc::now();
     let mut state = SessionVoState::default();
     let snap_a = moa_core::types::identifiers::AgentSignalId::new();
@@ -494,11 +598,16 @@ fn child_terminal_output_offload_round_trip() {
     // once for hydration; a small output stays inline with no reference.
     let mut state = SessionVoState::default();
     state.register_child(pending_child("worker-1"));
+    let mut fan_in = WorkerFanInState::default();
+    fan_in.register_child(&state.children);
     let big = "y".repeat(CHILD_OUTPUT_CLAIM_CHECK_THRESHOLD_BYTES + 10);
-    assert!(state.mark_child_terminal(MarkWorkerChildTerminalInput {
-        worker_id: "worker-1".to_string(),
-        terminal: worker_terminal("worker-1", &big),
-    }));
+    assert!(matches!(
+        fan_in.record_terminal(
+            &mut state,
+            &terminal_input("worker-1", 1, worker_terminal("worker-1", &big)),
+        ),
+        WorkerTerminalRecord::Accepted { .. }
+    ));
     // Over-threshold output is surfaced verbatim for the handler to store to a blob.
     assert_eq!(
         state.large_child_terminal_output("worker-1"),
@@ -520,10 +629,12 @@ fn child_terminal_output_offload_round_trip() {
     // A small output is never offloaded.
     let mut small = SessionVoState::default();
     small.register_child(pending_child("worker-2"));
-    small.mark_child_terminal(MarkWorkerChildTerminalInput {
-        worker_id: "worker-2".to_string(),
-        terminal: worker_terminal("worker-2", "short output"),
-    });
+    let mut small_fan_in = WorkerFanInState::default();
+    small_fan_in.register_child(&small.children);
+    let _ = small_fan_in.record_terminal(
+        &mut small,
+        &terminal_input("worker-2", 1, worker_terminal("worker-2", "short output")),
+    );
     assert_eq!(small.large_child_terminal_output("worker-2"), None);
     assert_eq!(small.take_child_terminal_blob("worker-2"), None);
 }
@@ -534,11 +645,13 @@ fn remove_child_drops_claim_check_reference() {
     // reference so evicted children never leak references in VO state.
     let mut state = SessionVoState::default();
     state.register_child(pending_child("worker-1"));
+    let mut fan_in = WorkerFanInState::default();
+    fan_in.register_child(&state.children);
     let big = "q".repeat(CHILD_OUTPUT_CLAIM_CHECK_THRESHOLD_BYTES + 1);
-    state.mark_child_terminal(MarkWorkerChildTerminalInput {
-        worker_id: "worker-1".to_string(),
-        terminal: worker_terminal("worker-1", &big),
-    });
+    let _ = fan_in.record_terminal(
+        &mut state,
+        &terminal_input("worker-1", 1, worker_terminal("worker-1", &big)),
+    );
     state.compact_child_terminal_output(
         "worker-1",
         ClaimCheck {

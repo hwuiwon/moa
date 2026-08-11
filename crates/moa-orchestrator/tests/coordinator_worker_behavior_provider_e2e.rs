@@ -2136,6 +2136,78 @@ const RECOVERY_MATRIX_REPLACEMENT_ROOT: &str =
     "RECOVERY-MATRIX-REPLACEMENT-ROOT: prove the admission fence was released.";
 const RECOVERY_MATRIX_REPLACEMENT_RESULT: &str = "RECOVERY-MATRIX-REPLACEMENT-COMPLETED";
 const RECOVERY_MATRIX_CANCELLED_INPUT_TOKENS: usize = 777_777;
+const DUPLICATE_SPAWN_ROOT: &str =
+    "DUPLICATE-SPAWN-ROOT: exercise recoverable duplicate worker rejection.";
+const DUPLICATE_SPAWN_TASK: &str =
+    "DUPLICATE-SPAWN-WORKER: remain active while the parent repeats this task.";
+const DUPLICATE_SPAWN_RECOVERED: &str = "DUPLICATE-SPAWN-RECOVERED";
+
+fn duplicate_spawn_recovery_script() -> Value {
+    json!({
+        "default": {
+            "completion": {
+                "content": "unexpected duplicate-spawn fallback",
+                "tool_calls": []
+            }
+        },
+        "keyed": [
+            {
+                "match": RECOVERY_MATRIX_CLASSIFIER_PROMPT,
+                "completion": {
+                    "content": r#"{"label":"execute","strategy":"inline","rationale":"The request is a bounded delegation probe.","confidence_bps":10000,"missing_inputs":[]}"#,
+                    "tool_calls": []
+                }
+            },
+            {
+                "match": "duplicate worker task detected",
+                "completion": {
+                    "content": DUPLICATE_SPAWN_RECOVERED,
+                    "tool_calls": []
+                }
+            },
+            {
+                "match": "Spawned worker",
+                "completion": {
+                    "content": "Repeating the same child request to exercise loop prevention.",
+                    "tool_calls": [{
+                        "name": "spawn_worker",
+                        "id": "duplicate-spawn-second",
+                        "input": {
+                            "task": DUPLICATE_SPAWN_TASK,
+                            "tool_subset": [],
+                            "budget_tokens": 1200,
+                            "max_turns": 1
+                        }
+                    }]
+                }
+            },
+            {
+                "match": DUPLICATE_SPAWN_ROOT,
+                "completion": {
+                    "content": "Spawning the first child.",
+                    "tool_calls": [{
+                        "name": "spawn_worker",
+                        "id": "duplicate-spawn-first",
+                        "input": {
+                            "task": DUPLICATE_SPAWN_TASK,
+                            "tool_subset": [],
+                            "budget_tokens": 1200,
+                            "max_turns": 1
+                        }
+                    }]
+                }
+            },
+            {
+                "match": DUPLICATE_SPAWN_TASK,
+                "completion": {
+                    "content": "worker should remain active during parent validation",
+                    "tool_calls": [],
+                    "latency_ms": 120000
+                }
+            }
+        ]
+    })
+}
 
 fn recovery_matrix_blocked_root_script() -> Value {
     json!({
@@ -2187,6 +2259,95 @@ fn recovery_matrix_turn_request(message: &str) -> StartTurnRequest {
         resource_budget: Default::default(),
         execution_template: None,
     }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker for the Postgres/Restate/OpenFGA/Redis scripted-provider fixture"]
+async fn duplicate_worker_rejection_persists_tool_result_and_turn_continues_service_e2e()
+-> Result<()> {
+    // Pins: a repeated active-child request is a recoverable model-authored tool error. The
+    // provider history must contain the failed ToolResult paired with the duplicate ToolCall,
+    // and the coordinator must be able to produce a final response without a TurnFailed event.
+    let fixture = OrchestratorTestFixture::with_script(duplicate_spawn_recovery_script())
+        .await
+        .context("boot duplicate-spawn scripted orchestrator fixture")?;
+    fixture.reset_scripted_requests()?;
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("duplicate-spawn-recovery").await?;
+    let session = test.client().session(session_id.to_string());
+    let mut request = recovery_matrix_turn_request(DUPLICATE_SPAWN_ROOT);
+    request.max_turns = Some(4);
+
+    let started = session.start_turn(request, None).await?;
+    let turn_id = started.turn_id.context("duplicate-spawn turn omitted id")?;
+    let outcome = session
+        .await_turn_outcome(&turn_id, Duration::from_secs(60), Duration::from_millis(25))
+        .await?;
+    assert_eq!(outcome.kind, TurnOutcomeKind::Completed);
+    assert_eq!(outcome.message, DUPLICATE_SPAWN_RECOVERED);
+
+    let events = test
+        .client()
+        .get_events(session_id, EventRange::all())
+        .await?;
+    let spawn_tool_ids = events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::ToolCall {
+                tool_id, tool_name, ..
+            } if tool_name == "spawn_worker" => Some(*tool_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(spawn_tool_ids.len(), 2, "{}", describe_events(&events));
+
+    let spawn_results = events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::ToolResult {
+                tool_id,
+                success,
+                output,
+                ..
+            } if spawn_tool_ids.contains(tool_id) => {
+                Some((*tool_id, *success, tool_output_text(output)))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(spawn_results.len(), 2, "{}", describe_events(&events));
+    assert_eq!(
+        spawn_results
+            .iter()
+            .filter(|(_, success, _)| *success)
+            .count(),
+        1
+    );
+    assert_eq!(
+        spawn_results
+            .iter()
+            .filter(|(_, success, _)| !*success)
+            .filter(|(_, _, text)| text.contains("duplicate worker task"))
+            .count(),
+        1,
+        "{}",
+        describe_events(&events)
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(record.event, Event::WorkerSpawned { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        events
+            .iter()
+            .all(|record| !matches!(record.event, Event::TurnFailed { .. })),
+        "{}",
+        describe_events(&events)
+    );
+    Ok(())
 }
 
 fn recovery_matrix_request_contains(request: &CompletionRequest, marker: &str) -> bool {
@@ -2772,6 +2933,12 @@ async fn recovery_matrix_worker_llm_cancel_crash_restart_fences_late_delivery_se
             TurnOutcomeKind::Completed | TurnOutcomeKind::Cancelled
         ),
         "task-tree cancellation must settle the owning coordinator before admitting replacement work: {root_outcome:?}"
+    );
+
+    let settled_snapshot = session.snapshot().await?;
+    ensure!(
+        settled_snapshot.active_turn_id.is_none(),
+        "worker cancellation left an active turn after the root outcome: {settled_snapshot:?}"
     );
 
     let replacement = session

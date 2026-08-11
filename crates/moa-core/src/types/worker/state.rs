@@ -1,4 +1,4 @@
-//! Durable worker lifecycle, messages, signals, and parent-child state.
+//! Durable worker lifecycle, messages, and parent-child state.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::traits::Identity;
 
 use super::super::{
-    identifiers::{AgentSignalId, ModelId, SessionId, TenantId, UserId},
+    identifiers::{ModelId, SessionId, TenantId, UserId},
     tools::TrustedSandboxFileManifestRef,
 };
 
@@ -208,48 +208,6 @@ pub enum WorkerState {
     Cancelled,
 }
 
-/// Attention-requiring child-to-parent signal kind.
-///
-/// Excludes high-frequency telemetry (progress/heartbeat) and plain terminal
-/// success (handled by the existing notification path); these are the only kinds
-/// routed to the owning coordinator on the control plane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ChildSignalKind {
-    /// The child surfaced a noteworthy intermediate finding.
-    Finding,
-    /// The child is blocked and cannot make progress without intervention.
-    Blocked,
-    /// The child needs input before it can continue.
-    NeedsInput,
-    /// The child failed terminally and is reporting the failure.
-    Failed,
-    /// The child's heartbeat went stale (raised by the watchdog).
-    HeartbeatStale,
-}
-
-/// Whether a signal may wake an idle coordinator. Conservative by design.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ParentResumePolicy {
-    /// Never wake the coordinator; the signal waits for the next user turn.
-    Never,
-    /// Wake the coordinator only when it is currently idle.
-    IfIdle,
-}
-
-/// Relative urgency of one control-plane signal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SignalSeverity {
-    /// Informational; no action implied.
-    Info,
-    /// Warrants attention but is not terminal.
-    Warning,
-    /// Critical condition requiring prompt coordinator attention.
-    Critical,
-}
-
 /// For `NeedsInput`: whether the child's question needs the human or the
 /// coordinator can answer it autonomously.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,62 +217,6 @@ pub enum InputAudience {
     Coordinator,
     /// The question must be surfaced to the human user.
     User,
-}
-
-/// Narrow child-to-parent attention signal routed to the owning coordinator.
-///
-/// Idempotent at the event log via a dedupe key derived from `signal_id`. This is
-/// the control plane: low-frequency, model-driven attention events (not per-tick
-/// telemetry).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WorkerSignal {
-    /// Stable identifier for this attention signal.
-    pub signal_id: AgentSignalId,
-    /// Child worker that raised the signal.
-    pub worker_id: WorkerId,
-    /// Owning root session coordinator that should receive the signal.
-    pub parent_session: SessionId,
-    /// Kind of attention being requested.
-    pub kind: ChildSignalKind,
-    /// Relative urgency of the signal.
-    pub severity: SignalSeverity,
-    /// Short, safe human-readable summary of the signal.
-    pub summary: String,
-    /// Structured payload carrying signal-specific detail.
-    #[serde(default)]
-    pub payload: serde_json::Value,
-    /// When the signal was created (Restate-journaled at the child).
-    pub created_at: DateTime<Utc>,
-    /// Whether this signal may wake an idle coordinator.
-    pub resume_policy: ParentResumePolicy,
-    /// Exact in-flight input request; `Some` only for `NeedsInput`.
-    ///
-    /// One field rather than parallel optionals: the coordinates and the audience
-    /// are meaningless apart, and the coordinator session advertises the reply
-    /// target from exactly these coordinates.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_request: Option<WorkerInputRequest>,
-}
-
-/// Compact, persisted projection of one unread child→parent control-plane signal.
-///
-/// Stored on the owning coordinator `Session` VO so a later resume/drain turn (Task 6)
-/// can surface the signal's content without re-reading the event log. Carries CONTENT
-/// (kind/summary/input request) rather than only ids, and is capped to a small recent
-/// window on the VO so it never bloats parent state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UnreadChildSignal {
-    /// Stable identifier of the recorded signal.
-    pub signal_id: AgentSignalId,
-    /// Child worker that raised the signal.
-    pub worker_id: WorkerId,
-    /// Kind of attention requested.
-    pub kind: ChildSignalKind,
-    /// Short, safe human-readable summary carried for the resume/drain turn.
-    pub summary: String,
-    /// Exact in-flight input request; `Some` only for `NeedsInput`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_request: Option<WorkerInputRequest>,
 }
 
 /// Compact fan-in summary read on demand by `Session/progress` and
@@ -347,25 +249,6 @@ pub struct WorkerProgressSummary {
     /// input requests, so the liveness watchdog can treat such a child as NOT stale.
     #[serde(default)]
     pub awaiting_input: bool,
-}
-
-/// Source of one progress-narration segment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NarrationSource {
-    /// The owning coordinator (the merged, user-facing voice).
-    Coordinator,
-    /// One specific worker.
-    Worker(WorkerId),
-}
-
-/// One attributed line within a merged progress narration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NarrationSegment {
-    /// Which active source this line describes.
-    pub source: NarrationSource,
-    /// Short, user-facing narration text for the source.
-    pub text: String,
 }
 
 /// Persisted child reference used by parents for depth and loop control.

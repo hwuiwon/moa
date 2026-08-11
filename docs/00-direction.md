@@ -53,7 +53,7 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 MOA's differentiators are architectural, not cosmetic:
 
 - **Restate-native agents:** sessions and workers map to virtual objects with single-writer semantics and durable waits.
-- **Reliable bulk execution:** `ExecutionRun` and `ExecutionTask` durably execute validated plans with atomic budgets, exact coverage, no application fan-out cap below the approved task budget, and compact terminal delivery to the owning session.
+- **Reliable bulk execution:** `ExecutionRun` and `ExecutionTask` durably execute validated plans with atomic budgets, exact logical coverage, a positive bounded window for live task invocations, storage-only pending rows, and compact terminal delivery to the owning session.
 - **Experience-level analytics:** learning is derived from assessed task segments, not whole-session guesses.
 - **Resolution-weighted improvement:** skills and future retrieval decisions can use measured success rates.
 - **Candidate-gated adaptation:** reusable skills, memory proposals, policy proposals, and eval proposals start as learning candidates before promotion.

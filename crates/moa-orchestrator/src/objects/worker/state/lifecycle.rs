@@ -313,7 +313,7 @@ impl WorkerVoState {
             last_heartbeat_at: self.last_heartbeat_at,
             stale,
             // A child parked on an in-flight `request_input` round-trip emits no
-            // heartbeats but is legitimately waiting, so the watchdog must not flag it.
+            // heartbeats but is legitimately waiting, so its deadline must not flag it.
             awaiting_input: !self.pending_input_requests.is_empty(),
         }
     }

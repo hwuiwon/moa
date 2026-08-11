@@ -483,11 +483,6 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
             "#{} worker_stale {worker_id} threshold_ms={threshold_ms}",
             record.sequence_num
         )),
-        Event::ProgressNarrated { text, .. } => Some(format!(
-            "#{} progress_narration: {}",
-            record.sequence_num,
-            crate::text::truncate_chars(text, 240)
-        )),
         Event::MemoryRead { path, scope } => Some(format!(
             "#{} memory read {scope}:{path}",
             record.sequence_num

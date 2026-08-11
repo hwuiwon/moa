@@ -318,7 +318,6 @@ fn resource_bill_from_rows(
         .collect::<Vec<_>>();
     let durable_event_rows = event_rows_by_type.iter().map(|item| item.rows).sum();
     let progress_update_rows = rows_for_event_type(&event_rows_by_type, "ProgressUpdate");
-    let progress_narrated_rows = rows_for_event_type(&event_rows_by_type, "ProgressNarrated");
     ResourceBillReport {
         durable_event_rows,
         durable_event_rows_per_successful_operation: merged_per_successful_operation(
@@ -328,11 +327,6 @@ fn resource_bill_from_rows(
         progress_update_rows,
         progress_update_rows_per_successful_operation: merged_per_successful_operation(
             progress_update_rows,
-            successful_operations,
-        ),
-        progress_narrated_rows,
-        progress_narrated_rows_per_successful_operation: merged_per_successful_operation(
-            progress_narrated_rows,
             successful_operations,
         ),
         event_rows_by_type,
@@ -442,7 +436,7 @@ pub fn render_merged_summary(summary: &MergedSummary) -> String {
     if summary.resource_bill.durable_event_rows > 0 {
         let _ = writeln!(
             &mut output,
-            "Resource Bill:\n  durable event rows: {} ({:.2}/successful operation) | ProgressUpdate: {} ({:.2}/successful operation) | ProgressNarrated: {} ({:.2}/successful operation)",
+            "Resource Bill:\n  durable event rows: {} ({:.2}/successful operation) | ProgressUpdate: {} ({:.2}/successful operation)",
             summary.resource_bill.durable_event_rows,
             summary
                 .resource_bill
@@ -450,11 +444,7 @@ pub fn render_merged_summary(summary: &MergedSummary) -> String {
             summary.resource_bill.progress_update_rows,
             summary
                 .resource_bill
-                .progress_update_rows_per_successful_operation,
-            summary.resource_bill.progress_narrated_rows,
-            summary
-                .resource_bill
-                .progress_narrated_rows_per_successful_operation
+                .progress_update_rows_per_successful_operation
         );
     }
     let _ = writeln!(
@@ -777,8 +767,6 @@ mod tests {
                 durable_event_rows_per_successful_operation: 1.0,
                 progress_update_rows: 0,
                 progress_update_rows_per_successful_operation: 0.0,
-                progress_narrated_rows: 0,
-                progress_narrated_rows_per_successful_operation: 0.0,
                 event_rows_by_type: vec![EventAppendTypeReport {
                     event_type: "BrainResponse".to_string(),
                     rows: recorder.corrected_len(),

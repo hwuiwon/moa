@@ -207,13 +207,10 @@ pub(in crate::objects::session::handlers) async fn start_turn_inner(
     arm_turn_admission_heartbeat(ctx, &mut pending_state, turn_admission);
     state.set_status(SessionStatus::Running, now);
     // Capture the session's owning-actor identity from the first verified turn
-    // participant so the self-originated narration read can be authorized later.
+    // participant for later authenticated resume and review flows.
     if state.owning_identity.is_none() {
         state.owning_identity = Some(identity.clone());
     }
-    // Active edge: a coordinator turn is starting, so ensure a narration tick is
-    // outstanding (single-outstanding guard prevents overlapping schedules).
-    narration::ensure_narration_tick_scheduled(ctx, &mut state, session_limits).await?;
     let drained = state.drain_unread_child_signals();
     let response = StartTurnResponse {
         turn_id: Some(turn_id.clone()),

@@ -214,6 +214,7 @@ pub mod capability_catalog;
 pub(crate) mod capability_catalog;
 pub(crate) mod handlers;
 mod planning_context;
+mod start;
 mod support;
 
 #[cfg(test)]

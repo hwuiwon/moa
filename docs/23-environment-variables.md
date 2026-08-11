@@ -84,6 +84,7 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | `MOA_EXECUTION_AGENT_TURN_TOKENS` | `execution.agent_turn_tokens` | 8000 | Worst-case token estimate for one agent turn |
 | `MOA_EXECUTION_AGENT_TURN_TOOL_CALLS` | `execution.agent_turn_tool_calls` | 8 | Worst-case governed tool-call estimate for one agent turn |
 | `MOA_EXECUTION_MAX_COST_MICROUSD` | `execution.max_cost_microusd` | 100000000 | Default run cost limit in integer micro-USD |
+| `MOA_EXECUTION_MAX_IN_FLIGHT_TASKS` | `execution.max_in_flight_tasks` | 64 | Positive physical window for live `ExecutionTask` invocations owned by one run; distinct from logical task and provider-concurrency limits |
 | `MOA_EXECUTION_MAX_RETRIEVED_BYTES` | `execution.max_retrieved_bytes` | 10000000000 | Default run retrieved-byte limit |
 | `MOA_EXECUTION_MAX_TASKS` | `execution.max_tasks` | 10000 | Default logical-task limit; this is not an active-worker cap |
 | `MOA_EXECUTION_MAX_TOKENS` | `execution.max_tokens` | 10000000 | Default run token limit |
@@ -335,16 +336,11 @@ capabilities, database bootstrap, and a fresh supervised reaper heartbeat.
 | `MOA_SESSION_LIMITS_MAX_TURNS` | `session_limits.max_turns` | 50 | Maximum completed turns per session before pausing |
 | `MOA_SESSION_LIMITS_PROGRESS_FIRST_DELAY_MS` | `session_limits.progress_first_delay_ms` | 8000 | Delay before the first durable progress update is eligible, in milliseconds |
 | `MOA_SESSION_LIMITS_PROGRESS_INTERVAL_MS` | `session_limits.progress_interval_ms` | 8000 | Minimum interval between durable progress updates, in milliseconds |
-| `MOA_SESSION_LIMITS_PROGRESS_NARRATION_ENABLED` | `session_limits.progress_narration_enabled` | true | Whether default-on natural-language progress narration is enabled |
-| `MOA_SESSION_LIMITS_PROGRESS_NARRATION_INTERVAL_MS` | `session_limits.progress_narration_interval_ms` | 20000 | Minimum interval between progress narrations, in milliseconds |
-| `MOA_SESSION_LIMITS_PROGRESS_NARRATION_MAX_PER_WINDOW` | `session_limits.progress_narration_max_per_window` | 30 | Maximum number of narrations per rolling window before the narrator backs off |
-| `MOA_SESSION_LIMITS_PROGRESS_NARRATION_MAX_TOKENS` | `session_limits.progress_narration_max_tokens` | 120 | Maximum output tokens for one progress-narration completion |
-| `MOA_SESSION_LIMITS_PROGRESS_NARRATION_MODEL` | `session_limits.progress_narration_model` | _none_ | Optional model id override for progress narration |
 | `MOA_SESSION_LIMITS_SIMPLE_MAX_TURNS` | `session_limits.simple_max_turns` | 1 | Maximum model loop iterations for requests classified as simple |
 | `MOA_SESSION_LIMITS_STANDARD_MAX_TURNS` | `session_limits.standard_max_turns` | 6 | Maximum model loop iterations for requests classified as standard |
 | `MOA_SESSION_LIMITS_WORKER_CLEANUP_GRACE_MS` | `session_limits.worker_cleanup_grace_ms` | 60000 | Grace window before a terminal worker self-cleans (removes itself from the parent fan-out and clears its VO state) after reporting its result |
 | `MOA_SESSION_LIMITS_WORKER_HEARTBEAT_INTERVAL_MS` | `session_limits.worker_heartbeat_interval_ms` | 15000 | Target cadence, in milliseconds, at which an active child refreshes its telemetry-plane heartbeat while running |
-| `MOA_SESSION_LIMITS_WORKER_HEARTBEAT_STALE_MS` | `session_limits.worker_heartbeat_stale_ms` | 60000 | Age, in milliseconds, beyond which an active child's last heartbeat is treated as stale by the per-child liveness watchdog |
+| `MOA_SESSION_LIMITS_WORKER_HEARTBEAT_STALE_MS` | `session_limits.worker_heartbeat_stale_ms` | 60000 | Age, in milliseconds, beyond which the Worker's one outstanding liveness deadline emits a stale transition |
 | `MOA_SESSION_LIMITS_WORKER_INPUT_TIMEOUT_MS` | `session_limits.worker_input_timeout_ms` | 1800000 | Maximum time a child `request_input` round-trip blocks on its awakeable before returning a "no input received" result so the child can proceed or abort |
 | `MOA_SESSION_LIMITS_WORKER_RESUME_MAX_PER_WINDOW` | `session_limits.worker_resume_max_per_window` | 6 | Maximum guarded coordinator auto-resumes dispatched per rolling window before the resume path backs off |
 | `MOA_SESSION_LIMITS_WORKER_RESUME_WINDOW_MS` | `session_limits.worker_resume_window_ms` | 600000 | Rolling-window length, in milliseconds, for the guarded parent-resume budget |

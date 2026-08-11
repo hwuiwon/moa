@@ -263,7 +263,7 @@ and deployment setup. Key groups:
 | `MOA_QUERY_REWRITE_*` | fail-open, retrieval-scoped query rewrite gating and timeout behavior |
 | `MOA_RESOLUTION_*` | automated segment assessment weights and thresholds |
 | `MOA_SKILL_BUDGET_*` | skill manifest budget controls |
-| `MOA_EXECUTION_*` | planner repair, task/token/tool/retrieval/cost defaults, unattended confirmation threshold, and deadlines |
+| `MOA_EXECUTION_*` | planner repair, task/token/tool/retrieval/cost defaults, unattended confirmation threshold, deadlines, and the positive per-run live-task window |
 | `MOA_CLOUD_*` | remote hand provider settings |
 | `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Normal-runtime Restate ingress and optional health URL; bootstrap Admin access is an explicit command argument |
 | `MOA_AUTH_*`, `MOA_AUTHZ_*`, `MOA_ASYNC_AUTHZ_*`, `MOA_AUDIT_SECURITY_*` | identity, authorization, builtin async authorization challenges, and OCSF security-event audit |
@@ -409,14 +409,23 @@ replicas because all of its correctness state lives in Restate VO/workflow state
 and Postgres, never in process memory or Redis:
 
 - **Restate + Postgres are required for coordination correctness.** Child attention signals,
-  guarded parent resume, terminal results, heartbeat-stale detection, narration
-  scheduling, and self-cleanup are all driven by `Session`/`Worker` VO state,
-  Restate awakeables/delayed self-calls, and idempotent Postgres event appends
-  (the `session_event_dedupe` guard). Any orchestrator replica can pick up the
-  next message or fired tick. This durability does not extend to arbitrary files
-  inside sandbox compute.
+  guarded parent resume, terminal results, one Worker-owned liveness deadline,
+  and self-cleanup are driven by `Session`/`Worker` VO state, Restate
+  awakeables/delayed self-calls, joined handler acknowledgements, and idempotent
+  Postgres event appends (the `session_event_dedupe` guard). Any orchestrator
+  replica can pick up the next message or exact fired deadline. This durability
+  does not extend to arbitrary files inside sandbox compute.
 - **Redis is runtime cache only**, never a correctness owner for signals, resume,
   or terminal results.
+- **Session owns conversational fan-in.** Worker resolves explicit result
+  awakeables first, then awaits the one Session terminal handler. The handler
+  validates the child generation, caches and claim-checks the result, appends
+  terminal events, and emits exactly one immediate failure signal or at most one
+  `FanInSettled` signal when the last registered child in the generation settles
+  successfully or is cancelled. Success and cancellation do not wake once per
+  child. Worker owns its single liveness deadline and sends one joined stale
+  signal only when that exact deadline is reached; Session never polls Worker
+  state for liveness.
 - **Coordinator/owner/workspace topology.** The root coordinator
   (`Session`/`TurnExecution`) is sandbox-free. Only a worker or sandbox-using
   execution task owns a durable, tenant-scoped `SandboxWorkspace`; there is no
@@ -435,7 +444,12 @@ and Postgres, never in process memory or Redis:
 Durable execution runs use a separate topology. `ExecutionRun` and
 `ExecutionTask` workflows recover from Postgres execution rows plus Restate
 journals; the `Session` VO stores only compact linkage and terminal-synthesis
-dedupe state. Ready map items have stable logical task identities and no
-application fan-out cap. Atomic run-budget reservations bound admission, while
-provider pacing and governed capability or hand capacity supply physical
-backpressure.
+dedupe state. Ready map items have stable logical task identities and are fully
+materialized, but pending rows are storage-only. Each run owns at most
+`execution.max_in_flight_tasks` attached `ExecutionTask` calls (64 by default),
+a positive physical window separate from logical `max_tasks` and provider
+concurrency. The run fills open slots in stable order, acknowledges its
+processed wake epoch, and suspends on the epoch promise plus owned task handles;
+only a persisted transition or attached task completion advances it. Public
+execution mutations return accepted responses only after the committed task/run
+wake is acknowledged.

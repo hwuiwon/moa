@@ -174,22 +174,14 @@ fn execution_admission_report_rendering() {
             latency_ms: summary(7.0),
         }],
         resource_bill: ResourceBillReport {
-            durable_event_rows: 6,
-            durable_event_rows_per_successful_operation: 0.6,
+            durable_event_rows: 4,
+            durable_event_rows_per_successful_operation: 0.4,
             progress_update_rows: 0,
             progress_update_rows_per_successful_operation: 0.0,
-            progress_narrated_rows: 2,
-            progress_narrated_rows_per_successful_operation: 0.2,
-            event_rows_by_type: vec![
-                EventAppendTypeReport {
-                    event_type: "BrainResponse".to_string(),
-                    rows: 4,
-                },
-                EventAppendTypeReport {
-                    event_type: "ProgressNarrated".to_string(),
-                    rows: 2,
-                },
-            ],
+            event_rows_by_type: vec![EventAppendTypeReport {
+                event_type: "BrainResponse".to_string(),
+                rows: 4,
+            }],
         },
         capacity_signals: CapacitySignals::default(),
         cache_hit_rate: summary(0.0),
@@ -220,7 +212,7 @@ fn execution_admission_report_rendering() {
     assert!(rendered.contains("1.0/s admissions, 20.5/s successful operations"));
     assert!(rendered.contains("9 answers, 1 admissions, 10 successful operations"));
     assert!(rendered.contains(
-        "durable event rows: 6 (0.60/successful operation) | ProgressUpdate: 0 (0.00/successful operation) | ProgressNarrated: 2 (0.20/successful operation)"
+        "durable event rows: 4 (0.40/successful operation) | ProgressUpdate: 0 (0.00/successful operation)"
     ));
     assert!(rendered.contains("Turn Latency (corrected, from intended arrival):"));
     assert!(rendered.contains("timeout 1"));

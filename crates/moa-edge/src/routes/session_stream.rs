@@ -23,11 +23,9 @@ use std::time::{Duration, Instant};
 /// `working` liveness frame while a descendant worker is still active.
 ///
 /// This is a transient UI hint (never a persisted event): it keeps the screen
-/// visibly alive between durable narrations, covering both a long *unchanged*
-/// coordinator/child step (where narration correctly skips the model call) and
-/// the narration-disabled case. `KeepAlive` still runs underneath for transport
-/// liveness; this frame is a named, renderable event distinct from keep-alive
-/// comments.
+/// visibly alive during a long unchanged coordinator or child step. `KeepAlive`
+/// still runs underneath for transport liveness; this frame is a named,
+/// renderable event distinct from keep-alive comments.
 const LIVENESS_FRAME_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Baseline progress-poll interval while durable events are flowing.
@@ -148,7 +146,7 @@ struct SessionMessageDone {
 /// Transient silence-filler liveness frame payload (never a persisted event).
 ///
 /// Built from the fan-in summary of an active descendant so the UI can render a
-/// templated "still working" line between durable narrations.
+/// templated "still working" line between durable coordination events.
 #[derive(Debug, Serialize)]
 struct SessionMessageWorking {
     session_id: SessionId,
@@ -482,9 +480,8 @@ fn transient_progress_payload(
 fn sse_event_name(event: &Event) -> &'static str {
     match event {
         Event::ProgressUpdate { .. } => "progress",
-        Event::ProgressNarrated { .. } => "progress_narration",
         Event::WorkerSignalReceived {
-            kind: moa_core::types::worker::state::ChildSignalKind::NeedsInput,
+            kind: moa_core::types::worker::signals::ChildSignalKind::NeedsInput,
             input_audience: Some(moa_core::types::worker::state::InputAudience::User),
             ..
         } => "worker_input_request",
@@ -661,24 +658,14 @@ mod tests {
     }
 
     #[test]
-    fn record_sse_event_maps_worker_and_narration_events_to_frame_names() {
+    fn record_sse_event_maps_worker_events_to_frame_names() {
         // Pins: child progress/signal/liveness events stream as distinct, named SSE frames.
-        assert_eq!(
-            sse_event_name(&Event::ProgressNarrated {
-                source: moa_core::types::worker::state::NarrationSource::Coordinator,
-                text: "Searching the pricing docs".to_string(),
-                segments: Vec::new(),
-                model: "none".to_string(),
-                tokens_used: 0,
-            }),
-            "progress_narration"
-        );
         assert_eq!(
             sse_event_name(&Event::WorkerSignalReceived {
                 signal_id: moa_core::types::identifiers::AgentSignalId::new(),
                 worker_id: "child-1".to_string(),
-                kind: moa_core::types::worker::state::ChildSignalKind::Blocked,
-                severity: moa_core::types::worker::state::SignalSeverity::Warning,
+                kind: moa_core::types::worker::signals::ChildSignalKind::Blocked,
+                severity: moa_core::types::worker::signals::SignalSeverity::Warning,
                 summary: "blocked on input".to_string(),
                 input_request_id: None,
                 input_audience: None,
@@ -689,8 +676,8 @@ mod tests {
             sse_event_name(&Event::WorkerSignalReceived {
                 signal_id: moa_core::types::identifiers::AgentSignalId::new(),
                 worker_id: "child-1".to_string(),
-                kind: moa_core::types::worker::state::ChildSignalKind::NeedsInput,
-                severity: moa_core::types::worker::state::SignalSeverity::Warning,
+                kind: moa_core::types::worker::signals::ChildSignalKind::NeedsInput,
+                severity: moa_core::types::worker::signals::SignalSeverity::Warning,
                 summary: "needs user input".to_string(),
                 input_request_id: Some("req-1".to_string()),
                 input_audience: Some(moa_core::types::worker::state::InputAudience::User),

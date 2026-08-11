@@ -16,17 +16,22 @@ use moa_core::{
     types::identifiers::SessionId, types::resource::ResourceBudget, types::segments::ActiveSegment,
     types::session::CancelScope, types::session::SessionMeta, types::session::SessionStatus,
     types::worker::commands::ClearWorkerInputTargetsInput,
-    types::worker::commands::ConsumeWorkerChildResultInput,
-    types::worker::commands::ConsumeWorkerChildResultOutput,
-    types::worker::commands::MarkWorkerChildTerminalInput,
-    types::worker::commands::UserReplyDeliveryAck, types::worker::state::ChildSignalKind,
-    types::worker::state::InputAudience, types::worker::state::ParentResumePolicy,
-    types::worker::state::SignalSeverity, types::worker::state::UnreadChildSignal,
-    types::worker::state::WorkerChildRef, types::worker::state::WorkerId,
-    types::worker::state::WorkerInputTarget, types::worker::state::WorkerProgressSummary,
-    types::worker::state::WorkerSignal, types::worker::state::WorkerTerminalResult,
+    types::worker::commands::UserReplyDeliveryAck, types::worker::signals::ChildSignalKind,
+    types::worker::signals::ParentResumePolicy, types::worker::signals::SignalSeverity,
+    types::worker::signals::UnreadChildSignal, types::worker::signals::WorkerSignal,
+    types::worker::state::InputAudience, types::worker::state::WorkerChildRef,
+    types::worker::state::WorkerId, types::worker::state::WorkerInputTarget,
+    types::worker::state::WorkerProgressSummary, types::worker::state::WorkerState,
+    types::worker::state::WorkerTerminalResult,
+    types::worker::terminal::ConsumeWorkerChildResultInput,
+    types::worker::terminal::ConsumeWorkerChildResultOutput,
+    types::worker::terminal::RecordWorkerChildTerminalInput,
 };
 use moa_observability::record_turn_event_persist_duration;
+use moa_observability::runtime_metrics::{
+    WorkerFanInSettledKind, WorkerTerminalDeliveryResult, record_worker_fan_in_settled,
+    record_worker_terminal_delivery,
+};
 use moa_session::PostgresSessionStore;
 use moa_wire::session_store::{AppendEventRequest, GetEventsRequest, UpdateStatusRequest};
 use moa_wire::turn::{
@@ -57,9 +62,7 @@ use moa_observability::restate_observability::{annotate_restate_handler_span, ev
 mod admission;
 mod execution_runs;
 mod handlers;
-mod liveness;
 mod message_admission;
-mod narration;
 mod persistence;
 mod state;
 
@@ -75,10 +78,50 @@ pub use state::{
     PendingUserReplyTarget,
 };
 pub use state::{
-    ChildLivenessState, CoordinatorPendingInput, ResumeBudget, ResumeTurnContext, SessionVoState,
+    // These are the Session VO's intentional public state contracts.
+    CoordinatorPendingInput,
+    ResumeBudget,
+    ResumeTurnContext,
+    SessionVoState,
 };
 
 const K_PENDING_STATE: &str = "pending_state";
+const K_WORKER_FAN_IN_STATE: &str = "worker_fan_in_state";
+const MAX_WORKER_TERMINAL_DELIVERY_FENCES: usize = 128;
+
+/// Durable delivery fence for one child's latest accepted terminal generation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct WorkerTerminalDeliveryFence {
+    /// Child worker whose delivery was accepted.
+    worker_id: WorkerId,
+    /// Latest worker admission generation accepted for the child.
+    generation: u64,
+}
+
+/// Session-owned conversational worker fan-in projection.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct WorkerFanInState {
+    /// Monotonic generation advanced by every successful child registration.
+    generation: u64,
+    /// Most recent generation whose all-terminal transition was observed.
+    settled_generation: u64,
+    /// Generation whose fan-in wake is suppressed by failure or task-tree cancellation.
+    failure_generation: u64,
+    /// Latest accepted terminal delivery per child.
+    terminal_deliveries: Vec<WorkerTerminalDeliveryFence>,
+}
+
+/// Result of applying one child terminal delivery to Session-owned state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerTerminalRecord {
+    /// The same or a newer generation was already accepted.
+    Duplicate,
+    /// A new terminal generation was cached.
+    Accepted {
+        /// Terminal state of the child that completed an all-success/cancelled fan-in.
+        settled: Option<moa_core::types::worker::state::WorkerState>,
+    },
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct SessionPendingState {
@@ -208,33 +251,11 @@ pub struct RemoveSessionTurnWaiterInput {
     pub awakeable_id: String,
 }
 
-/// Internal payload for a generation-guarded progress-narration tick self-call.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct NarrationTickRequest {
-    /// Scheduling generation observed when this tick was scheduled. A tick whose
-    /// generation no longer matches the VO's current generation is stale and is
-    /// ignored without rescheduling, because a newer generation now owns scheduling.
-    pub generation: u64,
-}
-
 /// Internal payload for a generation-guarded shared-admission lease heartbeat.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TurnAdmissionHeartbeatRequest {
     /// Scheduling generation owned by the currently active turn chain.
     pub generation: u64,
-}
-
-/// Internal payload for a generation-guarded per-child liveness-watchdog self-call.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CheckChildLivenessRequest {
-    /// Active child whose heartbeat liveness this check evaluates.
-    pub worker_id: WorkerId,
-    /// Per-child scheduling generation observed when this check was scheduled. A check
-    /// whose generation no longer matches the child's outstanding entry is stale and is
-    /// ignored, because a newer arming (or a clear) now owns scheduling for the child.
-    pub expected_generation: u64,
-    /// When this check was scheduled to fire (journaled at schedule time, informational).
-    pub scheduled_at: DateTime<Utc>,
 }
 
 /// Session delivery payload for one committed execution-run admission.
@@ -383,9 +404,9 @@ pub trait Session {
         input: Json<ClearWorkerInputTargetsInput>,
     ) -> Result<(), HandlerError>;
 
-    /// Caches a root child terminal result until a wait consumes it.
-    async fn mark_child_terminal(
-        input: Json<MarkWorkerChildTerminalInput>,
+    /// Atomically records one child terminal generation and its parent-facing consequences.
+    async fn record_worker_child_terminal(
+        input: Json<RecordWorkerChildTerminalInput>,
     ) -> Result<(), HandlerError>;
 
     /// Consumes a cached root child terminal result.
@@ -407,17 +428,10 @@ pub trait Session {
     /// Clears all persisted VO state for this session key.
     async fn destroy() -> Result<(), HandlerError>;
 
-    /// Internal generation-guarded tick that drives per-session progress narration.
-    async fn narration_tick(req: Json<NarrationTickRequest>) -> Result<(), HandlerError>;
-
     /// Internal generation-guarded tick that renews the active shared admission lease.
     async fn turn_admission_heartbeat(
         req: Json<TurnAdmissionHeartbeatRequest>,
     ) -> Result<(), HandlerError>;
-
-    /// Internal generation-guarded per-child heartbeat-liveness watchdog tick.
-    async fn check_child_liveness(req: Json<CheckChildLivenessRequest>)
-    -> Result<(), HandlerError>;
 }
 
 /// Concrete `Session` virtual object implementation.

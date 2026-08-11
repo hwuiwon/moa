@@ -15,7 +15,7 @@ impl SessionVoState {
     }
 
     /// Loads only the lifecycle status key for hot read-only status polls, so the
-    /// handler skips deserializing children, pending, and narration state.
+    /// handler skips deserializing children, pending, and coordination state.
     pub(in crate::objects::session) async fn load_status<R: VoReader>(
         reader: &R,
     ) -> Result<SessionStatus, HandlerError> {

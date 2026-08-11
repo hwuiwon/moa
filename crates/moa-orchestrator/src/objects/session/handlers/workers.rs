@@ -11,21 +11,10 @@ impl SessionImpl {
         annotate_restate_handler_span("Session", "register_child");
         let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
         let child = child.into_inner();
-        let worker_id = child.id.clone();
         if state.register_child(child) {
-            // Active edge: a child just became active, so ensure one narration tick is
-            // outstanding (single-outstanding guard prevents overlapping schedules).
-            narration::ensure_narration_tick_scheduled(&ctx, &mut state, &self.session_limits)
-                .await?;
-            // Active edge: schedule one single-outstanding per-child heartbeat-liveness
-            // watchdog so a stuck child is detected without polling across sessions.
-            liveness::ensure_child_liveness_scheduled(
-                &ctx,
-                &mut state,
-                &worker_id,
-                &self.session_limits,
-            )
-            .await?;
+            let mut fan_in = WorkerFanInState::load(&ctx).await?;
+            fan_in.register_child(&state.children);
+            fan_in.persist(&ctx);
             state.persist(&ctx);
         }
         Ok(())
@@ -72,25 +61,72 @@ impl SessionImpl {
         Ok(())
     }
 
-    pub(super) async fn handle_mark_child_terminal(
+    pub(super) async fn handle_record_worker_child_terminal(
         &self,
-        ctx: ObjectContext<'_>,
-        input: Json<MarkWorkerChildTerminalInput>,
+        mut ctx: ObjectContext<'_>,
+        input: Json<RecordWorkerChildTerminalInput>,
     ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("Session", "mark_child_terminal");
+        annotate_restate_handler_span("Session", "record_worker_child_terminal");
         let session_id = parse_session_key(ctx.key())?;
         let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
         let input = input.into_inner();
+        validate_worker_terminal_delivery(&input)?;
         let worker_id = input.worker_id.clone();
-        if state.mark_child_terminal(input) {
-            claim_check_child_output(
-                &ctx,
-                &mut state,
-                session_id,
-                &worker_id,
-                &self.session_store,
-            )
-            .await?;
+        if !state.owns_child(&worker_id) {
+            return Err(TerminalError::new(format!(
+                "worker terminal delivery names unregistered child {worker_id}"
+            ))
+            .into());
+        }
+        let mut fan_in = WorkerFanInState::load(&ctx).await?;
+        let record = fan_in.record_terminal(&mut state, &input);
+        let WorkerTerminalRecord::Accepted { settled } = record else {
+            record_worker_terminal_delivery(WorkerTerminalDeliveryResult::Duplicate);
+            tracing::debug!(
+                key = %ctx.key(),
+                worker_id = %worker_id,
+                generation = input.generation,
+                "ignored duplicate worker terminal delivery"
+            );
+            return Ok(());
+        };
+        record_worker_terminal_delivery(WorkerTerminalDeliveryResult::Accepted);
+        if let Some(settled) = settled {
+            let kind = match settled {
+                WorkerState::Completed => WorkerFanInSettledKind::Completed,
+                WorkerState::Cancelled => WorkerFanInSettledKind::Cancelled,
+                WorkerState::Uninitialized | WorkerState::Running | WorkerState::Failed => {
+                    return Err(TerminalError::new(
+                        "worker fan-in settled with a non-success terminal state",
+                    )
+                    .into());
+                }
+            };
+            record_worker_fan_in_settled(kind);
+        }
+        claim_check_child_output(
+            &ctx,
+            &mut state,
+            session_id,
+            &worker_id,
+            &self.session_store,
+        )
+        .await?;
+        fan_in.persist(&ctx);
+
+        append_worker_terminal_events(&ctx, session_id, &input).await?;
+        let parent_idle = load_pending_state(&ctx).await?.active_turn_id.is_none();
+        let signal = worker_terminal_signal(
+            session_id,
+            &input,
+            settled,
+            parent_idle,
+            state.children.len(),
+        );
+        if let Some(signal) = signal {
+            self.record_owned_child_signal(&mut ctx, session_id, &mut state, signal)
+                .await?;
+        } else {
             state.persist(&ctx);
         }
         Ok(())
@@ -166,10 +202,22 @@ impl SessionImpl {
             return Ok(());
         }
 
+        self.record_owned_child_signal(&mut ctx, session_id, &mut state, signal)
+            .await
+    }
+
+    /// Records one already-validated child signal and owns its guarded resume decision.
+    async fn record_owned_child_signal(
+        &self,
+        ctx: &mut ObjectContext<'_>,
+        session_id: SessionId,
+        state: &mut Tracked<SessionVoState>,
+        signal: WorkerSignal,
+    ) -> Result<(), HandlerError> {
         // Idempotent append: a retried delivery with the same signal_id is a no-op at the
         // event log (dedupe table, Task 2), so it never double-records the signal.
         append_session_event_deduped(
-            &ctx,
+            ctx,
             session_id,
             Event::WorkerSignalReceived {
                 signal_id: signal.signal_id,
@@ -194,7 +242,7 @@ impl SessionImpl {
         .await?;
 
         // The resume gate needs the active-turn cursor, which lives in pending state.
-        let active_turn_id = load_pending_state(&ctx).await?.active_turn_id;
+        let active_turn_id = load_pending_state(ctx).await?.active_turn_id;
 
         // Push compact signal CONTENT (dedup by signal_id, cap + action-required keep).
         let inserted = state.push_unread_child_signal(UnreadChildSignal {
@@ -223,7 +271,7 @@ impl SessionImpl {
         // turn is active, but this short-circuits even before the turn becomes active.
         let already_pending = state.pending_parent_resume_signal == Some(signal.signal_id);
         let limits = &self.session_limits;
-        let now = durable_utc_now(&ctx).await?;
+        let now = durable_utc_now(ctx).await?;
         let armed = !already_pending
             && state.maybe_arm_parent_resume(
                 &signal,
@@ -243,14 +291,14 @@ impl SessionImpl {
                     .map_err(moa_error_to_handler_error)?
                     .tenant_id;
                 self.turn_admission
-                    .acquire(&ctx, session_id, tenant_id, "turn_admission_child_resume")
+                    .acquire(ctx, session_id, tenant_id, "turn_admission_child_resume")
                     .await?;
-                let turn_id = generate_turn_id(&mut ctx);
+                let turn_id = generate_turn_id(ctx);
                 let instruction = build_resume_instruction(&signal, &state.unread_child_signals);
                 // Durable, idempotent control record that seeds the resume turn's prompt
                 // (the brain renders this event's `reason` instead of a fake user message).
                 append_session_event_deduped(
-                    &ctx,
+                    ctx,
                     session_id,
                     Event::WorkerParentResumeRequested {
                         signal_id: signal.signal_id,
@@ -263,22 +311,18 @@ impl SessionImpl {
                 .await?;
                 // Mirror `start_turn_inner` bookkeeping so a concurrent/queued message sees
                 // an active turn and no second root turn can start.
-                let mut pending_state = load_pending_state(&ctx).await?;
+                let mut pending_state = load_pending_state(ctx).await?;
                 pending_state.active_turn_id = Some(turn_id.clone());
-                activate_coordinator_security_owner(
-                    &mut state,
-                    &turn_id,
-                    pending_state.turn_generation,
-                );
-                arm_turn_admission_heartbeat(&ctx, &mut pending_state, &self.turn_admission);
+                activate_coordinator_security_owner(state, &turn_id, pending_state.turn_generation);
+                arm_turn_admission_heartbeat(ctx, &mut pending_state, &self.turn_admission);
                 state.set_status(SessionStatus::Running, now);
                 state.record_resume_dispatch(turn_id.clone(), now, limits.worker_resume_window_ms);
                 let contact = state.meta.as_ref().and_then(|meta| meta.contact.clone());
-                state.persist(&ctx);
-                persist_pending_state(&ctx, &pending_state);
-                sync_status(&ctx, session_id, &state).await?;
+                state.persist(ctx);
+                persist_pending_state(ctx, &pending_state);
+                sync_status(ctx, session_id, state).await?;
                 dispatch_turn_execution(
-                    &ctx,
+                    ctx,
                     RunTurnRequest {
                         session_id: ctx.key().to_string(),
                         turn_id: turn_id.clone(),
@@ -319,17 +363,17 @@ impl SessionImpl {
             limits.worker_resume_window_ms,
         ) {
             append_session_event_deduped(
-                    &ctx,
-                    session_id,
-                    Event::Warning {
-                        message: format!(
-                            "Worker resume budget exhausted; queued signal {} from worker {} for a later turn.",
-                            signal.signal_id, signal.worker_id
-                        ),
-                    },
-                    format!("parent_resume_budget_exhausted:{}", signal.signal_id),
-                )
-                .await?;
+                ctx,
+                session_id,
+                Event::Warning {
+                    message: format!(
+                        "Worker resume budget exhausted; queued signal {} from worker {} for a later turn.",
+                        signal.signal_id, signal.worker_id
+                    ),
+                },
+                format!("parent_resume_budget_exhausted:{}", signal.signal_id),
+            )
+            .await?;
         } else if already_pending {
             tracing::debug!(
                 key = %ctx.key(),
@@ -338,7 +382,7 @@ impl SessionImpl {
             );
         }
 
-        state.persist(&ctx);
+        state.persist(ctx);
         tracing::debug!(
             key = %ctx.key(),
             signal_id = %signal.signal_id,
@@ -349,16 +393,129 @@ impl SessionImpl {
         );
         Ok(())
     }
+}
 
-    pub(super) async fn handle_check_child_liveness(
-        &self,
-        ctx: ObjectContext<'_>,
-        req: Json<CheckChildLivenessRequest>,
-    ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("Session", "check_child_liveness");
-        liveness::run_child_liveness_check(&ctx, req.into_inner(), &self.session_limits).await
+fn validate_worker_terminal_delivery(
+    input: &RecordWorkerChildTerminalInput,
+) -> Result<(), HandlerError> {
+    if input.generation == 0 {
+        return Err(TerminalError::new(
+            "worker terminal delivery requires a non-zero admission generation",
+        )
+        .into());
+    }
+    if input.terminal.result.worker_id != input.worker_id {
+        return Err(TerminalError::new(
+            "worker terminal delivery result does not match its worker id",
+        )
+        .into());
+    }
+    if !matches!(
+        input.terminal.state,
+        WorkerState::Completed | WorkerState::Failed | WorkerState::Cancelled
+    ) {
+        return Err(TerminalError::new(
+            "worker terminal delivery carries a non-terminal lifecycle state",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+async fn append_worker_terminal_events(
+    ctx: &ObjectContext<'_>,
+    session_id: SessionId,
+    input: &RecordWorkerChildTerminalInput,
+) -> Result<(), HandlerError> {
+    let summary = input
+        .terminal
+        .result
+        .error
+        .clone()
+        .unwrap_or_else(|| input.terminal.result.output.clone());
+    append_session_event_deduped(
+        ctx,
+        session_id,
+        Event::WorkerStatusChanged {
+            worker_id: input.worker_id.clone(),
+            from: None,
+            to: input.terminal.state,
+            summary: Some(summary.clone()),
+        },
+        format!("worker_terminal_status:{}", input.signal_id),
+    )
+    .await?;
+    append_session_event_deduped(
+        ctx,
+        session_id,
+        Event::WorkerNotificationDelivered {
+            worker_id: input.worker_id.clone(),
+            state: input.terminal.state,
+            summary,
+        },
+        format!("worker_terminal_notification:{}", input.signal_id),
+    )
+    .await
+}
+
+fn worker_terminal_signal(
+    parent_session: SessionId,
+    input: &RecordWorkerChildTerminalInput,
+    settled: Option<WorkerState>,
+    parent_idle: bool,
+    child_count: usize,
+) -> Option<WorkerSignal> {
+    let (kind, severity, summary) = if input.terminal.state == WorkerState::Failed {
+        let summary = input
+            .terminal
+            .result
+            .error
+            .as_deref()
+            .filter(|error| !error.trim().is_empty())
+            .unwrap_or(&input.terminal.result.output);
+        (
+            ChildSignalKind::Failed,
+            SignalSeverity::Critical,
+            compact_terminal_signal_summary(summary, "worker turn failed"),
+        )
+    } else if settled.is_some() && parent_idle {
+        (
+            ChildSignalKind::FanInSettled,
+            SignalSeverity::Info,
+            format!("All {child_count} registered workers have settled."),
+        )
+    } else {
+        return None;
+    };
+    Some(WorkerSignal {
+        signal_id: input.signal_id,
+        worker_id: input.worker_id.clone(),
+        parent_session,
+        kind,
+        severity,
+        summary,
+        payload: serde_json::Value::Null,
+        created_at: input.created_at,
+        resume_policy: ParentResumePolicy::IfIdle,
+        input_request: None,
+    })
+}
+
+fn compact_terminal_signal_summary(message: &str, fallback: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let first_line = message
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(fallback);
+    if first_line.chars().count() > MAX_CHARS {
+        let truncated: String = first_line.chars().take(MAX_CHARS).collect();
+        format!("{truncated}…")
+    } else {
+        first_line.to_string()
     }
 }
+
 /// Offloads a just-marked terminal child's large output to a content-addressed blob.
 ///
 /// A no-op unless the child's output exceeds the claim-check threshold. The full body is

@@ -565,6 +565,7 @@ fn from_iter_applies_every_execution_resource_override() {
     let overlay = EnvOverlay::from_iter(env_pairs([
         ("MOA_EXECUTION_PLANNER_REPAIR_ATTEMPTS", "2"),
         ("MOA_EXECUTION_REPEATED_FAILURE_LIMIT", "4"),
+        ("MOA_EXECUTION_MAX_IN_FLIGHT_TASKS", "96"),
         ("MOA_EXECUTION_MAX_TASKS", "20000"),
         ("MOA_EXECUTION_MAX_TOKENS", "20000000"),
         ("MOA_EXECUTION_MAX_TOOL_CALLS", "200000"),
@@ -589,6 +590,7 @@ fn from_iter_applies_every_execution_resource_override() {
 
     assert_eq!(config.execution.planner_repair_attempts, 2);
     assert_eq!(config.execution.repeated_failure_limit, 4);
+    assert_eq!(config.execution.max_in_flight_tasks, 96);
     assert_eq!(config.execution.max_tasks, 20_000);
     assert_eq!(config.execution.max_tokens, 20_000_000);
     assert_eq!(config.execution.max_tool_calls, 200_000);
@@ -611,6 +613,7 @@ fn from_iter_rejects_invalid_values_for_every_execution_override() {
     for name in [
         "MOA_EXECUTION_PLANNER_REPAIR_ATTEMPTS",
         "MOA_EXECUTION_REPEATED_FAILURE_LIMIT",
+        "MOA_EXECUTION_MAX_IN_FLIGHT_TASKS",
         "MOA_EXECUTION_MAX_TASKS",
         "MOA_EXECUTION_MAX_TOKENS",
         "MOA_EXECUTION_MAX_TOOL_CALLS",
@@ -631,6 +634,25 @@ fn from_iter_rejects_invalid_values_for_every_execution_override() {
             name,
         );
     }
+}
+
+#[test]
+fn execution_max_in_flight_tasks_overlay_rejects_zero() {
+    // Pins: the physical execution window cannot mean either unbounded fan-out
+    // or no runnable tasks when configured through the deployment env surface.
+    let overlay = EnvOverlay::from_iter(env_pairs([("MOA_EXECUTION_MAX_IN_FLIGHT_TASKS", "0")]))
+        .expect("zero is syntactically a valid integer");
+    let mut config = MoaConfig::default();
+
+    let error = overlay
+        .apply_to(&mut config)
+        .expect_err("zero execution window must fail validation");
+    assert!(
+        error
+            .to_string()
+            .contains("execution.max_in_flight_tasks must be greater than zero"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

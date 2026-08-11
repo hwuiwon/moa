@@ -988,7 +988,10 @@ async fn execute_agent(
                 .complete(Json::from(request))
                 .idempotency_key(completion_idempotency_key(
                     ctx.invocation_id(),
-                    LLMCompletionAction::ExecutionTaskModel { turn },
+                    LLMCompletionAction::ExecutionTaskModel {
+                        generation: task.generation,
+                        turn,
+                    },
                 )),
         )
         .call();

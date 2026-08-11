@@ -127,7 +127,7 @@ authoring and import/export format. Optional `ui` metadata is non-semantic.
 | `ExecutionCompiler` | `moa-execution` | Validates, canonicalizes, estimates, and hashes initial plans and amendments against the capability catalog and remaining budget. |
 | `ExecutionProjection` | `moa-execution` | Supplies ordered node/task state to the pure scheduler; it contains no repository or provider handle. |
 | `ExecutionRepository` | `moa-execution` | Owns scoped run/task persistence, idempotent materialization, atomic budget accounting, generation-fenced outcomes, amendment history, and cancellation. It depends only on shared database/core types, never on Restate or runtime owners. |
-| `ExecutionRun` | `moa-orchestrator` Restate workflow | Drives one durable plan from persisted state, including amendment, cancellation, progress, and terminal completion. |
+| `ExecutionRun` | `moa-orchestrator` Restate workflow | Sole DAG-advancement owner. Drives one durable plan from persisted state, keeps at most `execution.max_in_flight_tasks` attached task calls live, and parks on persisted wake epochs or owned task completion. |
 | `ExecutionTask` | `moa-orchestrator` Restate workflow | Executes one stable logical node or map-item instance and records one typed outcome. |
 | Sandbox workspace | `moa-hands` domain/repositories/adapters, composed by `moa-orchestrator` | Owns one tenant-scoped, worker-owned or execution-task-owned filesystem lifecycle; Postgres stores ownership/fences and provider/object storage owns bytes. |
 | Connector definition | `moa-artifacts` | Owns immutable reviewed HTTP transport, schema, data-class, credential-slot, and action contracts; the platform supplies the fixed external-write/high-risk/admin-review floor. |
@@ -244,10 +244,14 @@ compiled worst-case estimate above the unattended threshold is persisted as
 `awaiting_confirmation` and starts no task until the owning user confirms it.
 
 Ready map items are materialized as stable tasks keyed by
-`(run_uid, node_id, item_key)` and all are submitted durably. There is no
-application-level active-worker or fan-out cap for execution tasks; run budget
-and `max_tasks` bound logical expansion, while provider pacing and governed
-capability or hand capacity provide physical backpressure.
+`(run_uid, node_id, item_key)`. Materialization is deterministic and complete,
+but pending rows are storage-only: they have no live `ExecutionTask` invocation
+until the run admits them into its positive physical window. The default
+`execution.max_in_flight_tasks` is 64 and is independent of logical `max_tasks`
+and provider-specific concurrency. `ExecutionRun` starts the first stable
+undispatched tasks that fit the window, acknowledges the processed wake epoch,
+and suspends on the epoch promise plus its attached task-call handles. Each
+completed handle opens a slot for the next stable pending row.
 
 `ExecutionTaskId` is UUIDv5 over length-framed run UUID, node ID, and item key.
 Ordinary tasks use item key `""`, map tasks use the typed canonical extracted
@@ -522,7 +526,14 @@ architecture scanner rejects reintroduced raw context access under `objects/`,
 `services/`, and `workflows/`; `docs/15-architecture-policy.md` holds the
 authoritative composition rule.
 
-`Session` is the durable actor for one session key. It queues messages, admits `TurnExecution` workflows, tracks the active task segment, records tool/skill usage, and writes learning entries. Segment assessment happens at turn, segment, idle, cancellation, and timeout boundaries as an auditable learning artifact, not as a live-loop control signal. `Worker` owns conversational delegated state with depth and budget limits, while `WorkerTurnExecution` runs one admitted child turn and reports turn-scoped mutations back to the VO.
+`Session` is the durable actor for one session key. It queues messages, admits
+`TurnExecution` workflows, tracks the active task segment, records tool/skill
+usage, and writes learning entries. It is also the sole owner of parent-facing
+conversational fan-in. `Worker` owns delegated state, explicit result waiters,
+and one outstanding liveness deadline; `WorkerTurnExecution` runs one admitted
+child turn and reports turn-scoped mutations back to the VO. Segment assessment
+happens at turn, segment, idle, cancellation, and timeout boundaries as an
+auditable learning artifact, not as a live-loop control signal.
 
 `ExecutionRun` and `ExecutionTask` are the separate durable bulk-execution
 family. Their full state and aggregate counters come from execution persistence,
@@ -530,14 +541,25 @@ not the `Session` VO. A run links to its owning session only for compact
 progress, exact input requests, and one deduplicated terminal synthesis turn.
 
 Coordinator turns can return while detached workers keep running across
-non-sticky replicas. The coordinator and its children coordinate over two planes —
-a high-frequency telemetry plane (progress, heartbeat, one-call-per-period
-narration) that stays off the single-writer `Session` VO, and a low-frequency
-control plane (attention signals, terminal-wake, guarded resume) that routes
-through the coordinator VO. All of this is correct on Kubernetes because its state
-lives in Restate VO/workflow state and Postgres (idempotent event appends guarded
-by `session_event_dedupe`). Valkey is the sole shared turn-admission owner, but it
-does not own signals, resume, or terminal results. The root coordinator is
+non-sticky replicas. Cadence-limited turn progress is delivered directly from
+the active turn path and never schedules parent coordination. Child attention
+signals route through the owning `Session`; model-authored `Blocked` and
+`NeedsInput`, terminal `Failed`, and the Worker's one exact `HeartbeatStale`
+deadline may wake an idle coordinator immediately. Successful or cancelled
+children do not wake separately. A child registration advances the fan-in
+generation, and the Session records at most one `FanInSettled` wake for that
+generation when its last child settles successfully or is cancelled while the
+coordinator is idle. If the coordinator is active, it consumes the cached
+terminal facts through its explicit waiter/list path and no automatic success
+wake is queued.
+
+On every terminal transition, the Worker first resolves its explicit result
+awakeables, then makes one joined call to the Session's terminal handler. That
+one handler validates child identity and generation, caches the result, appends
+the terminal lifecycle events idempotently, and owns the single immediate
+failure or fan-in-settled consequence. Restate state and idempotent Postgres
+event appends own these transitions; Valkey owns shared turn admission but not
+signals, resume, terminal results, or liveness. The root coordinator is
 sandbox-free. Each worker or sandbox-using execution task owns one typed durable
 `SandboxWorkspace` and may attach one ephemeral hand under independent writer
 and compute-instance fences. Self-cleanup releases compute without deleting
