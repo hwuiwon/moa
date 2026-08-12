@@ -189,6 +189,13 @@ pub struct ExecutionProgressSignature {
     pub blocker_audience: Option<moa_core::events::ExecutionBlockerAudience>,
     /// Exact unconsumed and unreserved execution budget.
     pub remaining_budget: moa_core::events::ExecutionRemainingBudget,
+    /// Cumulative spend against the goal-requirement denominator.
+    ///
+    /// Reconciling a task's actuals can raise consumed spend while every other signature
+    /// field holds, which is exactly the run that is spending without advancing. Gating on
+    /// the projection without this field would suppress that publication.
+    #[serde(default)]
+    pub economics: Option<moa_core::events::ExecutionProgressEconomics>,
     /// Materialized logical task count.
     pub total: u64,
     /// Successfully completed logical task count.
@@ -214,6 +221,7 @@ impl From<&moa_core::events::ExecutionProgress> for ExecutionProgressSignature {
             parked_tasks: progress.parked_tasks,
             blocker_audience: progress.blocker_audience,
             remaining_budget: progress.remaining_budget.clone(),
+            economics: progress.economics.clone(),
             total: progress.total,
             completed: progress.completed,
             failed: progress.failed,

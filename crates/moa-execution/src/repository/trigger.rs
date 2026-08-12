@@ -275,6 +275,19 @@ pub enum ExecutionWatchdogTriggerOutcome {
     NoOp(ExecutionTriggerNoOp),
 }
 
+/// Result of rearming one live task watchdog for its next staleness observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionWatchdogDeferOutcome {
+    /// The same immutable watchdog was rearmed for a strictly later observation.
+    Deferred {
+        /// New absolute observation time, never beyond the attempt deadline.
+        next_due_at: DateTime<Utc>,
+    },
+    /// The watchdog must stay due: the attempt is already stale, at its deadline, superseded,
+    /// or not a live task attempt.
+    NotDeferred,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExternalReconcileTriggerPayload {
@@ -1071,6 +1084,118 @@ impl ExecutionRepository {
         Ok(ExecutionExternalStartRecoveryRearmOutcome::Rearmed(
             Box::new(dispatch),
         ))
+    }
+
+    /// Rearms one live task watchdog for its next heartbeat-staleness observation.
+    ///
+    /// The watchdog is armed at a staleness window rather than the attempt deadline, so a live
+    /// attempt is observed repeatedly and must be pushed forward each time it proves progress.
+    /// The next observation is `min(attempt_deadline_at, last_progress_at + staleness)`, so the
+    /// deadline remains the hard backstop and deferral can never postpone it.
+    ///
+    /// This is a rearm, not a supersede: the trigger stays `pending` and keeps its
+    /// `scheduled_triggers` capacity receipt, and the existing delivery row is rewritten in place
+    /// rather than released and recreated. Every failure to establish a strictly later, still
+    /// live observation returns [`ExecutionWatchdogDeferOutcome::NotDeferred`] and leaves the
+    /// watchdog due, which preserves the pre-existing retry behaviour exactly.
+    pub async fn defer_task_attempt_watchdog(
+        &self,
+        scope: ExecutionScope,
+        config: &ExecutionConfig,
+        trigger_uid: Uuid,
+    ) -> Result<ExecutionWatchdogDeferOutcome> {
+        let staleness = crate::repository::task::attempt_heartbeat_staleness_window(config)?;
+        let mut conn = scope.begin(&self.pool).await?;
+        prelock_trigger_scheduled_capacity_in_conn(conn.as_mut(), trigger_uid).await?;
+        let row =
+            sqlx::query("SELECT * FROM moa.execution_trigger WHERE trigger_uid=$1 FOR UPDATE")
+                .bind(trigger_uid)
+                .fetch_optional(conn.as_mut())
+                .await
+                .map_err(sqlx_error)?;
+        let Some(row) = row else {
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(ExecutionWatchdogDeferOutcome::NotDeferred);
+        };
+        let trigger = trigger_from_row(&row)?;
+        // A non-task watchdog is not an error here. Trigger delivery routes task and compensation
+        // watchdogs through one retry branch, and compensation attempts carry no heartbeat, so the
+        // safe answer for anything but a live task watchdog is to leave the trigger alone.
+        if trigger.kind != ExecutionTriggerKind::TaskWatchdog
+            || !matches!(
+                trigger.state,
+                ExecutionDeliveryState::Pending | ExecutionDeliveryState::Dispatching
+            )
+            || !trigger_is_current(conn.as_mut(), &trigger).await?
+        {
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(ExecutionWatchdogDeferOutcome::NotDeferred);
+        }
+        let progress = sqlx::query_as::<_, (Option<DateTime<Utc>>, DateTime<Utc>, DateTime<Utc>)>(
+            "SELECT attempt_deadline_at, last_progress_at, now() FROM moa.execution_task \
+             WHERE tenant_id=$1 AND run_uid=$2 AND task_id=$3 AND attempt_generation=$4 \
+               AND active_dispatch_uid IS NOT NULL",
+        )
+        .bind(trigger.tenant_id.0)
+        .bind(trigger.run_uid)
+        .bind(trigger.task_id)
+        .bind(to_optional_i64(
+            trigger.attempt_generation,
+            "attempt generation",
+        )?)
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(sqlx_error)?;
+        let Some((Some(attempt_deadline_at), last_progress_at, observed_at)) = progress else {
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(ExecutionWatchdogDeferOutcome::NotDeferred);
+        };
+        let Some(next_due_at) = last_progress_at
+            .checked_add_signed(staleness)
+            .map(|stale_at| stale_at.min(attempt_deadline_at))
+        else {
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(ExecutionWatchdogDeferOutcome::NotDeferred);
+        };
+        // Strictly forward only. An observation at or before now would re-fire immediately, and one
+        // at or before the current arm would not move detection at all.
+        if next_due_at <= observed_at || next_due_at <= trigger.due_at {
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(ExecutionWatchdogDeferOutcome::NotDeferred);
+        }
+        // Restate journals trigger delivery by dispatch UID, so a rearm needs a new delivery
+        // identity or the next claim would replay the completed RetryDelivery invocation.
+        let next_dispatch_uid = rearmed_trigger_delivery_dispatch_uid(trigger_uid, next_due_at);
+        sqlx::query(
+            "UPDATE moa.execution_trigger SET state='pending', due_at=$2, delivered_at=NULL, \
+             updated_at=now() WHERE trigger_uid=$1",
+        )
+        .bind(trigger_uid)
+        .bind(next_due_at)
+        .execute(conn.as_mut())
+        .await
+        .map_err(sqlx_error)?;
+        let rearmed = sqlx::query(
+            "UPDATE moa.execution_dispatch_outbox SET dispatch_uid=$3,state='pending', \
+             not_before_at=$2,delivery_attempts=0, \
+             claim_owner=NULL,claimed_at=NULL,claim_expires_at=NULL,delivered_at=NULL, \
+             updated_at=now() \
+             WHERE trigger_uid=$1 AND dispatch_kind='trigger_delivery' \
+               AND state IN ('pending','dispatching','delivered')",
+        )
+        .bind(trigger_uid)
+        .bind(next_due_at)
+        .bind(next_dispatch_uid)
+        .execute(conn.as_mut())
+        .await
+        .map_err(sqlx_error)?;
+        if rearmed.rows_affected() != 1 {
+            return Err(Error::InvalidRepositoryData {
+                message: "task watchdog trigger is missing its exact delivery outbox".to_string(),
+            });
+        }
+        conn.commit().await.map_err(storage_error)?;
+        Ok(ExecutionWatchdogDeferOutcome::Deferred { next_due_at })
     }
 
     /// Supersedes one run deadline trigger after its bounded terminal fence is durable.

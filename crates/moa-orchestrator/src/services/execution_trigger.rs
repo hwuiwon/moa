@@ -8,7 +8,7 @@ use moa_execution::repository::{
     trigger::{
         ExecutionExternalReconcileTriggerOutcome, ExecutionExternalStartRecoveryTriggerOutcome,
         ExecutionRunDeadlineTriggerOutcome, ExecutionTriggerFireOutcome, ExecutionTriggerKind,
-        ExecutionTriggerNoOp, ExecutionWatchdogTriggerOutcome,
+        ExecutionTriggerNoOp, ExecutionWatchdogDeferOutcome, ExecutionWatchdogTriggerOutcome,
     },
 };
 use moa_execution::wire::{
@@ -329,6 +329,39 @@ impl ExecutionTrigger for ExecutionTriggerImpl {
                 WatchdogRoute::NoOp { response } => return Ok(Json::from(response)),
             };
             if watchdog_outcome == ExecutionAttemptWatchdogResponseOutcome::RetryDelivery {
+                // A task watchdog is armed one heartbeat-staleness window ahead of the attempt
+                // deadline, so a live attempt that is still committing durable steps is observed
+                // repeatedly and legitimately answers RetryDelivery. Rearm it for its next
+                // observation and complete this delivery rather than spinning revalidation until
+                // the deadline. The repository caps the new observation at the attempt deadline and
+                // declines anything that is not a strictly later, still-current task watchdog, so a
+                // stalled attempt, a superseded generation, and a compensation watchdog all fall
+                // through to the pre-existing revalidation path unchanged.
+                let repository = self.repository.clone();
+                let config = self.config.clone();
+                let deferred = ctx
+                    .run(|| async move {
+                        repository
+                            .defer_task_attempt_watchdog(
+                                ExecutionScope::Tenant { tenant_id },
+                                &config,
+                                trigger_uid,
+                            )
+                            .await
+                            .map(|outcome| {
+                                Json::from(matches!(
+                                    outcome,
+                                    ExecutionWatchdogDeferOutcome::Deferred { .. }
+                                ))
+                            })
+                            .map_err(execution_error_to_handler_error)
+                    })
+                    .name(format!("execution_watchdog_defer_{trigger_uid}"))
+                    .await?
+                    .into_inner();
+                if deferred {
+                    return Ok(Json::from(ExecutionTriggerFireResponse::NotDue));
+                }
                 // The receiver can race a different durable owner transition. Revalidate after
                 // its response so a watchdog superseded by that transition completes as a stale
                 // delivery instead of blocking the fleet-serialized drain behind endless retry.

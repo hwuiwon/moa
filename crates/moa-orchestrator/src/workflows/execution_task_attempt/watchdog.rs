@@ -10,8 +10,9 @@ use moa_execution::{
     repository::{
         ExecutionAttemptState, ExecutionScope,
         task::{
-            TaskAttemptFence, TaskAttemptRecord, TaskAttemptSettlementOutcome,
-            UnstartedTaskAttemptDisposition,
+            ActiveAttemptLiveness, TaskAttemptFence, TaskAttemptRecord,
+            TaskAttemptSettlementOutcome, UnstartedTaskAttemptDisposition,
+            classify_active_attempt_liveness,
         },
     },
     state::{ExecutionTaskStatus, LogicalTaskKind, exhaust_retry_outcome, retry_delay_ms},
@@ -108,7 +109,9 @@ pub(super) async fn handle_task_attempt_watchdog(
         ));
     }
     let now = durable_utc_now_shared(ctx, "task_watchdog_observed_at").await?;
-    if deadline > now {
+    let liveness =
+        classify_active_attempt_liveness(&workflow.config, deadline, task.last_progress_at, now);
+    if !liveness.is_expired() {
         return Ok(watchdog_result(
             ExecutionAttemptWatchdogResponseOutcome::RetryDelivery,
         ));
@@ -193,24 +196,7 @@ pub(super) async fn handle_task_attempt_watchdog(
     };
     let receipt = checkpoint_task_hands_shared(ctx, &attempt_request, &started).await?;
     let disposition = classify_stale_attempt(task_effect_idempotency(&started));
-    let outcome = match disposition {
-        StaleTaskAttemptDisposition::Retry => ExecutionTaskOutcome {
-            schema_version: 1,
-            usage: started.task.actual.clone(),
-            result: ExecutionTaskResult::Failed {
-                class: ExecutionFailureClass::Retryable,
-                message: "task attempt watchdog expired before durable settlement".to_string(),
-            },
-        },
-        StaleTaskAttemptDisposition::UnknownOutcome => ExecutionTaskOutcome {
-            schema_version: 1,
-            usage: started.task.actual.clone(),
-            result: ExecutionTaskResult::UnknownOutcome {
-                message: "non-idempotent task attempt exceeded its watchdog after possible commit"
-                    .to_string(),
-            },
-        },
-    };
+    let outcome = expired_attempt_outcome(disposition, liveness, started.task.actual.clone());
     let outcome = exhaust_retry_outcome(started.task.attempt, &started.task.retry, outcome);
     let retry_at = matches!(
         outcome.result,
@@ -243,6 +229,48 @@ pub(super) async fn handle_task_attempt_watchdog(
         .await?
         .into_inner();
     Ok(watchdog_result(settlement))
+}
+
+/// Builds the durable outcome for one attempt the watchdog observed as expired.
+///
+/// The persisted message names why the attempt was terminated, because a stall inside the
+/// authorized window and a fully consumed window call for different operator responses even
+/// though both settle through the same retry or reconciliation path.
+fn expired_attempt_outcome(
+    disposition: StaleTaskAttemptDisposition,
+    liveness: ActiveAttemptLiveness,
+    usage: moa_artifacts::execution_plan::ExecutionUsage,
+) -> ExecutionTaskOutcome {
+    let reason = match liveness {
+        ActiveAttemptLiveness::Live => "watchdog fired on a live attempt",
+        ActiveAttemptLiveness::Stalled => {
+            "reported no durable progress within the heartbeat staleness window"
+        }
+        ActiveAttemptLiveness::DeadlineExceeded => "exceeded its active attempt deadline",
+    };
+    match disposition {
+        StaleTaskAttemptDisposition::Retry => ExecutionTaskOutcome {
+            schema_version: 1,
+            usage,
+            result: ExecutionTaskResult::Failed {
+                class: ExecutionFailureClass::Retryable,
+                message: format!(
+                    "task attempt {reason} before durable settlement ({})",
+                    liveness.as_str()
+                ),
+            },
+        },
+        StaleTaskAttemptDisposition::UnknownOutcome => ExecutionTaskOutcome {
+            schema_version: 1,
+            usage,
+            result: ExecutionTaskResult::UnknownOutcome {
+                message: format!(
+                    "non-idempotent task attempt {reason} after possible commit ({})",
+                    liveness.as_str()
+                ),
+            },
+        },
+    }
 }
 
 fn watchdog_result(outcome: ExecutionAttemptWatchdogResponseOutcome) -> TaskAttemptWatchdogResult {
@@ -313,5 +341,44 @@ mod tests {
             classify_stale_attempt(IdempotencyClass::NonIdempotent),
             StaleTaskAttemptDisposition::UnknownOutcome
         );
+    }
+
+    // Pins: the watchdog only terminates an attempt its liveness classification calls expired,
+    // and the durable message distinguishes a heartbeat stall from a consumed deadline so the
+    // two failures are separable in the task record without new event plumbing.
+    #[test]
+    fn watchdog_records_why_an_expired_attempt_was_terminated_offline() {
+        assert!(!ActiveAttemptLiveness::Live.is_expired());
+        assert!(ActiveAttemptLiveness::Stalled.is_expired());
+        assert!(ActiveAttemptLiveness::DeadlineExceeded.is_expired());
+
+        let usage = moa_artifacts::execution_plan::ExecutionUsage {
+            cost_microusd: 7,
+            tokens: 11,
+            tool_calls: 1,
+            retrieved_bytes: 13,
+        };
+        let stalled = expired_attempt_outcome(
+            StaleTaskAttemptDisposition::Retry,
+            ActiveAttemptLiveness::Stalled,
+            usage.clone(),
+        );
+        let ExecutionTaskResult::Failed { class, message } = stalled.result else {
+            panic!("an idempotent expired attempt must stay retryable");
+        };
+        assert_eq!(class, ExecutionFailureClass::Retryable);
+        assert!(message.contains("heartbeat staleness window"), "{message}");
+        assert!(message.contains("(stalled)"), "{message}");
+
+        let overdue = expired_attempt_outcome(
+            StaleTaskAttemptDisposition::UnknownOutcome,
+            ActiveAttemptLiveness::DeadlineExceeded,
+            usage,
+        );
+        let ExecutionTaskResult::UnknownOutcome { message } = overdue.result else {
+            panic!("a non-idempotent expired attempt must stay ambiguous");
+        };
+        assert!(message.contains("active attempt deadline"), "{message}");
+        assert!(message.contains("(deadline_exceeded)"), "{message}");
     }
 }

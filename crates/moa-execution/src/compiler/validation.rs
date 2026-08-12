@@ -2,6 +2,7 @@
 
 pub(super) mod activation_bounds;
 pub(super) mod schema_references;
+pub(super) mod wait_feasibility;
 
 use self::schema_references::validate_one_schema;
 use super::*;

@@ -738,6 +738,8 @@ pub struct EnvOverlay {
     pub execution_dispatch_batch_size: Option<usize>,
     /// `MOA_EXECUTION_ACTIVE_ATTEMPT_TIMEOUT_SECONDS`.
     pub execution_active_attempt_timeout_seconds: Option<u64>,
+    /// `MOA_EXECUTION_ATTEMPT_HEARTBEAT_STALENESS_SECONDS`.
+    pub execution_attempt_heartbeat_staleness_seconds: Option<u64>,
     /// `MOA_EXECUTION_MAX_TENANT_ACTIVE_RUNS`.
     pub execution_max_tenant_active_runs: Option<u32>,
     /// `MOA_EXECUTION_MAX_FLEET_ACTIVE_RUNS`.

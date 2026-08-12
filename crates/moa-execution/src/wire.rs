@@ -11,8 +11,8 @@ use moa_artifacts::{
 use moa_core::events::Event;
 use moa_core::events::{
     ExecutionBlockerAudience, ExecutionFailureDisposition, ExecutionProgress,
-    ExecutionProgressPhase, ExecutionRemainingBudget, ExecutionTaskResultsRef,
-    ExecutionTerminalSummary,
+    ExecutionProgressEconomics, ExecutionProgressPhase, ExecutionRemainingBudget,
+    ExecutionTaskResultsRef, ExecutionTerminalSummary,
 };
 use moa_core::types::{
     contact::ContactId,
@@ -27,7 +27,10 @@ use uuid::Uuid;
 use crate::{
     Error, Result,
     budget::BudgetLedger,
-    capability::{ExecutionAuthorizationEnvelope, ExecutionCapabilityCatalog, ExecutionHash},
+    capability::{
+        ExecutionAuthorizationEnvelope, ExecutionCapabilityCatalog, ExecutionEstimate,
+        ExecutionHash,
+    },
     compiler::CompiledExecution,
     state::{
         CompensationId, ExecutionProjection, ExecutionRunStatus, ExecutionSourceKind,
@@ -696,10 +699,41 @@ pub fn execution_progress_from_run(
             retrieved_bytes: remaining.max_retrieved_bytes,
             deadline_at: remaining.deadline_at,
         },
+        economics: Some(execution_progress_economics(
+            &run.consumed,
+            run.goal.requirements.len(),
+            run.terminal_evidence.as_ref(),
+        )?),
         total: run.progress_total_tasks,
         completed: run.progress_completed_tasks,
         failed: run.progress_failed_tasks,
         cancelled: run.progress_cancelled_tasks,
+    })
+}
+
+/// Relates reconciled spend to the goal-requirement denominator for one progress event.
+///
+/// Every input is already resident on the loaded run row, so the projection adds no query
+/// to the progress hot path. `requirements_satisfied` is durable only in terminal evidence,
+/// so it stays `None` for the whole active life of the run.
+fn execution_progress_economics(
+    consumed: &ExecutionEstimate,
+    requirement_count: usize,
+    terminal_evidence: Option<&ExecutionTerminalEvidence>,
+) -> Result<ExecutionProgressEconomics> {
+    Ok(ExecutionProgressEconomics {
+        consumed_cost_microusd: consumed.cost_microusd,
+        consumed_tokens: consumed.tokens,
+        consumed_tasks: consumed.tasks,
+        consumed_tool_calls: consumed.tool_calls,
+        consumed_retrieved_bytes: consumed.retrieved_bytes,
+        requirements_total: u64::try_from(requirement_count).map_err(|_| {
+            Error::ArithmeticOverflow {
+                context: "execution progress requirement count".to_string(),
+            }
+        })?,
+        requirements_satisfied: terminal_evidence
+            .map(|evidence| evidence.satisfied_requirement_count),
     })
 }
 
@@ -1536,6 +1570,44 @@ fn invalid_cursor(message: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_progress_economics_reports_consumed_spend_against_requirements_offline() {
+        // Pins: progress projects reconciled spend and the goal-requirement denominator from
+        // the already-loaded run row, and only claims satisfied requirements once terminal
+        // evidence exists, so a mid-run reader is never told a stuck run satisfied anything.
+        let consumed = ExecutionEstimate {
+            cost_microusd: 12_500,
+            tokens: 1_400_000,
+            tool_calls: 31,
+            retrieved_bytes: 640_000,
+            tasks: 9,
+        };
+
+        let active =
+            execution_progress_economics(&consumed, 4, None).expect("project active economics");
+        assert_eq!(active.consumed_cost_microusd, 12_500);
+        assert_eq!(active.consumed_tokens, 1_400_000);
+        assert_eq!(active.consumed_tasks, 9);
+        assert_eq!(active.consumed_tool_calls, 31);
+        assert_eq!(active.consumed_retrieved_bytes, 640_000);
+        assert_eq!(active.requirements_total, 4);
+        assert_eq!(active.requirements_satisfied, None);
+
+        let evidence = ExecutionTerminalEvidence {
+            cause: crate::state::ExecutionTerminalCause::Completion { limit_stop: None },
+            satisfied_requirement_count: 3,
+            requirement_count: 4,
+        };
+        let terminal = execution_progress_economics(&consumed, 4, Some(&evidence))
+            .expect("project terminal economics");
+        assert_eq!(terminal.requirements_satisfied, Some(3));
+        assert_eq!(terminal.requirements_total, 4);
+        assert_eq!(
+            terminal.consumed_cost_microusd, active.consumed_cost_microusd,
+            "terminal evaluation must not restate spend"
+        );
+    }
 
     #[test]
     fn execution_progress_phase_exhaustively_maps_aggregate_wait_and_pause_states_offline() {

@@ -13,6 +13,7 @@ use super::{
     rows::*,
     run::active_run_capacity_request,
     sql::*,
+    task::attempt_heartbeat_staleness_window,
     trigger::{ExecutionTriggerKind, NewExecutionTrigger, create_trigger_with_dispatch_in_conn},
 };
 
@@ -293,6 +294,17 @@ impl ExecutionRepository {
             .ok_or_else(|| Error::InvalidRepositoryInput {
                 message: "active attempt deadline is not representable".to_string(),
             })?;
+        // The watchdog is armed at the first staleness observation rather than the deadline, so a
+        // wedged attempt is caught one staleness window after it stops committing durable steps
+        // instead of after its whole authorized window. `min` is load-bearing: the deadline stays
+        // the hard backstop and the watchdog can never be armed beyond it.
+        let watchdog_due_at = deadline.min(
+            now.checked_add_signed(attempt_heartbeat_staleness_window(config)?)
+                .ok_or_else(|| Error::InvalidRepositoryInput {
+                    message: "active attempt heartbeat observation is not representable"
+                        .to_string(),
+                })?,
+        );
         let retry_after = now
             .checked_add_signed(Duration::seconds(
                 i64::try_from(config.trigger_reconciliation_cadence_seconds).map_err(|_| {
@@ -426,7 +438,7 @@ impl ExecutionRepository {
                     compensation_attempt_generation: None,
                     schedule_incarnation: None,
                     occurrence_sequence: None,
-                    due_at: deadline,
+                    due_at: watchdog_due_at,
                     payload: json!({}),
                 },
             )

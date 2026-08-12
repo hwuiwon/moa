@@ -155,6 +155,15 @@ fn execution_progress(run_uid: Uuid) -> moa_core::events::ExecutionProgress {
             retrieved_bytes: Some(7_000),
             deadline_at: Some(now + chrono::Duration::hours(2)),
         },
+        economics: Some(moa_core::events::ExecutionProgressEconomics {
+            consumed_cost_microusd: 30,
+            consumed_tokens: 300,
+            consumed_tasks: 3,
+            consumed_tool_calls: 4,
+            consumed_retrieved_bytes: 3_000,
+            requirements_total: 3,
+            requirements_satisfied: None,
+        }),
         total: 8,
         completed: 2,
         failed: 1,
@@ -190,6 +199,15 @@ fn session_progress_projects_exact_persisted_active_execution_values() {
             retrieved_bytes: Some(4_000),
             deadline_at: None,
         },
+        economics: Some(moa_core::events::ExecutionProgressEconomics {
+            consumed_cost_microusd: 60,
+            consumed_tokens: 600,
+            consumed_tasks: 12,
+            consumed_tool_calls: 8,
+            consumed_retrieved_bytes: 6_000,
+            requirements_total: 3,
+            requirements_satisfied: None,
+        }),
         total: 13,
         completed: 8,
         failed: 3,
@@ -271,6 +289,12 @@ fn execution_progress_requires_cadence_and_changed_exact_public_projection() {
         Some(moa_core::events::ExecutionBlockerAudience::External);
     let mut remaining_budget_changed = baseline.clone();
     remaining_budget_changed.remaining_budget.tasks = Some(5);
+    let mut economics_changed = baseline.clone();
+    economics_changed
+        .economics
+        .as_mut()
+        .expect("baseline reports economics")
+        .consumed_cost_microusd += 1;
     let mut total_changed = baseline.clone();
     total_changed.total += 1;
     let mut completed_changed = baseline.clone();
@@ -292,6 +316,7 @@ fn execution_progress_requires_cadence_and_changed_exact_public_projection() {
         ("parked_tasks", parked_tasks_changed),
         ("blocker_audience", blocker_audience_changed),
         ("remaining_budget", remaining_budget_changed),
+        ("economics", economics_changed),
         ("total", total_changed),
         ("completed", completed_changed),
         ("failed", failed_changed),

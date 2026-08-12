@@ -10,6 +10,7 @@ use validation::activation_bounds::{
     validate_completion_activation_bounds, validate_plan_activation_bound,
 };
 use validation::schema_references::{validate_declared_reference_paths, validate_schemas};
+use validation::wait_feasibility::validate_declared_wait_feasibility;
 use validation::{
     append_artifact_reports, append_error, validate_amendment_reference_narrowing,
     validate_authorization, validate_catalog, validate_goal_plan_links, validate_plan_references,
@@ -229,6 +230,14 @@ pub fn compile(request: CompileExecutionRequest) -> CompileExecutionOutcome {
         "approved_budget.deadline_at",
         &mut report,
     );
+    validate_declared_wait_feasibility(
+        &request.plan,
+        None,
+        request.approved_budget.deadline_at,
+        request.now,
+        "approved_budget.deadline_at",
+        &mut report,
+    );
 
     let estimate = estimate_plan(
         &request.goal,
@@ -365,6 +374,14 @@ pub fn validate_amendment(request: ValidateAmendmentRequest) -> AmendmentValidat
         request.remaining_budget.deadline_at,
         request.now,
         &request.config,
+        "remaining_budget.deadline_at",
+        &mut report,
+    );
+    validate_declared_wait_feasibility(
+        &definition,
+        Some(&request.projection),
+        request.remaining_budget.deadline_at,
+        request.now,
         "remaining_budget.deadline_at",
         &mut report,
     );

@@ -88,8 +88,82 @@ pub struct TaskAttemptRecord {
     pub task: ExecutionTaskRecord,
 }
 
-/// Result of recording durable progress for one active attempt.
+/// Liveness of one active attempt, observed from its persisted deadline and progress.
+///
+/// The two failure classes are deliberately distinct. `DeadlineExceeded` means the attempt
+/// consumed its whole authorized window; `Stalled` means the attempt is still inside that
+/// window but has not committed a durable step within the configured heartbeat interval, so a
+/// wedged model call or tool no longer has to burn the full window before it is observable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActiveAttemptLiveness {
+    /// The attempt is inside its deadline and reported durable progress recently.
+    Live,
+    /// The attempt is inside its deadline but has not reported progress within the window.
+    Stalled,
+    /// The attempt reached the absolute deadline frozen by admission.
+    DeadlineExceeded,
+}
+
+impl ActiveAttemptLiveness {
+    /// Reports whether this observation must terminate the attempt.
+    #[must_use]
+    pub const fn is_expired(self) -> bool {
+        matches!(self, Self::Stalled | Self::DeadlineExceeded)
+    }
+
+    /// Stable label for durable messages and telemetry.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Stalled => "stalled",
+            Self::DeadlineExceeded => "deadline_exceeded",
+        }
+    }
+}
+
+/// Returns the configured heartbeat staleness window as a chrono duration.
+///
+/// Shared by watchdog arming, watchdog deferral, and liveness classification so all three
+/// derive the same window from one configured value.
+pub fn attempt_heartbeat_staleness_window(config: &ExecutionConfig) -> Result<chrono::TimeDelta> {
+    i64::try_from(config.attempt_heartbeat_staleness_seconds)
+        .ok()
+        .and_then(chrono::TimeDelta::try_seconds)
+        .ok_or_else(|| Error::InvalidRepositoryInput {
+            message: "attempt heartbeat staleness window exceeds chrono duration".to_string(),
+        })
+}
+
+/// Classifies one active attempt from its admission deadline and last durable progress.
+///
+/// The deadline is evaluated first so the pre-existing absolute-deadline behaviour is
+/// unchanged; heartbeat staleness only ever classifies an attempt that is still inside its
+/// deadline. A staleness window is only meaningful when it is shorter than the attempt
+/// timeout, which [`moa_config::ExecutionConfig::validate`] enforces.
+#[must_use]
+pub fn classify_active_attempt_liveness(
+    config: &ExecutionConfig,
+    attempt_deadline_at: DateTime<Utc>,
+    last_progress_at: DateTime<Utc>,
+    observed_at: DateTime<Utc>,
+) -> ActiveAttemptLiveness {
+    if attempt_deadline_at <= observed_at {
+        return ActiveAttemptLiveness::DeadlineExceeded;
+    }
+    let Ok(staleness) = attempt_heartbeat_staleness_window(config) else {
+        // An unrepresentable window can never elapse, so the deadline stays the only authority.
+        return ActiveAttemptLiveness::Live;
+    };
+    match last_progress_at.checked_add_signed(staleness) {
+        Some(stale_at) if stale_at <= observed_at => ActiveAttemptLiveness::Stalled,
+        Some(_) => ActiveAttemptLiveness::Live,
+        None => ActiveAttemptLiveness::Live,
+    }
+}
+
+/// Result of recording durable progress for one active attempt.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum TaskAttemptProgressOutcome {
     /// The exact active attempt advanced its progress timestamp.
     Applied,
@@ -5154,12 +5228,14 @@ impl ExecutionRepository {
 #[cfg(test)]
 mod tests {
     use super::{
-        TaskAttemptCheckpointKind, TaskAttemptFence, UnstartedTaskAttemptDisposition,
-        append_agent_resume_input, external_start_checkpoint_payload_is_provisional,
+        ActiveAttemptLiveness, TaskAttemptCheckpointKind, TaskAttemptFence,
+        UnstartedTaskAttemptDisposition, append_agent_resume_input,
+        classify_active_attempt_liveness, external_start_checkpoint_payload_is_provisional,
         paused_task_attempt_release_history_matches, task_release_receipt_is_verified_absence,
         unstarted_task_attempt_history_matches,
     };
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
+    use moa_config::ExecutionConfig;
     use moa_core::types::context::ContextMessage;
     use moa_core::types::{
         identifiers::{ExecutionRunScopeId, ExecutionTaskScopeId, TenantId},
@@ -5414,5 +5490,66 @@ mod tests {
         assert!(task_release_receipt_is_verified_absence(&receipt));
         receipt.writer_epoch = Some(1);
         assert!(!task_release_receipt_is_verified_absence(&receipt));
+    }
+
+    #[test]
+    fn attempt_liveness_separates_a_stall_from_a_slow_but_progressing_attempt_offline() {
+        // Pins: an attempt that keeps committing durable steps stays live for its whole
+        // authorized window, a wedged attempt inside that window is classified stalled well
+        // before the deadline, and the absolute deadline still outranks the heartbeat window.
+        let config = ExecutionConfig {
+            attempt_heartbeat_staleness_seconds: 60,
+            active_attempt_timeout_seconds: 600,
+            ..ExecutionConfig::default()
+        };
+        let started_at = Utc::now();
+        let deadline = started_at + Duration::seconds(600);
+
+        // Nine minutes in, having reported progress thirty seconds ago.
+        let observed_at = started_at + Duration::seconds(540);
+        assert_eq!(
+            classify_active_attempt_liveness(
+                &config,
+                deadline,
+                observed_at - Duration::seconds(30),
+                observed_at,
+            ),
+            ActiveAttemptLiveness::Live
+        );
+
+        // Same instant, but the attempt has committed nothing since it started.
+        assert_eq!(
+            classify_active_attempt_liveness(&config, deadline, started_at, observed_at),
+            ActiveAttemptLiveness::Stalled
+        );
+
+        // The stall is visible nine minutes before the deadline would have exposed it.
+        assert_eq!(
+            classify_active_attempt_liveness(
+                &config,
+                deadline,
+                started_at,
+                started_at + Duration::seconds(60),
+            ),
+            ActiveAttemptLiveness::Stalled
+        );
+        assert_eq!(
+            classify_active_attempt_liveness(
+                &config,
+                deadline,
+                started_at,
+                started_at + Duration::seconds(59),
+            ),
+            ActiveAttemptLiveness::Live
+        );
+
+        // A progressing attempt that reaches its deadline is deadline-exceeded, never stalled.
+        assert_eq!(
+            classify_active_attempt_liveness(&config, deadline, deadline, deadline),
+            ActiveAttemptLiveness::DeadlineExceeded
+        );
+        assert!(!ActiveAttemptLiveness::Live.is_expired());
+        assert!(ActiveAttemptLiveness::Stalled.is_expired());
+        assert!(ActiveAttemptLiveness::DeadlineExceeded.is_expired());
     }
 }

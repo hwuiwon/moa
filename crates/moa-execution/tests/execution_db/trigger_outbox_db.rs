@@ -3166,6 +3166,7 @@ fn execution_capacity_config() -> ExecutionConfig {
         maximum_activation_steps: 128,
         dispatch_batch_size: 32,
         active_attempt_timeout_seconds: 10 * 60,
+        attempt_heartbeat_staleness_seconds: 2 * 60,
         max_tenant_active_runs: 100,
         max_fleet_active_runs: 1_000,
         max_tenant_active_tasks: 256,

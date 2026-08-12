@@ -27,6 +27,9 @@ pub struct ExecutionConfig {
     pub dispatch_batch_size: usize,
     /// Maximum duration of one active task attempt, in seconds.
     pub active_attempt_timeout_seconds: u64,
+    /// Interval without durable attempt progress after which an active attempt is stalled,
+    /// in seconds.
+    pub attempt_heartbeat_staleness_seconds: u64,
     /// Maximum non-parked execution runs admitted for one tenant.
     pub max_tenant_active_runs: u32,
     /// Maximum non-parked execution runs admitted across the fleet.
@@ -91,6 +94,7 @@ impl Default for ExecutionConfig {
             maximum_activation_steps: 128,
             dispatch_batch_size: DEFAULT_MAX_IN_FLIGHT_TASKS,
             active_attempt_timeout_seconds: 10 * 60,
+            attempt_heartbeat_staleness_seconds: 2 * 60,
             max_tenant_active_runs: 100,
             max_fleet_active_runs: 1_000,
             max_tenant_active_tasks: 256,
@@ -151,6 +155,10 @@ impl ExecutionConfig {
             (
                 "execution.active_attempt_timeout_seconds",
                 self.active_attempt_timeout_seconds,
+            ),
+            (
+                "execution.attempt_heartbeat_staleness_seconds",
+                self.attempt_heartbeat_staleness_seconds,
             ),
             (
                 "execution.max_tenant_active_runs",
@@ -253,6 +261,12 @@ impl ExecutionConfig {
                     .to_string(),
             ));
         }
+        if self.attempt_heartbeat_staleness_seconds >= self.active_attempt_timeout_seconds {
+            return Err(MoaError::ConfigError(
+                "execution.attempt_heartbeat_staleness_seconds must be less than execution.active_attempt_timeout_seconds because a staleness window at or beyond the attempt deadline can never classify a stall before the deadline does"
+                    .to_string(),
+            ));
+        }
         if self.trigger_reconciliation_cadence_seconds > self.active_attempt_timeout_seconds {
             return Err(MoaError::ConfigError(
                 "execution.trigger_reconciliation_cadence_seconds must not exceed execution.active_attempt_timeout_seconds"
@@ -337,6 +351,7 @@ mod tests {
                 maximum_activation_steps: 128,
                 dispatch_batch_size: DEFAULT_MAX_IN_FLIGHT_TASKS,
                 active_attempt_timeout_seconds: 10 * 60,
+                attempt_heartbeat_staleness_seconds: 2 * 60,
                 max_tenant_active_runs: 100,
                 max_fleet_active_runs: 1_000,
                 max_tenant_active_tasks: 256,
@@ -402,6 +417,27 @@ mod tests {
         let mut timeout = ExecutionConfig::default();
         timeout.active_attempt_timeout_seconds = timeout.maximum_horizon_seconds + 1;
         assert!(timeout.validate().is_err());
+
+        let zero_heartbeat = ExecutionConfig {
+            attempt_heartbeat_staleness_seconds: 0,
+            ..ExecutionConfig::default()
+        };
+        assert!(zero_heartbeat.validate().is_err());
+
+        let unreachable_heartbeat = ExecutionConfig {
+            attempt_heartbeat_staleness_seconds: ExecutionConfig::default()
+                .active_attempt_timeout_seconds,
+            ..ExecutionConfig::default()
+        };
+        assert!(
+            unreachable_heartbeat
+                .validate()
+                .expect_err("a staleness window at the attempt deadline can never fire first")
+                .to_string()
+                .contains(
+                    "attempt_heartbeat_staleness_seconds must be less than execution.active_attempt_timeout_seconds"
+                )
+        );
 
         let mut reconciliation = ExecutionConfig::default();
         reconciliation.trigger_reconciliation_cadence_seconds =

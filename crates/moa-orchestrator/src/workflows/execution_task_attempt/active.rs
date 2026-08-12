@@ -341,6 +341,62 @@ pub(super) async fn execute_task_attempt(
     }
 }
 
+/// Durable step boundary at which an active attempt reports progress.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AttemptHeartbeat {
+    /// One model turn returned, so the following tool dispatch starts its own stall window.
+    ModelTurn,
+    /// One governed tool invocation returned, so sandbox release and continuation persistence
+    /// start their own stall window.
+    ToolCall,
+}
+
+impl AttemptHeartbeat {
+    /// Deterministic journal step name for this boundary.
+    const fn observation_step(self) -> &'static str {
+        match self {
+            Self::ModelTurn => "task_attempt_model_turn_progress_at",
+            Self::ToolCall => "task_attempt_tool_call_progress_at",
+        }
+    }
+
+    /// Deterministic journal step name for the persisted heartbeat.
+    const fn write_step(self) -> &'static str {
+        match self {
+            Self::ModelTurn => "record_task_attempt_model_turn_progress",
+            Self::ToolCall => "record_task_attempt_tool_call_progress",
+        }
+    }
+}
+
+/// Advances the active attempt's durable progress clock at one completed step boundary.
+///
+/// Only an attempt that currently owns active capacity is heartbeated; the repository call is
+/// fenced on the exact dispatch and rejects a parked, superseded, or already-settled attempt,
+/// so a waiting task can never appear to make progress. The observation timestamp is journaled
+/// through `durable_utc_now` so replay reuses the recorded instant instead of a fresh clock
+/// read, and the repository write itself is monotonic.
+async fn record_attempt_heartbeat(
+    workflow: &ExecutionTaskAttemptImpl,
+    ctx: &WorkflowContext<'_>,
+    request: &ExecutionTaskAttemptRequest,
+    boundary: AttemptHeartbeat,
+) -> Result<(), HandlerError> {
+    let observed_at = durable_utc_now(ctx, boundary.observation_step()).await?;
+    let repository = workflow.repository.clone();
+    let fence = task_attempt_fence(request);
+    ctx.run(|| async move {
+        repository
+            .record_task_attempt_progress(fence, observed_at)
+            .await
+            .map(Json::from)
+            .map_err(crate::workflows::errors::execution_error_to_handler_error)
+    })
+    .name(boundary.write_step())
+    .await?;
+    Ok(())
+}
+
 async fn persist_external_start_checkpoint(
     workflow: &ExecutionTaskAttemptImpl,
     ctx: &WorkflowContext<'_>,
@@ -504,6 +560,7 @@ async fn execute_direct_capability(
         workflow.channel_adapters.as_ref(),
     )
     .await?;
+    record_attempt_heartbeat(workflow, ctx, request, AttemptHeartbeat::ToolCall).await?;
     usage.tool_calls = usage.tool_calls.saturating_add(1);
     classify_capability_outcome(capability, governed, usage)
 }
@@ -1064,6 +1121,7 @@ async fn execute_agent_turn(
         .call()
         .await?
         .into_inner();
+        record_attempt_heartbeat(workflow, ctx, request, AttemptHeartbeat::ModelTurn).await?;
         usage.tokens = usage
             .tokens
             .saturating_add(response.usage.total_input_tokens() as u64)
@@ -1239,6 +1297,7 @@ async fn execute_agent_turn(
         workflow.channel_adapters.as_ref(),
     )
     .await?;
+    record_attempt_heartbeat(workflow, ctx, request, AttemptHeartbeat::ToolCall).await?;
     usage.tool_calls = usage.tool_calls.saturating_add(1);
     match governed {
         GovernedInvocationOutcome::Completed(result)

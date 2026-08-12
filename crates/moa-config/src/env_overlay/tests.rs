@@ -570,6 +570,7 @@ fn from_iter_applies_every_execution_resource_override() {
         ("MOA_EXECUTION_MAXIMUM_ACTIVATION_STEPS", "192"),
         ("MOA_EXECUTION_DISPATCH_BATCH_SIZE", "48"),
         ("MOA_EXECUTION_ACTIVE_ATTEMPT_TIMEOUT_SECONDS", "900"),
+        ("MOA_EXECUTION_ATTEMPT_HEARTBEAT_STALENESS_SECONDS", "180"),
         ("MOA_EXECUTION_MAX_TENANT_ACTIVE_RUNS", "120"),
         ("MOA_EXECUTION_MAX_FLEET_ACTIVE_RUNS", "1200"),
         ("MOA_EXECUTION_MAX_TENANT_ACTIVE_TASKS", "384"),
@@ -611,6 +612,7 @@ fn from_iter_applies_every_execution_resource_override() {
     assert_eq!(config.execution.maximum_activation_steps, 192);
     assert_eq!(config.execution.dispatch_batch_size, 48);
     assert_eq!(config.execution.active_attempt_timeout_seconds, 900);
+    assert_eq!(config.execution.attempt_heartbeat_staleness_seconds, 180);
     assert_eq!(config.execution.max_tenant_active_runs, 120);
     assert_eq!(config.execution.max_fleet_active_runs, 1_200);
     assert_eq!(config.execution.max_tenant_active_tasks, 384);
@@ -650,6 +652,7 @@ fn from_iter_rejects_invalid_values_for_every_execution_override() {
         "MOA_EXECUTION_MAXIMUM_ACTIVATION_STEPS",
         "MOA_EXECUTION_DISPATCH_BATCH_SIZE",
         "MOA_EXECUTION_ACTIVE_ATTEMPT_TIMEOUT_SECONDS",
+        "MOA_EXECUTION_ATTEMPT_HEARTBEAT_STALENESS_SECONDS",
         "MOA_EXECUTION_MAX_TENANT_ACTIVE_RUNS",
         "MOA_EXECUTION_MAX_FLEET_ACTIVE_RUNS",
         "MOA_EXECUTION_MAX_TENANT_ACTIVE_TASKS",
@@ -712,6 +715,7 @@ fn execution_long_horizon_overlay_rejects_zero_and_inconsistent_limits() {
         "MOA_EXECUTION_MAXIMUM_ACTIVATION_STEPS",
         "MOA_EXECUTION_DISPATCH_BATCH_SIZE",
         "MOA_EXECUTION_ACTIVE_ATTEMPT_TIMEOUT_SECONDS",
+        "MOA_EXECUTION_ATTEMPT_HEARTBEAT_STALENESS_SECONDS",
         "MOA_EXECUTION_MAX_TENANT_ACTIVE_RUNS",
         "MOA_EXECUTION_MAX_FLEET_ACTIVE_RUNS",
         "MOA_EXECUTION_MAX_TENANT_ACTIVE_TASKS",

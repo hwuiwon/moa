@@ -86,6 +86,36 @@ pub struct ExecutionRemainingBudget {
     pub deadline_at: Option<DateTime<Utc>>,
 }
 
+/// Cumulative spend paired with declared goal advancement for one execution run.
+///
+/// `remaining_budget` alone cannot separate a run that is spending and advancing from
+/// one that is spending and stuck: it is `None` on every uncapped dimension, and a
+/// reader without the approved limit cannot recover consumption from it. Reporting the
+/// consumed side next to the requirement denominator makes cost-per-advance readable
+/// from a single progress event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionProgressEconomics {
+    /// Cumulative reconciled billed cost in integer micro-US-dollars.
+    pub consumed_cost_microusd: u64,
+    /// Cumulative reconciled model tokens.
+    pub consumed_tokens: u64,
+    /// Cumulative reconciled terminal logical tasks.
+    pub consumed_tasks: u64,
+    /// Cumulative reconciled governed tool or capability calls.
+    pub consumed_tool_calls: u64,
+    /// Cumulative reconciled bytes retrieved from external or memory sources.
+    pub consumed_retrieved_bytes: u64,
+    /// Number of requirements declared by the run's immutable goal contract.
+    pub requirements_total: u64,
+    /// Requirements evidenced as satisfied, present only once terminal evaluation has run.
+    ///
+    /// Requirement satisfaction is a whole-plan predicate over per-node terminal state, so
+    /// it is durable only in terminal evidence. Mid-run, the advancement denominator is
+    /// `requirements_total` against the event's own logical-task counts.
+    pub requirements_satisfied: Option<u64>,
+}
+
 /// Compact aggregate progress for one detached execution run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -118,6 +148,12 @@ pub struct ExecutionProgress {
     pub blocker_audience: Option<ExecutionBlockerAudience>,
     /// Budget remaining after cumulative consumption and live reservations.
     pub remaining_budget: ExecutionRemainingBudget,
+    /// Cumulative spend paired with the declared goal-requirement denominator.
+    ///
+    /// Absent on progress events persisted before progress-per-cost was reported; a
+    /// reader must treat `None` as unreported rather than as zero spend.
+    #[serde(default)]
+    pub economics: Option<ExecutionProgressEconomics>,
     /// Number of materialized logical tasks.
     pub total: u64,
     /// Number of successfully completed logical tasks.
@@ -1873,6 +1909,77 @@ mod tests {
     }
 
     #[test]
+    fn execution_progress_reports_spend_against_requirements_and_still_decodes_historical_rows() {
+        // Pins: one progress event carries consumed spend next to the goal-requirement
+        // denominator, so a reader separates "spending and advancing" from "spending and
+        // stuck" without joining another event; and progress rows persisted before that
+        // field existed still decode, as `None`, with no cutover of the session event log.
+        let progress = ExecutionProgress {
+            run_uid: Uuid::from_u128(43),
+            originating_user_sequence_num: 11,
+            plan_revision: 1,
+            status: "running".to_string(),
+            phase: ExecutionProgressPhase::Running,
+            waiting_since: None,
+            next_wake_at: None,
+            last_progress_at: Utc::now(),
+            external_job_uid: None,
+            ready_tasks: 2,
+            active_tasks: 1,
+            parked_tasks: 0,
+            blocker_audience: None,
+            remaining_budget: ExecutionRemainingBudget {
+                cost_microusd: None,
+                tokens: None,
+                tasks: None,
+                tool_calls: None,
+                retrieved_bytes: None,
+                deadline_at: None,
+            },
+            economics: Some(ExecutionProgressEconomics {
+                consumed_cost_microusd: 7_500,
+                consumed_tokens: 900_000,
+                consumed_tasks: 6,
+                consumed_tool_calls: 14,
+                consumed_retrieved_bytes: 40_000,
+                requirements_total: 5,
+                requirements_satisfied: None,
+            }),
+            total: 12,
+            completed: 6,
+            failed: 0,
+            cancelled: 0,
+        };
+
+        // Spend is readable even though every remaining-budget dimension is uncapped, which
+        // is exactly the case where `remaining_budget` alone reports nothing.
+        let encoded = serde_json::to_value(&progress).expect("serialize execution progress");
+        assert_eq!(encoded["economics"]["consumed_cost_microusd"], 7_500);
+        assert_eq!(encoded["economics"]["requirements_total"], 5);
+        assert_eq!(encoded["remaining_budget"]["cost_microusd"], Value::Null);
+
+        let mut historical = encoded.clone();
+        historical
+            .as_object_mut()
+            .expect("progress object")
+            .remove("economics")
+            .expect("economics field present");
+        let decoded = serde_json::from_value::<ExecutionProgress>(historical)
+            .expect("historical progress row without economics must decode");
+        assert_eq!(decoded.economics, None);
+        assert_eq!(decoded.completed, progress.completed);
+
+        // The strict contract is otherwise unchanged: genuinely unknown fields still fail.
+        let mut unknown = encoded;
+        unknown
+            .as_object_mut()
+            .expect("progress object")
+            .insert("progress_per_dollar".to_string(), Value::from(1));
+        serde_json::from_value::<ExecutionProgress>(unknown)
+            .expect_err("unknown progress fields must still be rejected");
+    }
+
+    #[test]
     fn execution_run_delivery_events_round_trip_with_exact_processing_effects() {
         // Pins: compact execution delivery remains typed across session-event replay.
         let run_uid = Uuid::from_u128(41);
@@ -1910,6 +2017,15 @@ mod tests {
                         retrieved_bytes: Some(8_000),
                         deadline_at: None,
                     },
+                    economics: Some(ExecutionProgressEconomics {
+                        consumed_cost_microusd: 20,
+                        consumed_tokens: 200,
+                        consumed_tasks: 3,
+                        consumed_tool_calls: 6,
+                        consumed_retrieved_bytes: 2_000,
+                        requirements_total: 3,
+                        requirements_satisfied: None,
+                    }),
                     total: 4,
                     completed: 2,
                     failed: 1,
