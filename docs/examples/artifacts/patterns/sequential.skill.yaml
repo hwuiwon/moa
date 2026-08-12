@@ -39,7 +39,7 @@ definition:
             kind: after
             delay_seconds: 86400
           on_expiry:
-            kind: fail_run
+            kind: fail_task
         input_schema:
           type: object
           properties:

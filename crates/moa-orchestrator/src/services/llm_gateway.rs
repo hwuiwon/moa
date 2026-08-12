@@ -329,6 +329,15 @@ pub(crate) enum LLMCompletionAction {
     ExecutionRouting { attempt: usize },
     /// One initial durable-plan generation or repair attempt.
     InitialPlanning { attempt: usize },
+    /// One plan-amendment generation or repair attempt for a parked run revision.
+    ExecutionAmendment {
+        /// Run whose plan is being amended.
+        run_uid: Uuid,
+        /// Active plan revision the amendment fences.
+        plan_revision: u64,
+        /// Sequential attempt within the same planning slice.
+        attempt: usize,
+    },
     /// The single root-turn input guardrail evaluation.
     RootInputGuardrail,
     /// One root model-loop turn.
@@ -348,6 +357,11 @@ impl LLMCompletionAction {
         match self {
             Self::ExecutionRouting { attempt } => format!("execution-routing:{attempt}"),
             Self::InitialPlanning { attempt } => format!("initial-planning:{attempt}"),
+            Self::ExecutionAmendment {
+                run_uid,
+                plan_revision,
+                attempt,
+            } => format!("execution-amendment:{run_uid}:{plan_revision}:{attempt}"),
             Self::RootInputGuardrail => "root-input-guardrail".to_string(),
             Self::RootModel { turn } => format!("root-model:{turn}"),
             Self::RootOutputGuardrail { turn } => format!("root-output-guardrail:{turn}"),

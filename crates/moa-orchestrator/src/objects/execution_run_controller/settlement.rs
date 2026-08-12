@@ -43,12 +43,27 @@ pub(super) fn continuation_checkpoint(
     run: &ExecutionRunRecord,
 ) -> ExecutionRunActivationCheckpoint {
     ExecutionRunActivationCheckpoint {
-        status: ExecutionRunStatus::Running,
+        status: continuation_status(run.pending_terminal.is_some()),
         activation_state: ExecutionActivationState::Queued,
         next_wake_at: run.next_wake_at,
         waiting_since: run.waiting_since,
         ready_task_count: run.ready_task_count,
         active_task_count: run.active_task_count,
+    }
+}
+
+/// Chooses the run phase a bounded continuation must preserve rather than overwrite.
+///
+/// A fenced terminal intent means the only remaining work is its compensation drain, and
+/// `trigger_is_current` requires `compensating` for that run's compensation watchdog to stay
+/// current; overwriting the phase silently disarms the watchdog for the in-flight attempt.
+/// Without a terminal intent a continuation means forward scheduler work remains, which is
+/// `running` for every non-terminal phase.
+pub(super) fn continuation_status(has_pending_terminal: bool) -> ExecutionRunStatus {
+    if has_pending_terminal {
+        ExecutionRunStatus::Compensating
+    } else {
+        ExecutionRunStatus::Running
     }
 }
 

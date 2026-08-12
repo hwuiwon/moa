@@ -814,7 +814,7 @@ fn bulk_candidate(
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                     delay_seconds: 86_400,
                 },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
             input_schema: json!({"type": "object", "additionalProperties": false}),
             output_schema: report_schema.clone(),

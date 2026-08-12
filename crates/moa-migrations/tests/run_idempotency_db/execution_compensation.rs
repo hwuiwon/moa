@@ -147,7 +147,7 @@ async fn seed_execution_run(target: &PgPool) -> TestResult<SeededExecutionRun> {
             "output_schema": {},
             "input_wait_policy": {
                 "expiry": {"kind": "after", "delay_seconds": 1},
-                "on_expiry": {"kind": "fail_run"}
+                "on_expiry": {"kind": "fail_task"}
             },
             "nodes": [{
                 "id": "output",

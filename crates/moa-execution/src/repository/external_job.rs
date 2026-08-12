@@ -992,7 +992,7 @@ async fn replace_external_reconcile_trigger_in_conn(
          FROM moa.execution_trigger WHERE tenant_id=$1 AND run_uid=$2 \
            AND task_id IS NOT DISTINCT FROM $3 \
            AND compensation_id IS NOT DISTINCT FROM $4 \
-           AND trigger_kind='external_reconcile' AND state IN ('pending','dispatching') \
+           AND trigger_kind='external_reconcile' AND state = 'pending' \
          FOR UPDATE",
     )
     .bind(job.tenant_id.0)

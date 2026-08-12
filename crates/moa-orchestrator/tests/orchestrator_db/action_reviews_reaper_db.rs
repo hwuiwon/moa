@@ -910,7 +910,7 @@ async fn insert_execution_task(pool: &PgPool, tenant_id: TenantId) -> ExecutionT
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::At {
                     at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
                 },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
             input_schema: serde_json::json!({ "type": "object" }),
             output_schema: serde_json::json!({ "type": "object" }),

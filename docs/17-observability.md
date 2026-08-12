@@ -102,13 +102,19 @@ bounded Restate activation state, compact session events, and trace attributes.
 Pending and every waiting phase are storage-only; only admitted attempts may
 own active capacity or hands.
 
-Fleet health uses bounded labels only. `moa_execution_runs{phase}` separates
-active, input/review/signal/timer/external, pause, and compensation phases.
-Oldest-ready age, overdue deadlines, trigger/outbox lag and dead letters,
-oldest active-attempt/external-job age, admission utilization, tenant maximum
-share, durable reconciliation and retention last-success ages, parked tasks retaining
-hands, and old Restate deployment age/replica-hours carry no tenant, run, task,
-deployment, or provider account identifier. IDs belong in traces and Postgres drilldown.
+Fleet health uses bounded labels only, and every exported series backs an alert:
+oldest-ready age, overdue deadlines, trigger/outbox lag and dead letters, oldest
+active-attempt age, admission utilization by resource and fleet/tenant-peak scope,
+durable reconciliation and retention last-success ages, and parked tasks retaining
+hands. None carry a tenant, run, task, deployment, or provider account identifier.
+IDs belong in traces and Postgres drilldown.
+
+A metric that no alert consumes is not exported. Per-phase run census, tenant
+maximum share, oldest external-job age, and old Restate deployment age/replica-hours
+were removed rather than left as series nothing reads.
+`k8s/scripts/validate-observability.sh` enforces the invariant directly: every
+`pub fn record_*` in `runtime_metrics.rs` must have a caller outside that file and
+outside `tests/`, so a recorder can never again be declared without being wired.
 
 Reconciliation and retention expose separate durable health receipts. Trigger/outbox
 repair drives `moa_execution_maintenance_*`; terminal-evidence retention drives

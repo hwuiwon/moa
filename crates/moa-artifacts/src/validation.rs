@@ -4,7 +4,7 @@ mod connectors;
 mod execution_plan;
 mod json;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use moa_core::canonical_json::canonical_json_bytes;
 use moa_core::types::guardrails::GuardrailMode;
@@ -934,9 +934,9 @@ fn validate_execution_plan_at(
     allow_absolute_temporal_targets: bool,
     report: &mut ValidationReport,
 ) {
-    execution_plan::validate_temporal_target(
-        &format!("{root}.input_wait_policy.expiry"),
-        &definition.input_wait_policy.expiry,
+    execution_plan::validate_input_wait_policy(
+        &format!("{root}.input_wait_policy"),
+        &definition.input_wait_policy,
         allow_absolute_temporal_targets,
         report,
     );
@@ -972,6 +972,134 @@ fn validate_execution_plan_at(
 
     validate_execution_dag(root, &definition.nodes, &node_ids, report);
     validate_terminal_output(root, &definition.nodes, report);
+    validate_condition_scope(root, &definition.nodes, report);
+}
+
+/// Confines conditional nodes to effectful leaves whose output nothing reads.
+///
+/// A node whose `when` evaluates false is committed as `skipped` with a JSON `null`
+/// aggregate output. Nothing may read that value, and no requirement may be served
+/// exclusively by conditional nodes, because every branch evaluating false would leave
+/// the requirement with no node eligible to satisfy it.
+fn validate_condition_scope(root: &str, nodes: &[ExecutionNode], report: &mut ValidationReport) {
+    let conditional_ids = nodes
+        .iter()
+        .filter(|node| node.when.is_some())
+        .map(|node| node.id.as_str())
+        .collect::<HashSet<_>>();
+    if conditional_ids.is_empty() {
+        return;
+    }
+
+    for (index, node) in nodes.iter().enumerate() {
+        let node_root = format!("{root}.nodes[{index}]");
+        validate_no_conditional_reference(
+            &format!("{node_root}.input"),
+            &node.input,
+            &conditional_ids,
+            report,
+        );
+        match &node.operation {
+            ExecutionOperation::Map { items, .. } | ExecutionOperation::Reduce { items, .. } => {
+                validate_no_conditional_reference(
+                    &format!("{node_root}.operation.items"),
+                    items,
+                    &conditional_ids,
+                    report,
+                );
+            }
+            ExecutionOperation::Output { value } => validate_no_conditional_reference(
+                &format!("{node_root}.operation.value"),
+                value,
+                &conditional_ids,
+                report,
+            ),
+            ExecutionOperation::WaitUntil { result, .. } => validate_no_conditional_reference(
+                &format!("{node_root}.operation.result"),
+                result,
+                &conditional_ids,
+                report,
+            ),
+            ExecutionOperation::Capability { .. }
+            | ExecutionOperation::Agent { .. }
+            | ExecutionOperation::Review { .. }
+            | ExecutionOperation::WaitSignal { .. } => {}
+        }
+    }
+
+    let mut unconditional_requirements = HashSet::new();
+    let mut conditional_requirements = BTreeSet::new();
+    for node in nodes {
+        for requirement_id in &node.requirement_ids {
+            if node.when.is_some() {
+                conditional_requirements.insert(requirement_id.as_str());
+            } else {
+                unconditional_requirements.insert(requirement_id.as_str());
+            }
+        }
+    }
+    for requirement_id in conditional_requirements {
+        if !unconditional_requirements.contains(requirement_id) {
+            report.push_error(
+                format!("{root}.nodes"),
+                format!(
+                    "every node serving requirement `{requirement_id}` is conditional, so all \
+                     branches evaluating false would leave it with no eligible node"
+                ),
+            );
+        }
+    }
+}
+
+/// Rejects any `$ref` whose source node declares a condition.
+fn validate_no_conditional_reference(
+    path: &str,
+    value: &Value,
+    conditional_ids: &HashSet<&str>,
+    report: &mut ValidationReport,
+) {
+    match value {
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                validate_no_conditional_reference(
+                    &format!("{path}[{index}]"),
+                    value,
+                    conditional_ids,
+                    report,
+                );
+            }
+        }
+        Value::Object(object) => {
+            if object.len() == 1
+                && let Some(reference) = object.get("$ref").and_then(Value::as_str)
+            {
+                if execution_reference_node(reference)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|node_id| conditional_ids.contains(node_id))
+                {
+                    report.push_error(
+                        path,
+                        "a conditional node's output cannot be read; it is null when the \
+                         condition is false",
+                    );
+                }
+                return;
+            }
+            if object.keys().any(|key| key.starts_with('$')) {
+                return;
+            }
+            for (key, value) in object {
+                validate_no_conditional_reference(
+                    &format!("{path}.{key}"),
+                    value,
+                    conditional_ids,
+                    report,
+                );
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
 }
 
 fn validate_execution_node(
@@ -1006,6 +1134,10 @@ fn validate_execution_node(
         }
     }
 
+    // A false condition commits a skipped node with a JSON `null` aggregate output, so a
+    // conditional node is an effectful leaf: it may be depended on for ordering, but its
+    // output is unreadable and it cannot be the plan's terminal output. See
+    // `validate_condition_scope` for the plan-wide half of the same contract.
     if let Some(condition) = &node.when {
         let reference = match condition {
             ExecutionCondition::Exists { reference }
@@ -1017,6 +1149,12 @@ fn validate_execution_node(
             node,
             report,
         );
+        if matches!(node.operation, ExecutionOperation::Output { .. }) {
+            report.push_error(
+                format!("{root}.when"),
+                "the terminal output node must not be conditional",
+            );
+        }
     }
 
     let map_input_scope = matches!(node.operation, ExecutionOperation::Map { .. });

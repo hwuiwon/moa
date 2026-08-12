@@ -22,7 +22,7 @@ use serde_json::Value;
 pub const EXECUTION_PLANNER_PROMPT_VERSION: &str = "execution-planner-v7";
 /// Fixed maximum collected planner output tokens.
 pub const EXECUTION_PLANNER_MAX_OUTPUT_TOKENS: usize = 32_768;
-const EXECUTION_PLANNER_PROMPT: &str = include_str!("../prompts/execution_planner.txt");
+const EXECUTION_PLANNER_PROMPT: &str = include_str!("../prompts/execution_planner.md");
 
 /// Immutable inputs for initial plan generation or exact template instantiation.
 #[derive(Clone, Debug)]

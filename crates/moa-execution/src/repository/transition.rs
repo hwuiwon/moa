@@ -309,56 +309,6 @@ impl ExecutionRepository {
         Ok(TransitionOutcome::RunApplied(updated))
     }
 
-    /// Atomically settles one due storage-only wait under its run, task, and wait-entry fences.
-    pub async fn settle_wait(
-        &self,
-        scope: ExecutionScope,
-        run_uid: Uuid,
-        expected_task_generation: u64,
-        expected_waiting_since: DateTime<Utc>,
-        settlement: WaitSettlement,
-        settled_at: DateTime<Utc>,
-    ) -> Result<TransitionOutcome> {
-        let task_id = match &settlement {
-            WaitSettlement::TimerElapsed { task_id, .. }
-            | WaitSettlement::WaitExpired { task_id, .. } => *task_id,
-        };
-        let mut conn = scope.begin(&self.pool).await?;
-        let Some(run_row) = sqlx::query(LOAD_RUN_FOR_UPDATE_SQL)
-            .bind(run_uid)
-            .fetch_optional(conn.as_mut())
-            .await
-            .map_err(sqlx_error)?
-        else {
-            conn.commit().await.map_err(storage_error)?;
-            return Ok(TransitionOutcome::NotFound);
-        };
-        let run = run_from_row(&run_row)?;
-        let Some(task_row) = sqlx::query(LOAD_TASK_FOR_UPDATE_SQL)
-            .bind(run_uid)
-            .bind(task_id.as_uuid())
-            .fetch_optional(conn.as_mut())
-            .await
-            .map_err(sqlx_error)?
-        else {
-            conn.commit().await.map_err(storage_error)?;
-            return Ok(TransitionOutcome::NotFound);
-        };
-        let task = super::rows::task_from_row(&task_row)?;
-        let outcome = settle_wait_locked_in_conn(
-            &mut conn,
-            &run,
-            &task,
-            expected_task_generation,
-            expected_waiting_since,
-            settlement,
-            settled_at,
-        )
-        .await?;
-        conn.commit().await.map_err(storage_error)?;
-        Ok(outcome)
-    }
-
     /// Delivers and settles one exact due task wait, activating only a non-paused run.
     pub async fn fire_wait_trigger(
         &self,
@@ -684,7 +634,7 @@ pub(super) async fn refresh_run_after_wait_settlement_in_conn(
         ), next_trigger AS (
             SELECT (
                 SELECT due_at FROM moa.execution_trigger
-                WHERE run_uid = $1 AND state IN ('pending', 'dispatching')
+                WHERE run_uid = $1 AND state = 'pending'
                 ORDER BY due_at, trigger_uid LIMIT 1
             ) AS due_at
         ), remaining_wait AS (
@@ -873,11 +823,6 @@ fn wait_settlement_outcome(
                     "storage wait expired with fail_task policy".to_string(),
                     usage,
                 )),
-                ExecutionWaitExpiryAction::FailRun => Ok(failed_task_outcome(
-                    ExecutionFailureClass::Terminal,
-                    "storage wait expired with fail_run policy".to_string(),
-                    usage,
-                )),
             }
         }
     }
@@ -943,7 +888,7 @@ async fn enqueue_pause_cancellations(
           AND trigger.attempt_generation=task.attempt_generation \
           AND trigger.controller_generation=$2 \
           AND trigger.trigger_kind='task_watchdog' \
-          AND trigger.state IN ('pending','dispatching') \
+          AND trigger.state = 'pending' \
          WHERE task.run_uid=$1 AND task.active_dispatch_uid IS NOT NULL \
            AND task.attempt_state IN ('dispatching','running') \
          ORDER BY task.task_id LIMIT $3",
@@ -990,7 +935,7 @@ async fn enqueue_pause_cancellations(
           AND trigger.compensation_attempt_generation=compensation.attempt_generation \
           AND trigger.controller_generation=$2 \
           AND trigger.trigger_kind='compensation_watchdog' \
-          AND trigger.state IN ('pending','dispatching') \
+          AND trigger.state = 'pending' \
          WHERE compensation.run_uid=$1 AND compensation.active_dispatch_uid IS NOT NULL \
            AND compensation.attempt_state IN ('dispatching','running') \
          ORDER BY compensation.compensation_id LIMIT $3",

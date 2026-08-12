@@ -130,7 +130,7 @@ async fn exact_wait_expiry_fails_once_and_late_delivery_cannot_revive_run_servic
                     signal_name: "never-arrives".to_string(),
                     wait_policy: ExecutionWaitPolicy {
                         expiry: after_logical_days(2),
-                        on_expiry: ExecutionWaitExpiryAction::FailRun,
+                        on_expiry: ExecutionWaitExpiryAction::FailTask,
                     },
                 },
                 json!({"type": "object"}),

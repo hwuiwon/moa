@@ -1091,6 +1091,8 @@ impl SandboxStorageProvider for DaytonaHandProvider {
                 confirmed_disposition: Some(disposition),
                 storage: present.then_some(storage),
                 checkpoint_publication,
+                // Reconciliation only proves the bytes; it never releases
+                // compute. See `SandboxStorageProvider::reconcile_workspace_operation`.
                 post_commit_state: Some(WorkspacePostCommitState::AttachmentRetained),
             });
         }

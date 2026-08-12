@@ -68,6 +68,7 @@ async fn amendment_projection_counts_twenty_five_hundred_prior_failures_in_one_b
                     reduce_cursor: None,
                     source_exhausted: page_index == 2,
                     terminal_output: None,
+                    condition_skipped: false,
                     tasks: page.to_vec(),
                 },
             )

@@ -6,7 +6,6 @@ mod yielding;
 
 use std::{collections::HashMap, sync::Arc};
 
-use chrono::Utc;
 use moa_config::SessionLimitsConfig;
 use moa_core::{traits::ChannelAdapter, types::channel::Channel};
 use moa_execution::repository::{
@@ -25,11 +24,15 @@ use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
-use crate::workflows::errors::execution_error_to_handler_error;
-use crate::{
-    restate_identity::replay_safe_request,
-    services::execution_dispatcher::{DispatchExecutionsRequest, ExecutionDispatcherClient},
+use crate::workflows::attempt_slice::{
+    COMPENSATION_ATTEMPT_DISPATCH_KICK, durable_utc_now_shared, kick_dispatcher,
+    require_dispatch_key,
 };
+use crate::workflows::durable_utc_now;
+use crate::workflows::errors::execution_error_to_handler_error;
+
+/// Operator-visible rejection for a delivery aimed at another dispatch identity.
+const DISPATCH_KEY_MISMATCH: &str = "compensation attempt dispatch mismatch";
 
 /// Durable surface for one strict reverse-order compensation slice.
 #[restate_sdk::workflow]
@@ -89,8 +92,8 @@ impl ExecutionCompensationAttempt for ExecutionCompensationAttemptImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ExecutionCompensationAttempt", "run");
         let request = request.into_inner();
-        require_dispatch_key(ctx.key(), request.dispatch_uid)?;
-        let now = journal_now(&ctx, "compensation_attempt_started_at").await?;
+        require_dispatch_key(ctx.key(), request.dispatch_uid, DISPATCH_KEY_MISMATCH)?;
+        let now = durable_utc_now(&ctx, "compensation_attempt_started_at").await?;
         let repository = self.repository.clone();
         let fence = compensation_attempt_fence(&request);
         let started = ctx
@@ -110,7 +113,7 @@ impl ExecutionCompensationAttempt for ExecutionCompensationAttemptImpl {
         };
         validate_authoritative_attempt(&request, &started)?;
         let exit = active::execute_compensation_attempt(self, &ctx, &request, &started).await?;
-        let progress_at = journal_now(&ctx, "compensation_attempt_progress_at").await?;
+        let progress_at = durable_utc_now(&ctx, "compensation_attempt_progress_at").await?;
         let repository = self.repository.clone();
         let fence = compensation_attempt_fence(&request);
         ctx.run(|| async move {
@@ -127,7 +130,13 @@ impl ExecutionCompensationAttempt for ExecutionCompensationAttemptImpl {
         .name("record_compensation_attempt_progress")
         .await?;
         settle_active_exit(self, &ctx, &request, &started, exit).await?;
-        kick_dispatcher(&ctx, request.dispatch_uid, "run").await
+        kick_dispatcher(
+            &ctx,
+            COMPENSATION_ATTEMPT_DISPATCH_KICK,
+            request.dispatch_uid,
+            "run",
+        )
+        .await
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -141,7 +150,12 @@ impl ExecutionCompensationAttempt for ExecutionCompensationAttemptImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ExecutionCompensationAttempt", "watchdog");
         let request = request.into_inner();
-        require_dispatch_key(ctx.key(), request.dispatch_uid)?;
+        require_dispatch_key(ctx.key(), request.dispatch_uid, DISPATCH_KEY_MISMATCH)?;
+        if !watchdog_is_due(self, &ctx, &request).await? {
+            return Ok(Json::from(ExecutionAttemptWatchdogResponse {
+                outcome: ExecutionAttemptWatchdogResponseOutcome::RetryDelivery,
+            }));
+        }
         let release_request = ExecutionCompensationAttemptCancelRequest {
             cancellation_dispatch_uid: Uuid::new_v5(
                 &request.dispatch_uid,
@@ -182,7 +196,11 @@ impl ExecutionCompensationAttempt for ExecutionCompensationAttemptImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ExecutionCompensationAttempt", "cancel");
         let request = request.into_inner();
-        require_dispatch_key(ctx.key(), request.active_dispatch_uid)?;
+        require_dispatch_key(
+            ctx.key(),
+            request.active_dispatch_uid,
+            DISPATCH_KEY_MISMATCH,
+        )?;
         let outcome = yielding::cancel_compensation_attempt(self, &ctx, request.clone()).await?;
         if outcome == ExecutionAttemptWatchdogResponseOutcome::RetryDelivery {
             return Err(anyhow::anyhow!(
@@ -190,7 +208,13 @@ impl ExecutionCompensationAttempt for ExecutionCompensationAttemptImpl {
             )
             .into());
         }
-        kick_dispatcher_shared(&ctx, request.cancellation_dispatch_uid, "cancel").await
+        kick_dispatcher(
+            &ctx,
+            COMPENSATION_ATTEMPT_DISPATCH_KICK,
+            request.cancellation_dispatch_uid,
+            "cancel",
+        )
+        .await
     }
 }
 
@@ -220,7 +244,7 @@ async fn settle_active_exit(
             else {
                 return Ok(());
             };
-            let now = journal_now(ctx, "compensation_attempt_settled_at").await?;
+            let now = durable_utc_now(ctx, "compensation_attempt_settled_at").await?;
             let repository = workflow.repository.clone();
             ctx.run(|| async move {
                 repository
@@ -245,6 +269,40 @@ async fn settle_active_exit(
             external::yield_external_job(workflow, ctx, request, external_job_uid).await
         }
     }
+}
+
+/// Reports whether this watchdog delivery has actually reached its attempt deadline.
+///
+/// `prepare_watchdog_trigger` already gates delivery on the Postgres clock one layer
+/// up, so this is defense in depth: it keeps the compensation path symmetric with the
+/// task watchdog, which re-checks its own due time before releasing anything, instead
+/// of depending solely on a guard in another module. An absent trigger means delivery
+/// already settled it, so the caller proceeds exactly as before. The compensation
+/// watchdog trigger is created with `due_at` equal to the attempt deadline, so this is
+/// the same comparison the task path makes against `attempt_deadline_at`.
+async fn watchdog_is_due(
+    workflow: &ExecutionCompensationAttemptImpl,
+    ctx: &SharedWorkflowContext<'_>,
+    request: &ExecutionCompensationAttemptWatchdogRequest,
+) -> Result<bool, HandlerError> {
+    let repository = workflow.repository.clone();
+    let scope = ExecutionScope::Tenant {
+        tenant_id: request.tenant_id,
+    };
+    let watchdog_trigger_uid = request.watchdog_trigger_uid;
+    let due_at = ctx
+        .run(|| async move {
+            repository
+                .load_trigger(scope, watchdog_trigger_uid)
+                .await
+                .map(|trigger| Json::from(trigger.map(|trigger| trigger.due_at)))
+                .map_err(execution_error_to_handler_error)
+        })
+        .name("load_compensation_watchdog_trigger")
+        .await?
+        .into_inner();
+    let observed_at = durable_utc_now_shared(ctx, "compensation_watchdog_observed_at").await?;
+    Ok(!due_at.is_some_and(|due_at| due_at > observed_at))
 }
 
 fn compensation_attempt_fence(
@@ -286,69 +344,5 @@ fn validate_authoritative_attempt(
             TerminalError::new("compensation dispatch drifted from authoritative state").into(),
         );
     }
-    Ok(())
-}
-
-async fn journal_now(
-    ctx: &WorkflowContext<'_>,
-    name: &'static str,
-) -> Result<chrono::DateTime<Utc>, HandlerError> {
-    Ok(ctx
-        .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
-        .name(name)
-        .await?
-        .into_inner())
-}
-
-async fn journal_now_shared(
-    ctx: &SharedWorkflowContext<'_>,
-    name: &'static str,
-) -> Result<chrono::DateTime<Utc>, HandlerError> {
-    Ok(ctx
-        .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
-        .name(name)
-        .await?
-        .into_inner())
-}
-
-fn require_dispatch_key(key: &str, dispatch_uid: Uuid) -> Result<(), HandlerError> {
-    if key == dispatch_uid.to_string() {
-        Ok(())
-    } else {
-        Err(TerminalError::new_with_code(404, "compensation attempt dispatch mismatch").into())
-    }
-}
-
-async fn kick_dispatcher(
-    ctx: &WorkflowContext<'_>,
-    dispatch_uid: Uuid,
-    boundary: &'static str,
-) -> Result<(), HandlerError> {
-    let handle = replay_safe_request(
-        ctx.service_client::<ExecutionDispatcherClient>()
-            .dispatch(Json::from(DispatchExecutionsRequest::default()))
-            .idempotency_key(format!(
-                "compensation-attempt-dispatch:{dispatch_uid}:{boundary}"
-            )),
-    )
-    .send();
-    let _invocation_id = handle.invocation_id().await?;
-    Ok(())
-}
-
-async fn kick_dispatcher_shared(
-    ctx: &SharedWorkflowContext<'_>,
-    dispatch_uid: Uuid,
-    boundary: &'static str,
-) -> Result<(), HandlerError> {
-    let handle = replay_safe_request(
-        ctx.service_client::<ExecutionDispatcherClient>()
-            .dispatch(Json::from(DispatchExecutionsRequest::default()))
-            .idempotency_key(format!(
-                "compensation-attempt-dispatch:{dispatch_uid}:{boundary}"
-            )),
-    )
-    .send();
-    let _invocation_id = handle.invocation_id().await?;
     Ok(())
 }

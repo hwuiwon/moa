@@ -499,7 +499,6 @@ fn sse_event_name(event: &Event) -> &'static str {
             moa_core::events::ExecutionProgressPhase::WaitingReview => "execution_review_wait",
             moa_core::events::ExecutionProgressPhase::WaitingSignal => "execution_signal_wait",
             moa_core::events::ExecutionProgressPhase::WaitingTimer => "execution_timer_wait",
-            moa_core::events::ExecutionProgressPhase::StaleWork => "execution_stale",
             moa_core::events::ExecutionProgressPhase::Running => "execution_progress",
         },
         Event::ExecutionInputRequired(_) => "execution_input_request",

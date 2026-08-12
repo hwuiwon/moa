@@ -1,6 +1,5 @@
 //! Bounded incremental scheduler projection and materialization contracts.
 
-use chrono::DateTime;
 use moa_artifacts::execution_plan::{
     CapabilityReference, ExecutionNode, ExecutionOperation, ExecutionReducer, MapTask,
 };
@@ -12,7 +11,7 @@ use moa_execution::repository::ready::{
 };
 use moa_execution::repository::task::{TaskAttemptFence, TaskAttemptStartOutcome};
 use moa_execution::repository::{TransitionOutcome, TransitionRejection};
-use moa_execution::state::{WaitSettlement, completed_task_outcome};
+use moa_execution::state::completed_task_outcome;
 use serde_json::Value;
 
 use super::support::*;
@@ -181,6 +180,7 @@ async fn ten_thousand_tasks_materialize_in_cursor_fenced_pages_db() -> TestResul
                     reduce_cursor: None,
                     source_exhausted: false,
                     terminal_output: None,
+                    condition_skipped: false,
                     tasks,
                 },
             )
@@ -259,6 +259,7 @@ async fn ten_thousand_map_outputs_aggregate_in_sixteen_row_crash_replay_pages_db
                     reduce_cursor: None,
                     source_exhausted: page == 9,
                     terminal_output: None,
+                    condition_skipped: false,
                     tasks,
                 },
             )
@@ -418,6 +419,7 @@ async fn seventeenth_near_sixty_four_kib_map_output_fails_before_unbounded_aggre
                     reduce_cursor: None,
                     source_exhausted: true,
                     terminal_output: None,
+                    condition_skipped: false,
                     tasks,
                 },
             )
@@ -549,6 +551,7 @@ async fn twenty_five_hundred_reduce_batches_persist_exact_round_cursor_db() -> T
             }),
             source_exhausted: batch_cursor + page_count == 2_501,
             terminal_output: None,
+            condition_skipped: false,
             tasks,
         };
         let ReadyMaterializationOutcome::Applied { next_cursor, .. } = repository
@@ -587,6 +590,7 @@ async fn twenty_five_hundred_reduce_batches_persist_exact_round_cursor_db() -> T
         }),
         source_exhausted: true,
         terminal_output: None,
+        condition_skipped: false,
         tasks: vec![logical_task(run.run_uid, "reduce", "r1:b2500", estimate(1))],
     };
     assert_eq!(
@@ -687,6 +691,7 @@ async fn empty_map_completion_cas_releases_its_dependent_without_repeating_db() 
         reduce_cursor: None,
         source_exhausted: true,
         terminal_output: Some(json!({ "items": [] })),
+        condition_skipped: false,
         tasks: Vec::new(),
     };
     assert!(matches!(
@@ -761,6 +766,7 @@ async fn terminal_partial_map_page_cannot_complete_node_before_source_exhaustion
                     reduce_cursor: None,
                     source_exhausted: false,
                     terminal_output: None,
+                    condition_skipped: false,
                     tasks: vec![first],
                 },
             )
@@ -794,6 +800,7 @@ async fn terminal_partial_map_page_cannot_complete_node_before_source_exhaustion
                     reduce_cursor: None,
                     source_exhausted: true,
                     terminal_output: None,
+                    condition_skipped: false,
                     tasks: vec![second],
                 },
             )
@@ -903,6 +910,7 @@ async fn failed_root_cancels_join_without_rolling_back_later_sibling_settlement_
                             reduce_cursor: None,
                             source_exhausted: true,
                             terminal_output: None,
+                            condition_skipped: false,
                             tasks: vec![task.clone()],
                         },
                     )
@@ -1044,6 +1052,7 @@ async fn external_signal_settlement_preserves_newer_task_progress_db() -> TestRe
                 reduce_cursor: None,
                 source_exhausted: true,
                 terminal_output: None,
+                condition_skipped: false,
                 tasks: vec![signal],
             },
         )
@@ -1147,6 +1156,7 @@ async fn relative_timer_is_parked_once_and_stale_delivery_is_fenced_db() -> Test
                 reduce_cursor: None,
                 source_exhausted: true,
                 terminal_output: None,
+                condition_skipped: false,
                 tasks: vec![task],
             },
         )
@@ -1204,6 +1214,7 @@ async fn relative_timer_is_parked_once_and_stale_delivery_is_fenced_db() -> Test
                     reduce_cursor: None,
                     source_exhausted: true,
                     terminal_output: None,
+                    condition_skipped: false,
                     tasks: vec![task],
                 },
             )
@@ -1278,101 +1289,5 @@ async fn relative_timer_is_parked_once_and_stale_delivery_is_fenced_db() -> Test
         TransitionOutcome::Rejected(TransitionRejection::InvalidTaskStatus)
     );
     assert!(activation.is_none());
-    Ok(())
-}
-
-#[tokio::test]
-async fn storage_wait_settlement_preserves_newer_database_progress_db() -> TestResult {
-    // Pins: a process-observed settlement may predate progress already committed by Postgres;
-    // settlement preserves that newer task clock while retaining the observation in audit history.
-    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
-    let pool = test_db.store().pool().clone();
-    let repository = ExecutionRepository::new(pool.clone());
-    let tenant_id = TenantId::new();
-    let scope = ExecutionScope::Tenant { tenant_id };
-    let mut candidate = new_run(
-        tenant_id,
-        None,
-        "stale-process-wait-settlement",
-        ExecutionRunStatus::Queued,
-        budget(1),
-    );
-    candidate.plan.definition.nodes = vec![output_node("timer")];
-    let run = create_run(&repository, scope, candidate).await?;
-    repository
-        .initialize_scheduler_state(scope, run.run_uid)
-        .await?;
-
-    let settled_at = moa_test_support::fixtures::pg_now() - Duration::seconds(30);
-    let mut task = logical_task(run.run_uid, "timer", "", estimate(1));
-    task.kind = LogicalTaskKind::WaitUntil {
-        wake: ExecutionTemporalTarget::At {
-            at: settled_at - Duration::seconds(1),
-        },
-        result: json!({ "elapsed": true }),
-    };
-    let ReadyMaterializationOutcome::Applied { tasks, .. } = repository
-        .materialize_ready_page(
-            scope,
-            &ExecutionConfig::default(),
-            ReadyMaterializationRequest {
-                run_uid: run.run_uid,
-                plan_revision: 1,
-                node_id: "timer".to_string(),
-                expected_cursor: 0,
-                reduce_cursor: None,
-                source_exhausted: true,
-                terminal_output: None,
-                tasks: vec![task],
-            },
-        )
-        .await?
-    else {
-        panic!("fresh timer wait must materialize");
-    };
-    let waiting_task = tasks
-        .into_iter()
-        .next()
-        .expect("timer materialization must return exactly one task");
-    let waiting_since = waiting_task
-        .waiting_since
-        .expect("timer materialization must persist its wait anchor");
-    let database_progress_at: DateTime<Utc> = sqlx::query_scalar(
-        "UPDATE moa.execution_task SET last_progress_at=NOW(), updated_at=NOW() \
-         WHERE run_uid=$1 AND task_id=$2 RETURNING last_progress_at",
-    )
-    .bind(run.run_uid)
-    .bind(waiting_task.task_id.as_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert!(
-        database_progress_at > settled_at,
-        "fixture must establish database progress newer than the supplied observation"
-    );
-
-    let outcome = repository
-        .settle_wait(
-            scope,
-            run.run_uid,
-            waiting_task.generation,
-            waiting_since,
-            WaitSettlement::TimerElapsed {
-                task_id: waiting_task.task_id,
-                output: json!({ "elapsed": true }),
-            },
-            settled_at,
-        )
-        .await?;
-    let TransitionOutcome::Applied(settled_task) = outcome else {
-        panic!("due timer settlement must apply: {outcome:?}");
-    };
-    assert!(
-        settled_task.last_progress_at >= database_progress_at,
-        "settlement must not move canonical task progress backward"
-    );
-    assert!(settled_task.generation_history.iter().any(|entry| {
-        entry.get("kind").and_then(Value::as_str) == Some("storage_wait_settlement")
-            && entry.get("settled_at") == Some(&json!(settled_at))
-    }));
     Ok(())
 }

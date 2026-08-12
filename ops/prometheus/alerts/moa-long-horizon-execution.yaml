@@ -1,4 +1,18 @@
 # Long-horizon execution and singleton-maintenance alerts.
+#
+# Every unlabeled scalar guard below is written `absent(metric) or max(metric) > N`.
+# A bare `max(metric) > N` evaluates to *no data* when nothing emits the series, so
+# the alert silently stops guarding instead of firing - which is exactly how the
+# deadline and stuck-attempt guards shipped inert. The two `by (...)` alerts keep the
+# bare form on purpose: `absent()` returns a label-less vector, which would fire an
+# alert whose own description renders empty labels. Their producer is the same handler
+# that emits `moa_execution_maintenance_ready`, so MOAExecutionMaintenanceReconcileStale
+# is their absence guard.
+#
+# Every metric here is recorded unconditionally from the bounded fleet snapshot,
+# including the healthy zero. A gauge written only while work exists would make
+# `absent()` fire on a quiet fleet and would keep its last value forever after a
+# drain; both are treated as producer bugs, not as reasons to weaken these alerts.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -14,7 +28,7 @@ spec:
       interval: 30s
       rules:
         - alert: MOAExecutionOverdueDeadlines
-          expr: max(moa_execution_overdue_deadlines) > 0
+          expr: absent(moa_execution_overdue_deadlines) or max(moa_execution_overdue_deadlines) > 0
           for: 2m
           labels:
             severity: critical
@@ -23,7 +37,7 @@ spec:
             description: "{{ $value }} execution runs are still nonterminal after their absolute deadline. Verify deadline triggers, controller activation, and terminal projection delivery."
 
         - alert: MOAExecutionOldestReadySLO
-          expr: max(moa_execution_oldest_ready_age_seconds) > 120
+          expr: absent(moa_execution_oldest_ready_age_seconds) or max(moa_execution_oldest_ready_age_seconds) > 120
           for: 5m
           labels:
             severity: warning
@@ -32,7 +46,7 @@ spec:
             description: "The oldest ready task has waited {{ $value }} seconds (threshold 120s). Check admission capacity, dispatcher ownership, and outbox delivery."
 
         - alert: MOAExecutionActiveAttemptStuck
-          expr: max(moa_execution_active_attempt_oldest_age_seconds) > 900
+          expr: absent(moa_execution_active_attempt_oldest_age_seconds) or max(moa_execution_active_attempt_oldest_age_seconds) > 900
           for: 5m
           labels:
             severity: critical
@@ -41,7 +55,7 @@ spec:
             description: "The oldest active task attempt is {{ $value }} seconds old (threshold 900s). Verify watchdog delivery and ambiguous-effect reconciliation before replaying work."
 
         - alert: MOAExecutionTriggerLagHigh
-          expr: max(moa_execution_trigger_lag_seconds) > 120
+          expr: absent(moa_execution_trigger_lag_seconds) or max(moa_execution_trigger_lag_seconds) > 120
           for: 5m
           labels:
             severity: warning
@@ -49,17 +63,8 @@ spec:
             summary: Due execution triggers are delayed
             description: "The oldest due undelivered trigger is {{ $value }} seconds late (threshold 120s). Check the maintenance owner, Restate ingress, and trigger claim expiry."
 
-        - alert: MOAExecutionTriggerDeadLetters
-          expr: max(moa_execution_trigger_dead_letters) > 0
-          for: 2m
-          labels:
-            severity: critical
-          annotations:
-            summary: Execution triggers entered dead-letter state
-            description: "{{ $value }} execution triggers require operator repair. Inspect immutable trigger IDs and generation fences before redelivery."
-
         - alert: MOAExecutionOutboxLagHigh
-          expr: max(moa_execution_outbox_lag_seconds) > 120
+          expr: absent(moa_execution_outbox_lag_seconds) or max(moa_execution_outbox_lag_seconds) > 120
           for: 5m
           labels:
             severity: warning
@@ -68,7 +73,7 @@ spec:
             description: "The oldest undispatched execution outbox row is {{ $value }} seconds old (threshold 120s). Check claim ownership and Restate ingress availability."
 
         - alert: MOAExecutionOutboxDeadLetters
-          expr: max(moa_execution_outbox_dead_letters) > 0
+          expr: absent(moa_execution_outbox_dead_letters) or max(moa_execution_outbox_dead_letters) > 0
           for: 2m
           labels:
             severity: critical
@@ -113,7 +118,7 @@ spec:
             description: "Execution {{ $labels.resource }} utilization at {{ $labels.scope }} scope is {{ $value | humanizePercentage }} (threshold 90%). Confirm fair queueing before increasing the durable limit."
 
         - alert: MOAExecutionExternalJobStuck
-          expr: max(moa_execution_external_job_oldest_age_seconds) > 86400
+          expr: absent(moa_execution_external_job_oldest_age_seconds) or max(moa_execution_external_job_oldest_age_seconds) > 86400
           for: 30m
           labels:
             severity: warning

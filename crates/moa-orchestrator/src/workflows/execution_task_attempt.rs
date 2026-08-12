@@ -7,7 +7,7 @@ mod yielding;
 
 use std::{collections::HashMap, sync::Arc};
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use moa_artifacts::execution_plan::{ExecutionFailureClass, ExecutionTaskResult};
 use moa_config::{ExecutionConfig, SessionLimitsConfig};
 use moa_core::{traits::ChannelAdapter, types::channel::Channel};
@@ -31,10 +31,14 @@ use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
 
-use crate::{
-    services::execution_dispatcher::{DispatchExecutionsRequest, ExecutionDispatcherClient},
-    workflows::errors::execution_error_to_handler_error,
+use crate::workflows::{
+    attempt_slice::{TASK_ATTEMPT_DISPATCH_KICK, kick_dispatcher, require_dispatch_key},
+    durable_utc_now,
+    errors::execution_error_to_handler_error,
 };
+
+/// Operator-visible rejection for a delivery aimed at another dispatch identity.
+const DISPATCH_KEY_MISMATCH: &str = "execution attempt dispatch mismatch";
 
 /// Returns the catalog-owned model-visible name for one governed capability.
 pub(crate) fn capability_tool_name(
@@ -112,7 +116,7 @@ impl ExecutionTaskAttempt for ExecutionTaskAttemptImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ExecutionTaskAttempt", "run");
         let request = request.into_inner();
-        require_dispatch_key(ctx.key(), request.dispatch_uid)?;
+        require_dispatch_key(ctx.key(), request.dispatch_uid, DISPATCH_KEY_MISMATCH)?;
         let fence = task_attempt_fence(&request);
         let repository = self.repository.clone();
         let started = ctx
@@ -172,7 +176,7 @@ impl ExecutionTaskAttempt for ExecutionTaskAttemptImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ExecutionTaskAttempt", "watchdog");
         let request = request.into_inner();
-        require_dispatch_key(ctx.key(), request.dispatch_uid)?;
+        require_dispatch_key(ctx.key(), request.dispatch_uid, DISPATCH_KEY_MISMATCH)?;
         let watchdog = watchdog::handle_task_attempt_watchdog(self, &ctx, request).await?;
         // TriggerDelivery awaits this handler, so its owning dispatcher observes every outbox row
         // committed by watchdog settlement before selecting the next durable timing head.
@@ -192,10 +196,14 @@ impl ExecutionTaskAttempt for ExecutionTaskAttemptImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ExecutionTaskAttempt", "cancel");
         let request = request.into_inner();
-        require_dispatch_key(ctx.key(), request.active_dispatch_uid)?;
+        require_dispatch_key(
+            ctx.key(),
+            request.active_dispatch_uid,
+            DISPATCH_KEY_MISMATCH,
+        )?;
         let dispatch_uid = request.active_dispatch_uid;
         yielding::cancel_task_attempt(self, &ctx, request).await?;
-        kick_dispatcher_shared(&ctx, dispatch_uid, "cancel").await
+        kick_dispatcher(&ctx, TASK_ATTEMPT_DISPATCH_KICK, dispatch_uid, "cancel").await
     }
 }
 
@@ -229,7 +237,7 @@ async fn settle_active_exit(
                 outcome,
             );
             let outcome = exhaust_retry_outcome(started.task.attempt, &started.task.retry, outcome);
-            let settled_at = journal_now(ctx, "task_attempt_settled_at").await?;
+            let settled_at = durable_utc_now(ctx, "task_attempt_settled_at").await?;
             let retry_at = matches!(
                 outcome.result,
                 ExecutionTaskResult::Failed {
@@ -259,8 +267,7 @@ async fn settle_active_exit(
                 return Ok(());
             };
             let release_receipt =
-                yielding::checkpoint_task_hands_workflow(workflow, ctx, request, &releasing)
-                    .await?;
+                yielding::checkpoint_task_hands_workflow(ctx, request, &releasing).await?;
             let Some(release_receipt) = release_receipt else {
                 return Err(TerminalError::new(
                     "normal task outcome omitted its durable hand-release receipt",
@@ -364,56 +371,11 @@ async fn settle_active_exit(
         }
         active::ActiveTaskAttemptExit::OwnershipLost => return Ok(()),
     };
-    // Task workflows run asynchronously from the dispatcher. Wake it immediately after the
-    // transaction commits; it indexes the persisted future head and owns the only delayed wake.
-    kick_dispatcher(ctx, request.dispatch_uid, boundary).await
-}
-
-async fn kick_dispatcher(
-    ctx: &WorkflowContext<'_>,
-    dispatch_uid: uuid::Uuid,
-    boundary: &'static str,
-) -> Result<(), HandlerError> {
-    let handle = crate::restate_identity::replay_safe_request(
-        ctx.service_client::<ExecutionDispatcherClient>()
-            .dispatch(Json::from(DispatchExecutionsRequest::default()))
-            .idempotency_key(format!("task-attempt-dispatch:{dispatch_uid}:{boundary}")),
+    kick_dispatcher(
+        ctx,
+        TASK_ATTEMPT_DISPATCH_KICK,
+        request.dispatch_uid,
+        boundary,
     )
-    .send();
-    let _invocation_id = handle.invocation_id().await?;
-    Ok(())
-}
-
-async fn kick_dispatcher_shared(
-    ctx: &SharedWorkflowContext<'_>,
-    dispatch_uid: uuid::Uuid,
-    boundary: &'static str,
-) -> Result<(), HandlerError> {
-    let handle = crate::restate_identity::replay_safe_request(
-        ctx.service_client::<ExecutionDispatcherClient>()
-            .dispatch(Json::from(DispatchExecutionsRequest::default()))
-            .idempotency_key(format!("task-attempt-dispatch:{dispatch_uid}:{boundary}")),
-    )
-    .send();
-    let _invocation_id = handle.invocation_id().await?;
-    Ok(())
-}
-
-async fn journal_now(
-    ctx: &WorkflowContext<'_>,
-    name: &'static str,
-) -> Result<chrono::DateTime<Utc>, HandlerError> {
-    Ok(ctx
-        .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
-        .name(name)
-        .await?
-        .into_inner())
-}
-
-fn require_dispatch_key(key: &str, dispatch_uid: uuid::Uuid) -> Result<(), HandlerError> {
-    if key == dispatch_uid.to_string() {
-        Ok(())
-    } else {
-        Err(TerminalError::new_with_code(404, "execution attempt dispatch mismatch").into())
-    }
+    .await
 }

@@ -1099,8 +1099,21 @@ async fn completion_gate_missing_citation_service_e2e() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
 async fn completion_gate_missing_deliverable_service_e2e() -> Result<()> {
-    // Pins: useful terminal output cannot hide a skipped required node or missing report pointer.
-    let fixture = replan_fixture(default_script(), FixtureCapabilityOptions::default()).await?;
+    // Pins: every declared completion check passing is not enough to complete a run. The
+    // required node runs and passes, the terminal output validates against both declared
+    // schemas, and the run must still end Partial because the goal's `report` deliverable
+    // has no value at its declared output pointer.
+    let fixture = replan_fixture(
+        replan_script_with_text_agents(
+            &[],
+            &[(
+                "BUILD_PARTIAL_REPORT",
+                serde_json::to_string(&json!({"body": "drafted"}))?,
+            )],
+        )?,
+        FixtureCapabilityOptions::default(),
+    )
+    .await?;
     let test = fixture.isolated().await;
     let started = start_compiled_run(
         &fixture,
@@ -1113,15 +1126,10 @@ async fn completion_gate_missing_deliverable_service_e2e() -> Result<()> {
     .await?;
 
     let terminal = await_execution_terminal(test.client(), &started.run).await?;
-    assert_completion_partial(&terminal, 1, 2, 1);
+    assert_completion_partial(&terminal, 2, 2, 2);
     assert_eq!(
         terminal.output,
         Some(json!({"summary": "useful but incomplete"}))
-    );
-    assert!(
-        terminal
-            .gaps
-            .contains(&"completion check deliverable_report failed".to_string())
     );
     assert!(
         terminal
@@ -1130,11 +1138,12 @@ async fn completion_gate_missing_deliverable_service_e2e() -> Result<()> {
     );
     let evidence = synthesis_evidence(test.client(), &started).await?;
     let check = completion_result(&evidence, "deliverable_report")?;
-    assert!(!check.passed);
-    assert_eq!(
-        check.evidence,
-        json!({"incomplete_node_ids": ["report_builder"]})
+    assert!(
+        check.passed,
+        "the required node completed, so its check must pass and the deliverable must be \
+         the only thing standing between this run and completion"
     );
+    assert_eq!(check.evidence, json!({"incomplete_node_ids": []}));
     assert_execution_eval_case(
         &fixture,
         test.client(),
@@ -1145,9 +1154,6 @@ async fn completion_gate_missing_deliverable_service_e2e() -> Result<()> {
             ExecutionInvariantSpec::MustNotComplete,
             ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Partial],
-            },
-            ExecutionInvariantSpec::CompletionCheckFailed {
-                check_id: "deliverable_report".to_string(),
             },
             ExecutionInvariantSpec::TerminalGapContains {
                 text: "deliverable report is missing".to_string(),
@@ -1163,90 +1169,84 @@ async fn completion_gate_missing_deliverable_service_e2e() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn execution_eval_declared_contradiction_check_prevents_completion_service_e2e() -> Result<()>
-{
-    // Pins: contradiction is enforced only because this goal declares a named conflict verifier;
-    // two useful but opposing source outputs cannot be reported as complete when it is skipped.
-    let fixture = replan_fixture(
-        replan_script_with_text_agents(
-            &[],
-            &[
-                (
-                    "CONTRADICTION_SOURCE_A",
-                    serde_json::to_string(&json!({"position": "raise"}))?,
-                ),
-                (
-                    "CONTRADICTION_SOURCE_B",
-                    serde_json::to_string(&json!({"position": "cut"}))?,
-                ),
-            ],
-        )?,
-        FixtureCapabilityOptions::default(),
-    )
-    .await?;
+async fn declared_contradiction_contract_is_rejected_against_the_service_catalog_service_e2e()
+-> Result<()> {
+    // Pins: this goal declares `conflict_verifier` as a required node while the plan makes it
+    // conditional, so a false condition would skip the very node completion requires. That is
+    // now refused at compile time, against the catalog, authorization envelope, and budget the
+    // running service actually issues — not merely against a hand-built offline fixture.
+    //
+    // This scenario used to assert the runtime behavior instead: the verifier was skipped, the
+    // check counted it as failed, and the run ended Partial while both source outputs survived.
+    // That end state is unreachable without a skip. Every non-output node must be an ancestor
+    // of the output node (`validate_terminal_output`), and any node that ends neither
+    // `completed` nor `skipped` cancels its descendants, so a plan cannot both leave a
+    // required node unpassed and still emit terminal output. Rejecting the contract at compile
+    // time removes the state rather than reporting it late, which is the stronger contract.
+    let fixture = replan_fixture(default_script(), FixtureCapabilityOptions::default()).await?;
     let test = fixture.isolated().await;
-    let started = start_compiled_run(
-        &fixture,
-        &test,
-        "declared-contradiction-check",
-        "compare two sources and explicitly resolve any contradiction",
-        None,
-        |_| Ok(declared_contradiction_contract()),
-    )
-    .await?;
+    let objective = "compare two sources and explicitly resolve any contradiction";
+    let session_id = test.create_session("declared-contradiction-check").await?;
+    let session = test.client().get_session(session_id).await?;
+    let originating_user_sequence_num = test
+        .client()
+        .append_event(
+            session_id,
+            Event::UserMessage {
+                text: objective.to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await?;
+    let planning: ExecutionPlanningContextResponse = test
+        .client()
+        .post_call(
+            "/Execution/planning_context",
+            &ExecutionPlanningContextRequest {
+                tenant_id: session.tenant_id,
+                contact_id: None,
+                session_id,
+                originating_user_sequence_num,
+                deadline_at: chrono::Utc::now() + chrono::TimeDelta::days(1),
+                requested_template: None,
+            },
+        )
+        .await?;
 
-    let terminal = await_execution_terminal(test.client(), &started.run).await?;
-    assert_completion_partial(&terminal, 3, 4, 3);
-    assert_eq!(
-        terminal.output,
-        Some(json!({"summary": "sources disagree; conflict remains unresolved"}))
-    );
+    let (mut goal, plan) = declared_contradiction_contract();
+    goal.objective = objective.to_string();
+    let outcome = compile(CompileExecutionRequest {
+        goal,
+        plan,
+        run_input: run_input_for_objective(objective),
+        catalog: planning.snapshot.catalog.clone(),
+        authorization: planning.snapshot.authorization.clone(),
+        approved_budget: planning.snapshot.budget.clone(),
+        config: ExecutionConfig::default(),
+        now: moa_test_support::fixtures::pg_now(),
+    });
+
     assert!(
-        terminal
-            .gaps
-            .contains(&"completion check declared_conflict_check failed".to_string())
+        outcome.compiled.is_none(),
+        "a plan whose required node can be skipped must not compile"
     );
-    let tasks = list_execution_tasks(test.client(), started.run.clone()).await?;
-    assert_eq!(
-        task_by_node(&tasks.tasks, "source_a")?.status,
-        ExecutionTaskStatus::Completed
+    let issue = outcome
+        .report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "conditional_required_node")
+        .with_context(|| {
+            format!(
+                "expected a conditional_required_node rejection, got {:?}",
+                outcome.report.issues
+            )
+        })?;
+    assert_eq!(issue.path, "plan.nodes[2].when");
+    assert!(
+        issue.message.contains("declared_conflict_check"),
+        "the rejection must name the completion check that made the node required: {}",
+        issue.message
     );
-    assert_eq!(
-        task_by_node(&tasks.tasks, "source_b")?.status,
-        ExecutionTaskStatus::Completed
-    );
-    assert_eq!(
-        tasks
-            .tasks
-            .iter()
-            .filter(|task| task.node_id == "conflict_verifier")
-            .count(),
-        0,
-        "a false condition must not materialize the declared verifier"
-    );
-    assert_execution_eval_case(
-        &fixture,
-        test.client(),
-        &started.run,
-        None,
-        "declared-contradiction-check-prevents-completion",
-        &[
-            ExecutionInvariantSpec::MustNotComplete,
-            ExecutionInvariantSpec::TerminalStatusIn {
-                statuses: vec![ExecutionRunStatus::Partial],
-            },
-            ExecutionInvariantSpec::CompletionCheckFailed {
-                check_id: "declared_conflict_check".to_string(),
-            },
-            ExecutionInvariantSpec::TerminalGapContains {
-                text: "completion check declared_conflict_check failed".to_string(),
-            },
-            ExecutionInvariantSpec::BudgetWithinApproved,
-            ExecutionInvariantSpec::ProgressMatchesTasks,
-            ExecutionInvariantSpec::NoRawTaskOutputEvents,
-        ],
-    )
-    .await?;
     Ok(())
 }
 
@@ -1727,12 +1727,8 @@ where
     })
 }
 
-fn run_input_for_objective(objective: &str) -> Value {
-    if objective == "produce the required report deliverable" {
-        json!({"build_report": false})
-    } else {
-        json!({})
-    }
+fn run_input_for_objective(_objective: &str) -> Value {
+    json!({})
 }
 
 async fn await_waiting_replan(
@@ -2048,7 +2044,7 @@ fn useful_replan_contract(
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                     delay_seconds: 86_400,
                 },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
             input_schema: empty_input_schema(),
             output_schema: output_schema.clone(),
@@ -2306,7 +2302,7 @@ fn map_then_output_plan(spec: MapThenOutputPlan<'_>) -> ExecutionPlanDefinition 
             expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                 delay_seconds: 86_400,
             },
-            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
         },
         input_schema: empty_input_schema(),
         output_schema: output_schema.clone(),
@@ -2375,36 +2371,31 @@ fn missing_deliverable_contract() -> (ExecutionGoalContract, ExecutionPlanDefini
                 output_schema_check("summary_schema", "summary"),
             ],
         },
+        // The deliverable is unsatisfiable by construction rather than by accident: the
+        // plan's terminal `output_schema` is `report_schema()`, which forbids additional
+        // properties, so no terminal output this plan can legally emit carries a value at
+        // the deliverable's `/report` pointer. Every node completes, every check passes,
+        // and the deliverable is the sole reason the run must not report completion.
         ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
             input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                     delay_seconds: 86_400,
                 },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
-            input_schema: json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["build_report"],
-                "properties": {"build_report": {"type": "boolean"}}
-            }),
+            input_schema: empty_input_schema(),
             output_schema: output_schema.clone(),
             nodes: vec![
                 ExecutionNode {
                     id: "report_builder".to_string(),
                     requirement_ids: vec!["report_body".to_string()],
                     depends_on: Vec::new(),
-                    when: Some(moa_artifacts::execution_plan::ExecutionCondition::Equals {
-                        reference: ExecutionReference {
-                            path: "$.input.build_report".to_string(),
-                        },
-                        value: json!(true),
-                    }),
+                    when: None,
                     input: json!({}),
                     output_schema: json!({"type": "object"}),
                     operation: ExecutionOperation::Agent {
-                        instructions: "BUILD_REPORT_ONLY_WHEN_ENABLED".to_string(),
+                        instructions: "BUILD_PARTIAL_REPORT".to_string(),
                         skill_refs: Vec::new(),
                         capability_refs: Vec::new(),
                         max_turns: 1,
@@ -2489,7 +2480,7 @@ fn declared_contradiction_contract() -> (ExecutionGoalContract, ExecutionPlanDef
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                     delay_seconds: 86_400,
                 },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
             input_schema: empty_input_schema(),
             output_schema: report_schema.clone(),
@@ -2598,7 +2589,7 @@ fn injected_content_contract(
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                     delay_seconds: 86_400,
                 },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
             input_schema: empty_input_schema(),
             output_schema: output_schema.clone(),

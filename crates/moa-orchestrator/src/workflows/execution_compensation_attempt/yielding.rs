@@ -23,8 +23,9 @@ use crate::{
     services::tool_executor::{CheckpointAndReleaseExecutionHandsRequest, ToolExecutorClient},
     tool_invocation::governed::GovernedReviewPending,
     workflows::{
+        attempt_slice::durable_utc_now_shared, durable_utc_now,
         errors::execution_error_to_handler_error,
-        execution_compensation_attempt::{ExecutionCompensationAttemptImpl, journal_now},
+        execution_compensation_attempt::ExecutionCompensationAttemptImpl,
     },
 };
 
@@ -46,7 +47,7 @@ pub(super) async fn park_compensation_review(
     else {
         return Ok(());
     };
-    let now = journal_now(ctx, "compensation_review_parked_at").await?;
+    let now = durable_utc_now(ctx, "compensation_review_parked_at").await?;
     let repository = workflow.repository.clone();
     let parked = ctx
         .run(|| async move {
@@ -106,7 +107,7 @@ pub(super) async fn release_compensation_hands_workflow(
     )>,
     HandlerError,
 > {
-    let claimed_at = journal_now(ctx, "compensation_release_claimed_at").await?;
+    let claimed_at = durable_utc_now(ctx, "compensation_release_claimed_at").await?;
     let release_request = release_request(request, intent);
     let repository = workflow.repository.clone();
     let claim_request = release_request.clone();
@@ -205,7 +206,7 @@ pub(super) async fn release_and_settle_compensation_shared(
     request: ExecutionCompensationAttemptCancelRequest,
     settlement: SharedReleaseSettlement,
 ) -> Result<ExecutionAttemptWatchdogResponseOutcome, HandlerError> {
-    let claimed_at = super::journal_now_shared(ctx, "compensation_release_claimed_at").await?;
+    let claimed_at = durable_utc_now_shared(ctx, "compensation_release_claimed_at").await?;
     let repository = workflow.repository.clone();
     let claim_request = request.clone();
     let claim = ctx
@@ -238,7 +239,7 @@ pub(super) async fn release_and_settle_compensation_shared(
     .call()
     .await?
     .into_inner();
-    let settled_at = super::journal_now_shared(ctx, "compensation_cancel_settled_at").await?;
+    let settled_at = durable_utc_now_shared(ctx, "compensation_cancel_settled_at").await?;
     let outcome = match settlement {
         SharedReleaseSettlement::Cancelled => ExecutionCompensationOutcome::Failed {
             message: format!(

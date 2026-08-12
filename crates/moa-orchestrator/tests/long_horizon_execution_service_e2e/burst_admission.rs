@@ -15,7 +15,22 @@ async fn one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_a
     const RUN_COUNT: usize = 1_000;
     const FLEET_CAP: usize = 32;
     const ADMISSION_CONCURRENCY: usize = 8;
-    const BURST_TIMEOUT: Duration = Duration::from_secs(360);
+    // Seconds between admission and the shared absolute wake, and the margin by
+    // which every run must already be parked before that wake arrives.
+    const PRE_WAKE_SECONDS: i64 = 180;
+    const PRE_WAKE_MARGIN_SECONDS: i64 = 30;
+    // Absolute execution deadline handed to each admitted run. It has to outlast
+    // the pre-wake window plus the whole fleet-capped drain, so it is
+    // deliberately far larger than any phase bound below: a run that expires
+    // here is a product deadline defect, not a slow observation.
+    const RUN_DEADLINE: Duration = Duration::from_secs(900);
+    // Bound on any single observation phase. Each phase reports its own
+    // diagnostic well inside the lane's per-case ceiling rather than being
+    // terminated by nextest with no attribution.
+    const PHASE_TIMEOUT: Duration = Duration::from_secs(90);
+    // Total bound on the ~32-wave drain. Bounding the whole drain instead of
+    // each wave keeps the worst case additive rather than multiplicative.
+    const DRAIN_BUDGET: Duration = Duration::from_secs(240);
     let tool_name = "long_horizon_thousand_wake_probe";
     let fixture = execution_fixture_with_tools(
         vec![FixtureCapabilityTool {
@@ -70,7 +85,7 @@ async fn one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_a
     let capability_name = moa_hands::mcp_tool_reference("fixture-capability", tool_name);
     allow_fixture_capability(&fixture, tenant_id, &capability_name, "thousand-wake").await?;
     let test = fixture.isolated().await;
-    let common_wake = Utc::now() + TimeDelta::seconds(180);
+    let common_wake = Utc::now() + TimeDelta::seconds(PRE_WAKE_SECONDS);
     let runs = stream::iter(0..RUN_COUNT)
         .map(|index| {
             let test = &test;
@@ -94,7 +109,7 @@ async fn one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_a
                         capability,
                         output_node(&["burst-capability"], json!({"completed": true})),
                     ],
-                    BURST_TIMEOUT,
+                    RUN_DEADLINE,
                     false,
                 )
                 .await
@@ -107,18 +122,18 @@ async fn one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_a
         .await?;
     assert_eq!(runs.len(), RUN_COUNT);
     let pool = PgPool::connect(&fixture.postgres_url).await?;
-    await_tenant_run_count(&pool, tenant_id, "waiting_timer", RUN_COUNT, BURST_TIMEOUT).await?;
+    await_tenant_run_count(&pool, tenant_id, "waiting_timer", RUN_COUNT, PHASE_TIMEOUT).await?;
     await_capacity_quantity_before(
         &pool,
         tenant_id,
         "parked_runs",
         RUN_COUNT,
-        common_wake - TimeDelta::seconds(30),
+        common_wake - TimeDelta::seconds(PRE_WAKE_MARGIN_SECONDS),
     )
     .await?;
     let admission_margin = common_wake.signed_duration_since(Utc::now());
     assert!(
-        admission_margin > TimeDelta::seconds(30),
+        admission_margin > TimeDelta::seconds(PRE_WAKE_MARGIN_SECONDS),
         "1,000 runs were not fully parked before the shared wake: {admission_margin:?}"
     );
     fixture.otlp_capture()?.clear().await;
@@ -126,7 +141,7 @@ async fn one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_a
     let controller = fixture
         .fixture_capability()
         .context("thousand-wake fixture omitted capability controller")?;
-    controller.wait_for_calls(FLEET_CAP, BURST_TIMEOUT).await?;
+    controller.wait_for_calls(FLEET_CAP, PHASE_TIMEOUT).await?;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(controller.calls().len(), FLEET_CAP);
     let active: i64 = sqlx::query_scalar(
@@ -146,7 +161,7 @@ async fn one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_a
     assert!(invocations.len() <= FLEET_CAP);
     let dispatch_metric = fixture
         .otlp_capture()?
-        .wait_for_metric(BURST_TIMEOUT, |metric| {
+        .wait_for_metric(PHASE_TIMEOUT, |metric| {
             metric.name() == "moa_execution_dispatch_batch_size"
                 && metric.data_points().iter().any(|point| {
                     point.count() > 0
@@ -163,7 +178,7 @@ async fn one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_a
     }));
     let oldest_ready_metric = fixture
         .otlp_capture()?
-        .wait_for_metric(BURST_TIMEOUT, |metric| {
+        .wait_for_metric(PHASE_TIMEOUT, |metric| {
             metric.name() == "moa_execution_oldest_ready_age_seconds"
                 && metric
                     .data_points()
@@ -181,9 +196,16 @@ async fn one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_a
 
     let mut released = 0;
     let mut maximum_oldest_ready_seconds = 0.0_f64;
+    let drain_deadline = Instant::now() + DRAIN_BUDGET;
     while released < RUN_COUNT {
         let next = (released + FLEET_CAP).min(RUN_COUNT);
-        controller.wait_for_calls(next, BURST_TIMEOUT).await?;
+        let remaining = drain_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            bail!(
+                "fleet-capped drain released {released}/{RUN_COUNT} runs within {DRAIN_BUDGET:?}"
+            );
+        }
+        controller.wait_for_calls(next, remaining).await?;
         let wave_active: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(quantity), 0)::BIGINT FROM moa.execution_capacity_reservation \
              WHERE tenant_id = $1 AND resource_dimension = 'active_tasks' AND state <> 'released'",
@@ -207,7 +229,7 @@ async fn one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_a
         maximum_oldest_ready_seconds <= 60.0,
         "oldest ready task exceeded bounded age: {maximum_oldest_ready_seconds}s"
     );
-    await_tenant_run_count(&pool, tenant_id, "completed", RUN_COUNT, BURST_TIMEOUT).await?;
+    await_tenant_run_count(&pool, tenant_id, "completed", RUN_COUNT, PHASE_TIMEOUT).await?;
     let first = status(&test, &runs[0]).await?;
     let last = status(&test, &runs[RUN_COUNT - 1]).await?;
     assert_eq!(first.output, Some(json!({"completed": true})));

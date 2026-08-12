@@ -52,6 +52,7 @@ use crate::{
         contacts::{Contacts, ContactsImpl},
         durable_timeout::{DurableTimeout, DurableTimeoutImpl},
         execution::{Execution, ExecutionImpl},
+        execution_amendment_planner::{ExecutionAmendmentPlanner, ExecutionAmendmentPlannerImpl},
         execution_dispatcher::{
             ExecutionDispatchDrain, ExecutionDispatchDrainImpl, ExecutionDispatchReconciler,
             ExecutionDispatchReconcilerImpl, ExecutionDispatcher, ExecutionDispatcherImpl,
@@ -109,6 +110,7 @@ const CORE_BODY_SERVICE_NAMES: &[&str] = &[
     "ExecutionDispatcher",
     "ExecutionDispatchDrain",
     "ExecutionDispatchReconciler",
+    "ExecutionAmendmentPlanner",
     "DurableTimeout",
     "GraphMemoryMaint",
     "Knowledge",
@@ -147,6 +149,7 @@ const INGRESS_PRIVATE_SERVICE_NAMES: &[&str] = &[
     "ExecutionDispatcher",
     "ExecutionDispatchDrain",
     "ExecutionDispatchReconciler",
+    "ExecutionAmendmentPlanner",
     "DurableTimeout",
 ];
 #[cfg(test)]
@@ -555,6 +558,21 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
         )
         .bind_with_options(
             ExecutionDispatchReconcilerImpl::new(pool.clone(), &config.execution).serve(),
+            high_cost_internal_service_options(),
+        )
+        .bind_with_options(
+            ExecutionAmendmentPlannerImpl::new(
+                pool.clone(),
+                config.execution.clone(),
+                moa_core::types::identifiers::ModelId::new(
+                    config
+                        .models
+                        .auxiliary
+                        .clone()
+                        .unwrap_or_else(|| config.models.main.clone()),
+                ),
+            )
+            .serve(),
             high_cost_internal_service_options(),
         )
         .bind_with_options(
@@ -1041,6 +1059,7 @@ mod tests {
                 "ExecutionDispatcher",
                 "ExecutionDispatchDrain",
                 "ExecutionDispatchReconciler",
+                "ExecutionAmendmentPlanner",
                 "DurableTimeout",
             ]
         );

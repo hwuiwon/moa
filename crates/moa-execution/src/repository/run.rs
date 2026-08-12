@@ -50,6 +50,60 @@ const LOAD_RUN_BY_IDEMPOTENCY_FOR_SESSION_SQL: &str = r#"
       AND session_id = $4
 "#;
 
+/// Recovery request for one crashed controller activation of an exact wake.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResumedControllerRecoveryRequest {
+    /// Exact controller generation claimed by the crashed activation.
+    pub controller_generation: u64,
+    /// Exact wake epoch claimed by the crashed activation.
+    pub wake_epoch: u64,
+    /// Durable checkpoint installed while the replacement activation is enqueued.
+    pub checkpoint: ExecutionRunActivationCheckpoint,
+    /// Structured activation payload carried by the replacement activation.
+    pub continuation_payload: Value,
+    /// Earliest time at which the replacement activation may be dispatched.
+    pub continuation_not_before_at: DateTime<Utc>,
+    /// Consecutive crashed activations tolerated before the run must fail instead.
+    pub maximum_consecutive_failures: u64,
+}
+
+/// Bounded outcome of one resumed-activation recovery.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResumedControllerRecoveryOutcome {
+    /// The wake was acknowledged and exactly one replacement activation enqueued.
+    Recovered {
+        /// Current run after the commit.
+        run: Box<ExecutionRunRecord>,
+        /// Exactly one replacement activation committed with the checkpoint.
+        continuation: Box<ExecutionDispatchRecord>,
+        /// Consecutive crashed activations recorded by this recovery.
+        consecutive_failures: u64,
+    },
+    /// The recovery budget is spent; neither the wake nor the failure count was mutated.
+    BudgetExhausted {
+        /// Consecutive crashed activations that would have been recorded.
+        consecutive_failures: u64,
+    },
+    /// The claimed wake had already been acknowledged.
+    Replayed(Box<ExecutionRunRecord>),
+    /// A newer controller generation owns the run.
+    StaleGeneration {
+        /// Controller generation currently owning the run.
+        current_generation: u64,
+    },
+    /// A newer wake epoch owns the run.
+    StaleWake {
+        /// Wake epoch currently owning the run.
+        current_wake_epoch: u64,
+        /// Last wake epoch acknowledged by compare-and-set.
+        processed_wake_epoch: u64,
+    },
+    /// The run no longer exists.
+    NotFound,
+    /// The run is not in a state that can acknowledge the claimed wake.
+    InvalidState,
+}
+
 /// Atomic run-admission result, including durable idempotency replay and capacity deferral.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RunAdmissionOutcome {
@@ -715,6 +769,144 @@ impl ExecutionRepository {
         Ok(outcome)
     }
 
+    /// Recovers one crashed controller activation under a bounded consecutive-failure budget.
+    ///
+    /// A resumed claim proves that a prior activation of this exact wake never acknowledged it.
+    /// While the budget holds, the wake is acknowledged and exactly one replacement activation is
+    /// enqueued in the same transaction. Once the budget is spent the wake is deliberately left
+    /// unacknowledged and [`ResumedControllerRecoveryOutcome::BudgetExhausted`] is returned, so the
+    /// caller can commit an explicit terminal intent against the same still-current wake instead of
+    /// re-enqueueing a continuation that can only crash again.
+    pub async fn recover_resumed_controller_wake(
+        &self,
+        scope: ExecutionScope,
+        config: &ExecutionConfig,
+        run_uid: Uuid,
+        request: ResumedControllerRecoveryRequest,
+    ) -> Result<ResumedControllerRecoveryOutcome> {
+        validate_activation_checkpoint(&request.checkpoint)?;
+        if !request.continuation_payload.is_object() {
+            return Err(Error::InvalidRepositoryInput {
+                message: "controller continuation payload must be a JSON object".to_string(),
+            });
+        }
+        if request.maximum_consecutive_failures == 0 {
+            return Err(Error::InvalidRepositoryInput {
+                message: "resumed activation recovery budget must be greater than zero".to_string(),
+            });
+        }
+        let mut conn = scope.begin(&self.pool).await?;
+        let tenant_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT tenant_id FROM moa.execution_run WHERE run_uid=$1",
+        )
+        .bind(run_uid)
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(sqlx_error)?;
+        let Some(tenant_id) = tenant_id else {
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(ResumedControllerRecoveryOutcome::NotFound);
+        };
+        prelock_capacity_dimensions_in_tx(
+            conn.as_mut(),
+            config,
+            TenantId(tenant_id),
+            &[
+                ExecutionCapacityDimension::ActiveRuns,
+                ExecutionCapacityDimension::ParkedRuns,
+            ],
+        )
+        .await?;
+        let observed = sqlx::query_scalar::<_, i64>(
+            "SELECT activation_failure_count FROM moa.execution_run WHERE run_uid=$1 FOR UPDATE",
+        )
+        .bind(run_uid)
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(sqlx_error)?;
+        let Some(observed) = observed else {
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(ResumedControllerRecoveryOutcome::NotFound);
+        };
+        let consecutive_failures = to_u64(observed, "activation failure count")?
+            .checked_add(1)
+            .ok_or_else(|| Error::ArithmeticOverflow {
+                context: "controller activation failure count".to_string(),
+            })?;
+        if consecutive_failures > request.maximum_consecutive_failures {
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(ResumedControllerRecoveryOutcome::BudgetExhausted {
+                consecutive_failures,
+            });
+        }
+        let checkpoint = ExecutionRunActivationCheckpoint {
+            activation_state: ExecutionActivationState::Idle,
+            ..request.checkpoint
+        };
+        let completion = complete_controller_wake_in_conn(
+            &mut conn,
+            run_uid,
+            request.controller_generation,
+            request.wake_epoch,
+            checkpoint,
+        )
+        .await?;
+        let outcome = match completion {
+            RunControllerCompletionOutcome::Applied { .. } => {
+                record_activation_failure_count_in_conn(
+                    conn.as_mut(),
+                    run_uid,
+                    consecutive_failures,
+                )
+                .await?;
+                let continuation = enqueue_run_activation_in_conn(
+                    conn.as_mut(),
+                    TenantId(tenant_id),
+                    run_uid,
+                    request.controller_generation,
+                    request.continuation_not_before_at,
+                    request.continuation_payload,
+                )
+                .await?;
+                let row = sqlx::query(LOAD_RUN_SQL)
+                    .bind(run_uid)
+                    .fetch_one(conn.as_mut())
+                    .await
+                    .map_err(sqlx_error)?;
+                ResumedControllerRecoveryOutcome::Recovered {
+                    run: Box::new(run_from_row(&row)?),
+                    continuation: Box::new(continuation),
+                    consecutive_failures,
+                }
+            }
+            RunControllerCompletionOutcome::Replayed(run) => {
+                ResumedControllerRecoveryOutcome::Replayed(run)
+            }
+            RunControllerCompletionOutcome::StaleGeneration { current_generation } => {
+                ResumedControllerRecoveryOutcome::StaleGeneration { current_generation }
+            }
+            RunControllerCompletionOutcome::StaleWake {
+                current_wake_epoch,
+                processed_wake_epoch,
+            } => ResumedControllerRecoveryOutcome::StaleWake {
+                current_wake_epoch,
+                processed_wake_epoch,
+            },
+            RunControllerCompletionOutcome::NotFound => ResumedControllerRecoveryOutcome::NotFound,
+            RunControllerCompletionOutcome::InvalidState => {
+                ResumedControllerRecoveryOutcome::InvalidState
+            }
+            RunControllerCompletionOutcome::CapacitySaturated { dimension } => {
+                conn.rollback().await.map_err(storage_error)?;
+                return Err(Error::CapacitySaturated {
+                    dimension: dimension.as_str(),
+                });
+            }
+        };
+        conn.commit().await.map_err(storage_error)?;
+        Ok(outcome)
+    }
+
     /// Arms or idempotently replaces the exact deadline trigger for a run generation.
     pub async fn arm_run_deadline(
         &self,
@@ -796,7 +988,7 @@ pub(super) async fn arm_run_deadline_in_conn(
         "SELECT trigger_uid, controller_generation \
          FROM moa.execution_trigger \
          WHERE run_uid = $1 AND trigger_kind = 'run_deadline' \
-           AND state IN ('pending', 'dispatching') AND trigger_uid <> $2 \
+           AND state = 'pending' AND trigger_uid <> $2 \
          ORDER BY controller_generation, trigger_uid \
          LIMIT 2 FOR UPDATE",
     )
@@ -992,7 +1184,8 @@ pub async fn complete_controller_wake_in_conn(
     let updated = sqlx::query(
         "UPDATE moa.execution_run SET status = $4, activation_state = $5, \
              next_wake_at = $6, waiting_since = $7, ready_task_count = $8, \
-             active_task_count = $9, processed_wake_epoch = $3, updated_at = NOW() \
+             active_task_count = $9, processed_wake_epoch = $3, \
+             activation_failure_count = 0, updated_at = NOW() \
          WHERE run_uid = $1 AND controller_generation = $2 \
            AND wake_epoch = $3 AND processed_wake_epoch < $3 RETURNING *",
     )
@@ -1015,6 +1208,27 @@ pub async fn complete_controller_wake_in_conn(
         run: Box::new(run_from_row(&updated)?),
         continuation: None,
     })
+}
+
+/// Records consecutive crashed controller activations inside the caller's transaction.
+///
+/// [`complete_controller_wake_in_conn`] resets this counter for every acknowledged wake, so the
+/// resumed-recovery path must restore its incremented value after acknowledging the crashed wake.
+async fn record_activation_failure_count_in_conn(
+    conn: &mut PgConnection,
+    run_uid: Uuid,
+    consecutive_failures: u64,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE moa.execution_run SET activation_failure_count = $2, updated_at = NOW() \
+         WHERE run_uid = $1",
+    )
+    .bind(run_uid)
+    .bind(to_i64(consecutive_failures, "activation failure count")?)
+    .execute(&mut *conn)
+    .await
+    .map_err(sqlx_error)?;
+    Ok(())
 }
 
 fn run_activation_dispatch_uid(run_uid: Uuid, controller_generation: u64, wake_epoch: u64) -> Uuid {

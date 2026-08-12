@@ -569,8 +569,10 @@ impl ExecutionRepository {
                 .extend(replan_stop_gaps(intent.stop_reason, Some(&intent.detail)));
             evaluation.gaps.sort();
             evaluation.gaps.dedup();
+            let typed_failure =
+                load_earliest_typed_task_failure(conn.as_mut(), run.run_uid).await?;
             let terminal_projection =
-                terminal_projection_for_evaluation(&evaluation, terminal_output)?;
+                terminal_projection_for_evaluation(&evaluation, terminal_output, typed_failure)?;
             let cause = ExecutionTerminalCause::ReplanStop {
                 reason: intent.stop_reason,
             };
@@ -600,7 +602,9 @@ impl ExecutionRepository {
                 receipt: intent.receipt(),
             });
         }
-        let terminal_projection = terminal_projection_for_evaluation(&evaluation, terminal_output)?;
+        let typed_failure = load_earliest_typed_task_failure(conn.as_mut(), run.run_uid).await?;
+        let terminal_projection =
+            terminal_projection_for_evaluation(&evaluation, terminal_output, typed_failure)?;
         if evaluation.status != CompletionStatus::Completed {
             let cause = ExecutionTerminalCause::Completion {
                 limit_stop: evaluation.limit_stop,
@@ -1529,18 +1533,72 @@ fn validate_completion_runtime_bounds(
     Ok(())
 }
 
+/// Loads the earliest typed task failure so a run terminal keeps its real class.
+///
+/// Without this the run terminal reports a generic [`ExecutionFailureClass::Terminal`],
+/// so a run that died on a rate limit, an unsupported capability, or an authorization
+/// denial is indistinguishable from any other failure at the product surface. One
+/// bounded lookup on the failing task restores the attribution.
+async fn load_earliest_typed_task_failure(
+    conn: &mut sqlx::PgConnection,
+    run_uid: Uuid,
+) -> Result<Option<ExecutionTaskFailure>> {
+    let row = sqlx::query(
+        "SELECT current_outcome \
+         FROM moa.execution_task \
+         WHERE run_uid = $1 \
+           AND status IN ('failed', 'unknown_outcome') \
+           AND current_outcome IS NOT NULL \
+         ORDER BY completed_at NULLS LAST, task_id \
+         LIMIT 1",
+    )
+    .bind(run_uid)
+    .fetch_optional(conn)
+    .await
+    .map_err(sqlx_error)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let outcome: Value = row.try_get("current_outcome").map_err(row_error)?;
+    let outcome: ExecutionTaskOutcome =
+        serde_json::from_value(outcome).map_err(|error| Error::InvalidRepositoryData {
+            message: format!("terminal failure outcome is undecodable: {error}"),
+        })?;
+    Ok(match outcome.result {
+        ExecutionTaskResult::Failed { class, message } => Some(ExecutionTaskFailure {
+            class,
+            message,
+            capability_ref: None,
+        }),
+        _ => None,
+    })
+}
+
 fn terminal_projection_for_evaluation(
     evaluation: &CompletionEvaluation,
     output: Option<Value>,
+    typed_failure: Option<ExecutionTaskFailure>,
 ) -> Result<TerminalProjection> {
     crate::completion::terminal_projection_from_evaluation(
         evaluation,
         output,
         None,
-        (evaluation.status == CompletionStatus::Failed).then(|| ExecutionTaskFailure {
-            class: ExecutionFailureClass::Terminal,
-            message: evaluation.gaps.join("; "),
-            capability_ref: None,
+        (evaluation.status == CompletionStatus::Failed).then(|| {
+            // Prefer the failing task's own class over a flattened `Terminal`, but keep
+            // the evaluation gaps as the message: they explain which requirements were
+            // unmet, which the task-level message does not.
+            typed_failure.map_or_else(
+                || ExecutionTaskFailure {
+                    class: ExecutionFailureClass::Terminal,
+                    message: evaluation.gaps.join("; "),
+                    capability_ref: None,
+                },
+                |failure| ExecutionTaskFailure {
+                    class: failure.class,
+                    message: evaluation.gaps.join("; "),
+                    capability_ref: failure.capability_ref,
+                },
+            )
         }),
         (evaluation.status == CompletionStatus::Unsupported)
             .then(|| "required execution paths are unsupported".to_string()),

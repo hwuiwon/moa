@@ -7,48 +7,97 @@
     "instructions": {
       "type": "object",
       "properties": {
-        "path": { "type": "string", "default": "SKILL.md" }
+        "path": {
+          "type": "string",
+          "default": "SKILL.md"
+        }
       }
     },
-    "inputs": { "type": "object" },
-    "outputs": { "type": "object" },
+    "inputs": {
+      "type": "object"
+    },
+    "outputs": {
+      "type": "object"
+    },
     "connectors": {
       "type": "array",
-      "items": { "type": "string", "pattern": "^connector://.+" }
+      "items": {
+        "type": "string",
+        "pattern": "^connector://.+"
+      }
     },
     "allowed_tools": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "actions": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "kind"],
+        "required": [
+          "id",
+          "kind"
+        ],
         "properties": {
-          "id": { "type": "string", "minLength": 1 },
-          "description": { "type": "string" },
-          "kind": { "enum": ["connector_action", "tool", "code"] },
-          "ref": { "type": "string" },
-          "runtime": { "type": "string" },
-          "entrypoint": { "type": "string" },
-          "input_schema": { "type": "object" },
-          "output_schema": { "type": "object" },
-          "ui": { "type": "object" }
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "connector_action",
+              "tool",
+              "code"
+            ]
+          },
+          "ref": {
+            "type": "string"
+          },
+          "runtime": {
+            "type": "string"
+          },
+          "entrypoint": {
+            "type": "string"
+          },
+          "input_schema": {
+            "type": "object"
+          },
+          "output_schema": {
+            "type": "object"
+          },
+          "ui": {
+            "type": "object"
+          }
         }
       }
     },
-    "execution_plan": { "$ref": "#/$defs/ExecutionPlanTemplate" },
-    "ui": { "type": "object" }
+    "execution_plan": {
+      "$ref": "#/$defs/ExecutionPlanTemplate"
+    },
+    "ui": {
+      "type": "object"
+    }
   },
   "$defs": {
     "ExecutionPlanTemplate": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["goal", "plan"],
+      "required": [
+        "goal",
+        "plan"
+      ],
       "properties": {
-        "goal": { "$ref": "#/$defs/ExecutionGoalTemplate" },
-        "plan": { "$ref": "#/$defs/ExecutionPlanDefinition" }
+        "goal": {
+          "$ref": "#/$defs/ExecutionGoalTemplate"
+        },
+        "plan": {
+          "$ref": "#/$defs/ExecutionPlanDefinition"
+        }
       }
     },
     "ExecutionGoalTemplate": {
@@ -64,43 +113,71 @@
       "properties": {
         "requirements": {
           "type": "array",
-          "items": { "$ref": "#/$defs/ExecutionRequirement" }
+          "items": {
+            "$ref": "#/$defs/ExecutionRequirement"
+          }
         },
         "deliverables": {
           "type": "array",
-          "items": { "$ref": "#/$defs/ExecutionDeliverable" }
+          "items": {
+            "$ref": "#/$defs/ExecutionDeliverable"
+          }
         },
         "coverage": {
           "type": "array",
-          "items": { "$ref": "#/$defs/CoverageRequirement" }
+          "items": {
+            "$ref": "#/$defs/CoverageRequirement"
+          }
         },
         "constraints": {
           "type": "array",
-          "items": { "$ref": "#/$defs/ExecutionConstraint" }
+          "items": {
+            "$ref": "#/$defs/ExecutionConstraint"
+          }
         },
         "completion_checks": {
           "type": "array",
-          "items": { "$ref": "#/$defs/CompletionCheck" }
+          "items": {
+            "$ref": "#/$defs/CompletionCheck"
+          }
         }
       }
     },
     "ExecutionRequirement": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "description"],
+      "required": [
+        "id",
+        "description"
+      ],
       "properties": {
-        "id": { "type": "string" },
-        "description": { "type": "string" }
+        "id": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
       }
     },
     "ExecutionDeliverable": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "description", "output_pointer", "schema"],
+      "required": [
+        "id",
+        "description",
+        "output_pointer",
+        "schema"
+      ],
       "properties": {
-        "id": { "type": "string" },
-        "description": { "type": "string" },
-        "output_pointer": { "type": "string" },
+        "id": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "output_pointer": {
+          "type": "string"
+        },
         "schema": {}
       }
     },
@@ -115,20 +192,35 @@
         "require_all"
       ],
       "properties": {
-        "id": { "type": "string" },
-        "description": { "type": "string" },
-        "map_node_id": { "type": "string" },
+        "id": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "map_node_id": {
+          "type": "string"
+        },
         "expected_items": {},
-        "require_all": { "type": "boolean" }
+        "require_all": {
+          "type": "boolean"
+        }
       }
     },
     "ExecutionConstraint": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "description"],
+      "required": [
+        "id",
+        "description"
+      ],
       "properties": {
-        "id": { "type": "string" },
-        "description": { "type": "string" }
+        "id": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
       }
     },
     "CompletionCheck": {
@@ -142,17 +234,27 @@
         "kind"
       ],
       "properties": {
-        "id": { "type": "string" },
-        "description": { "type": "string" },
+        "id": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
         "requirement_ids": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "constraint_ids": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
-        "kind": { "$ref": "#/$defs/CompletionCheckKind" }
+        "kind": {
+          "$ref": "#/$defs/CompletionCheckKind"
+        }
       }
     },
     "CompletionCheckKind": {
@@ -160,41 +262,67 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind"],
+          "required": [
+            "kind"
+          ],
           "properties": {
-            "kind": { "const": "output_schema" }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["kind", "node_ids"],
-          "properties": {
-            "kind": { "const": "required_nodes" },
-            "node_ids": {
-              "type": "array",
-              "items": { "type": "string" }
+            "kind": {
+              "const": "output_schema"
             }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "map_node_id"],
+          "required": [
+            "kind",
+            "node_ids"
+          ],
           "properties": {
-            "kind": { "const": "map_coverage" },
-            "map_node_id": { "type": "string" }
+            "kind": {
+              "const": "required_nodes"
+            },
+            "node_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "node_ids", "min_per_task"],
+          "required": [
+            "kind",
+            "map_node_id"
+          ],
           "properties": {
-            "kind": { "const": "citations" },
+            "kind": {
+              "const": "map_coverage"
+            },
+            "map_node_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "node_ids",
+            "min_per_task"
+          ],
+          "properties": {
+            "kind": {
+              "const": "citations"
+            },
             "node_ids": {
               "type": "array",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             },
             "min_per_task": {
               "type": "integer",
@@ -206,10 +334,18 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "instructions", "max_turns"],
+          "required": [
+            "kind",
+            "instructions",
+            "max_turns"
+          ],
           "properties": {
-            "kind": { "const": "agent_verifier" },
-            "instructions": { "type": "string" },
+            "kind": {
+              "const": "agent_verifier"
+            },
+            "instructions": {
+              "type": "string"
+            },
             "max_turns": {
               "type": "integer",
               "format": "uint32",
@@ -230,13 +366,19 @@
         "nodes"
       ],
       "properties": {
-        "cancel_policy": { "$ref": "#/$defs/ExecutionCancelPolicy" },
-        "input_wait_policy": { "$ref": "#/$defs/ExecutionWaitPolicy" },
+        "cancel_policy": {
+          "$ref": "#/$defs/ExecutionCancelPolicy"
+        },
+        "input_wait_policy": {
+          "$ref": "#/$defs/ExecutionInputWaitPolicy"
+        },
         "input_schema": {},
         "output_schema": {},
         "nodes": {
           "type": "array",
-          "items": { "$ref": "#/$defs/ExecutionNode" }
+          "items": {
+            "$ref": "#/$defs/ExecutionNode"
+          }
         }
       }
     },
@@ -254,113 +396,95 @@
         "retry"
       ],
       "properties": {
-        "id": { "type": "string" },
+        "id": {
+          "type": "string"
+        },
         "requirement_ids": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "depends_on": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "when": {
+          "description": "Optional condition evaluated once, before the node is activated. A false condition skips the node: it commits a skipped node aggregate with a null output, and its dependents are released for ordering only. A conditional node's output cannot be read, it cannot be the terminal output node, and it cannot be the only node serving a requirement.",
           "anyOf": [
-            { "$ref": "#/$defs/ExecutionCondition" },
-            { "type": "null" }
+            {
+              "$ref": "#/$defs/ExecutionCondition"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "input": {},
         "output_schema": {},
-        "operation": { "$ref": "#/$defs/ExecutionOperation" },
+        "operation": {
+          "$ref": "#/$defs/ExecutionOperation"
+        },
         "compensation": {
           "anyOf": [
-            { "$ref": "#/$defs/ExecutionCompensation" },
-            { "type": "null" }
+            {
+              "$ref": "#/$defs/ExecutionCompensation"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
-        "retry": { "$ref": "#/$defs/RetryPolicy" },
+        "retry": {
+          "$ref": "#/$defs/RetryPolicy"
+        },
         "budget": {
           "anyOf": [
-            { "$ref": "#/$defs/ExecutionBudgetLimit" },
-            { "type": "null" }
+            {
+              "$ref": "#/$defs/ExecutionBudgetLimit"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
-    },
-    "ExecutionCancelPolicy": {
-      "type": "string",
-      "enum": ["retain_effects", "compensate_committed"]
-    },
-    "ExecutionCompensation": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["compensator", "input_mapping"],
-      "properties": {
-        "compensator": { "$ref": "#/$defs/CapabilityReference" },
-        "input_mapping": { "$ref": "#/$defs/CompensationInputMapping" }
-      }
-    },
-    "CompensationInputMapping": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["bindings"],
-      "properties": {
-        "bindings": {
-          "type": "array",
-          "maxItems": 64,
-          "items": { "$ref": "#/$defs/CompensationInputBinding" }
-        }
-      }
-    },
-    "CompensationInputBinding": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["target_pointer", "source"],
-      "properties": {
-        "target_pointer": { "type": "string" },
-        "source": { "$ref": "#/$defs/CompensationValueSource" }
-      }
-    },
-    "CompensationValueSource": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["kind", "pointer"],
-          "properties": {
-            "kind": { "const": "original_input" },
-            "pointer": { "type": "string" }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["kind", "pointer"],
-          "properties": {
-            "kind": { "const": "original_output" },
-            "pointer": { "type": "string" }
-          }
-        }
-      ]
     },
     "ExecutionCondition": {
       "oneOf": [
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "reference"],
+          "required": [
+            "kind",
+            "reference"
+          ],
           "properties": {
-            "kind": { "const": "exists" },
-            "reference": { "$ref": "#/$defs/ExecutionReference" }
+            "kind": {
+              "const": "exists"
+            },
+            "reference": {
+              "$ref": "#/$defs/ExecutionReference"
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "reference", "value"],
+          "required": [
+            "kind",
+            "reference",
+            "value"
+          ],
           "properties": {
-            "kind": { "const": "equals" },
-            "reference": { "$ref": "#/$defs/ExecutionReference" },
+            "kind": {
+              "const": "equals"
+            },
+            "reference": {
+              "$ref": "#/$defs/ExecutionReference"
+            },
             "value": {}
           }
         }
@@ -369,20 +493,122 @@
     "ExecutionReference": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["$ref"],
+      "required": [
+        "$ref"
+      ],
       "properties": {
-        "$ref": { "type": "string" }
+        "$ref": {
+          "type": "string"
+        }
       }
+    },
+    "ExecutionCancelPolicy": {
+      "type": "string",
+      "enum": [
+        "retain_effects",
+        "compensate_committed"
+      ]
+    },
+    "ExecutionCompensation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "compensator",
+        "input_mapping"
+      ],
+      "properties": {
+        "compensator": {
+          "$ref": "#/$defs/CapabilityReference"
+        },
+        "input_mapping": {
+          "$ref": "#/$defs/CompensationInputMapping"
+        }
+      }
+    },
+    "CompensationInputMapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bindings"
+      ],
+      "properties": {
+        "bindings": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/CompensationInputBinding"
+          }
+        }
+      }
+    },
+    "CompensationInputBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_pointer",
+        "source"
+      ],
+      "properties": {
+        "target_pointer": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/CompensationValueSource"
+        }
+      }
+    },
+    "CompensationValueSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "pointer"
+          ],
+          "properties": {
+            "kind": {
+              "const": "original_input"
+            },
+            "pointer": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "pointer"
+          ],
+          "properties": {
+            "kind": {
+              "const": "original_output"
+            },
+            "pointer": {
+              "type": "string"
+            }
+          }
+        }
+      ]
     },
     "ExecutionOperation": {
       "oneOf": [
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "reference"],
+          "required": [
+            "kind",
+            "reference"
+          ],
           "properties": {
-            "kind": { "const": "capability" },
-            "reference": { "$ref": "#/$defs/CapabilityReference" }
+            "kind": {
+              "const": "capability"
+            },
+            "reference": {
+              "$ref": "#/$defs/CapabilityReference"
+            }
           }
         },
         {
@@ -396,15 +622,23 @@
             "max_turns"
           ],
           "properties": {
-            "kind": { "const": "agent" },
-            "instructions": { "type": "string" },
+            "kind": {
+              "const": "agent"
+            },
+            "instructions": {
+              "type": "string"
+            },
             "skill_refs": {
               "type": "array",
-              "items": { "$ref": "#/$defs/ArtifactRef" }
+              "items": {
+                "$ref": "#/$defs/ArtifactRef"
+              }
             },
             "capability_refs": {
               "type": "array",
-              "items": { "$ref": "#/$defs/CapabilityReference" }
+              "items": {
+                "$ref": "#/$defs/CapabilityReference"
+              }
             },
             "max_turns": {
               "type": "integer",
@@ -425,16 +659,22 @@
             "task"
           ],
           "properties": {
-            "kind": { "const": "map" },
+            "kind": {
+              "const": "map"
+            },
             "items": {},
-            "item_key": { "type": "string" },
+            "item_key": {
+              "type": "string"
+            },
             "max_items": {
               "type": "integer",
               "format": "uint64",
               "minimum": 0
             },
             "item_output_schema": {},
-            "task": { "$ref": "#/$defs/MapTask" }
+            "task": {
+              "$ref": "#/$defs/MapTask"
+            }
           }
         },
         {
@@ -448,14 +688,18 @@
             "batch_size"
           ],
           "properties": {
-            "kind": { "const": "reduce" },
+            "kind": {
+              "const": "reduce"
+            },
             "items": {},
             "max_items": {
               "type": "integer",
               "format": "uint64",
               "minimum": 0
             },
-            "reducer": { "$ref": "#/$defs/ExecutionReducer" },
+            "reducer": {
+              "$ref": "#/$defs/ExecutionReducer"
+            },
             "batch_size": {
               "type": "integer",
               "format": "uint32",
@@ -466,39 +710,72 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "prompt", "wait_policy"],
+          "required": [
+            "kind",
+            "prompt",
+            "wait_policy"
+          ],
           "properties": {
-            "kind": { "const": "review" },
-            "prompt": { "type": "string" },
-            "wait_policy": { "$ref": "#/$defs/ExecutionWaitPolicy" }
+            "kind": {
+              "const": "review"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "wait_policy": {
+              "$ref": "#/$defs/ExecutionWaitPolicy"
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "signal_name", "wait_policy"],
+          "required": [
+            "kind",
+            "signal_name",
+            "wait_policy"
+          ],
           "properties": {
-            "kind": { "const": "wait_signal" },
-            "signal_name": { "type": "string" },
-            "wait_policy": { "$ref": "#/$defs/ExecutionWaitPolicy" }
+            "kind": {
+              "const": "wait_signal"
+            },
+            "signal_name": {
+              "type": "string"
+            },
+            "wait_policy": {
+              "$ref": "#/$defs/ExecutionWaitPolicy"
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "wake", "result"],
+          "required": [
+            "kind",
+            "wake",
+            "result"
+          ],
           "properties": {
-            "kind": { "const": "wait_until" },
-            "wake": { "$ref": "#/$defs/ExecutionTemporalTarget" },
+            "kind": {
+              "const": "wait_until"
+            },
+            "wake": {
+              "$ref": "#/$defs/ExecutionTemporalTarget"
+            },
             "result": {}
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "value"],
+          "required": [
+            "kind",
+            "value"
+          ],
           "properties": {
-            "kind": { "const": "output" },
+            "kind": {
+              "const": "output"
+            },
             "value": {}
           }
         }
@@ -507,62 +784,92 @@
     "ExecutionWaitPolicy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["expiry", "on_expiry"],
+      "required": [
+        "expiry",
+        "on_expiry"
+      ],
       "properties": {
-        "expiry": { "$ref": "#/$defs/ExecutionTemporalTarget" },
-        "on_expiry": { "$ref": "#/$defs/ExecutionWaitExpiryAction" }
+        "expiry": {
+          "$ref": "#/$defs/ExecutionTemporalTarget"
+        },
+        "on_expiry": {
+          "$ref": "#/$defs/ExecutionWaitExpiryAction"
+        }
+      }
+    },
+    "ExecutionInputWaitPolicy": {
+      "description": "Plan-level expiry policy for runtime input requests. It settles whichever task returned NeedsInput, so a declared continue_with output has no node output_schema to validate against and is rejected.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expiry",
+        "on_expiry"
+      ],
+      "properties": {
+        "expiry": {
+          "$ref": "#/$defs/ExecutionTemporalTarget"
+        },
+        "on_expiry": {
+          "$ref": "#/$defs/ExecutionInputWaitExpiryAction"
+        }
+      }
+    },
+    "ExecutionInputWaitExpiryAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "const": "fail_task"
+        }
       }
     },
     "ExecutionTemporalTarget": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["kind", "at"],
-          "properties": {
-            "kind": { "const": "at" },
-            "at": { "type": "string", "format": "date-time" }
-          }
+      "description": "Skills are reusable templates, so only wait-entry-relative targets are accepted; the canonical Rust enum also carries an absolute `at` branch that skill validation always rejects.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "delay_seconds"
+      ],
+      "properties": {
+        "kind": {
+          "const": "after"
         },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["kind", "delay_seconds"],
-          "properties": {
-            "kind": { "const": "after" },
-            "delay_seconds": {
-              "type": "integer",
-              "format": "uint64",
-              "minimum": 1
-            }
-          }
+        "delay_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
         }
-      ]
+      }
     },
     "ExecutionWaitExpiryAction": {
       "oneOf": [
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind"],
+          "required": [
+            "kind"
+          ],
           "properties": {
-            "kind": { "const": "fail_task" }
+            "kind": {
+              "const": "fail_task"
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind"],
+          "required": [
+            "kind",
+            "output"
+          ],
           "properties": {
-            "kind": { "const": "fail_run" }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["kind", "output"],
-          "properties": {
-            "kind": { "const": "continue_with" },
+            "kind": {
+              "const": "continue_with"
+            },
             "output": {}
           }
         }
@@ -571,10 +878,17 @@
     "CapabilityReference": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "version"],
+      "required": [
+        "name",
+        "version"
+      ],
       "properties": {
-        "name": { "type": "string" },
-        "version": { "type": "string" }
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
       }
     },
     "ArtifactRef": {
@@ -599,10 +913,17 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "reference"],
+          "required": [
+            "kind",
+            "reference"
+          ],
           "properties": {
-            "kind": { "const": "capability" },
-            "reference": { "$ref": "#/$defs/CapabilityReference" }
+            "kind": {
+              "const": "capability"
+            },
+            "reference": {
+              "$ref": "#/$defs/CapabilityReference"
+            }
           }
         },
         {
@@ -616,15 +937,23 @@
             "max_turns"
           ],
           "properties": {
-            "kind": { "const": "agent" },
-            "instructions": { "type": "string" },
+            "kind": {
+              "const": "agent"
+            },
+            "instructions": {
+              "type": "string"
+            },
             "skill_refs": {
               "type": "array",
-              "items": { "$ref": "#/$defs/ArtifactRef" }
+              "items": {
+                "$ref": "#/$defs/ArtifactRef"
+              }
             },
             "capability_refs": {
               "type": "array",
-              "items": { "$ref": "#/$defs/CapabilityReference" }
+              "items": {
+                "$ref": "#/$defs/CapabilityReference"
+              }
             },
             "max_turns": {
               "type": "integer",
@@ -640,10 +969,17 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "reference"],
+          "required": [
+            "kind",
+            "reference"
+          ],
           "properties": {
-            "kind": { "const": "capability" },
-            "reference": { "$ref": "#/$defs/CapabilityReference" }
+            "kind": {
+              "const": "capability"
+            },
+            "reference": {
+              "$ref": "#/$defs/CapabilityReference"
+            }
           }
         },
         {
@@ -657,15 +993,23 @@
             "max_turns"
           ],
           "properties": {
-            "kind": { "const": "agent" },
-            "instructions": { "type": "string" },
+            "kind": {
+              "const": "agent"
+            },
+            "instructions": {
+              "type": "string"
+            },
             "skill_refs": {
               "type": "array",
-              "items": { "$ref": "#/$defs/ArtifactRef" }
+              "items": {
+                "$ref": "#/$defs/ArtifactRef"
+              }
             },
             "capability_refs": {
               "type": "array",
-              "items": { "$ref": "#/$defs/CapabilityReference" }
+              "items": {
+                "$ref": "#/$defs/CapabilityReference"
+              }
             },
             "max_turns": {
               "type": "integer",
@@ -707,32 +1051,50 @@
       "additionalProperties": false,
       "properties": {
         "max_cost_microusd": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
           "minimum": 0
         },
         "max_tokens": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
           "minimum": 0
         },
         "max_tasks": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
           "minimum": 0
         },
         "max_tool_calls": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
           "minimum": 0
         },
         "max_retrieved_bytes": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
           "minimum": 0
         },
         "deadline_at": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "format": "date-time"
         }
       }

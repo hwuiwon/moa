@@ -22,6 +22,24 @@ use super::{
 
 const MAX_CLAIM_BATCH_SIZE: u32 = 1_000;
 const MAX_HEALTH_SAMPLE_SIZE: u32 = 100_000;
+/// Per-phase census of the live nonterminal fleet.
+///
+/// The status list is spelled out rather than bound as a parameter so it matches the
+/// `execution_run_nonterminal_idx` predicate literally: the planner cannot prove a bound
+/// array implies that predicate, and a parameterized form loses the index-only scan. The
+/// list is pinned against [`ExecutionRunPhaseDimension::ALL`] by an offline test, and the
+/// index leads on `status` so the grouped aggregate needs no sort. The scan is proportional
+/// to the live nonterminal set, not to run history, because the index is partial.
+const RUN_PHASE_CENSUS_SQL: &str = r#"
+SELECT status, count(*)::BIGINT AS run_count
+FROM moa.execution_run
+WHERE status IN (
+    'awaiting_confirmation', 'queued', 'running', 'waiting_input',
+    'waiting_review', 'waiting_signal', 'waiting_timer', 'waiting_external',
+    'waiting_replan', 'pause_requested', 'pausing', 'paused', 'compensating'
+)
+GROUP BY status
+"#;
 const MAX_ERROR_CHARS: usize = 4_096;
 const MAX_MAINTENANCE_ERROR_BYTES: usize = 4_096;
 
@@ -208,6 +226,12 @@ pub struct ExecutionDispatchRecord {
     pub claim_expires_at: Option<DateTime<Utc>>,
     /// Number of bounded delivery attempts.
     pub delivery_attempts: u32,
+    /// Monotonic repair generation, incremented once per recovery requeue.
+    ///
+    /// Delivery identity is `dispatch_uid` while this is zero and
+    /// `{dispatch_uid}:{repair_epoch}` afterwards, so a repaired row cannot attach to the
+    /// completed invocation its original identity already memoized.
+    pub repair_epoch: u32,
     /// Successful delivery time.
     pub delivered_at: Option<DateTime<Utc>>,
     /// Latest bounded delivery error.
@@ -258,8 +282,13 @@ impl ExecutionDispatchRetryPolicy {
 pub enum ExecutionDispatchFailureOutcome {
     /// The exact claim was released behind this durable retry time.
     RetryScheduled { not_before_at: DateTime<Utc> },
-    /// The exact claim exhausted its delivery budget.
+    /// The exact claim exhausted its delivery budget and its owner was repaired.
     DeadLettered,
+    /// The exact claim exhausted its delivery budget while its owner was already settled.
+    ///
+    /// The dead letter still commits: refusing it would re-poison every drain that reclaims
+    /// the row. The caller is expected to surface this as an operator-visible anomaly.
+    DeadLetteredWithoutOwnerRepair,
     /// The row was absent, already terminal, or owned by another claim.
     StaleClaim,
 }
@@ -275,8 +304,196 @@ pub struct ExecutionQueueBacklogSample {
     pub saturated: bool,
 }
 
+/// Bounded long-horizon resource governed by execution admission.
+///
+/// The variants are exactly the durable
+/// `moa.execution_capacity_bucket.resource_dimension` discriminators.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionAdmissionResourceDimension {
+    /// Nonterminal runs that are not fully parked.
+    ActiveRuns,
+    /// Forward and compensation attempts holding active-compute reservations.
+    ActiveTasks,
+    /// Runs retained in storage-only waiting or paused states.
+    ParkedRuns,
+    /// Pending durable trigger rows.
+    ScheduledTriggers,
+    /// Nonterminal asynchronous provider jobs.
+    ExternalJobs,
+}
+
+impl ExecutionAdmissionResourceDimension {
+    /// Every bounded dimension, in durable label order.
+    pub const ALL: [Self; 5] = [
+        Self::ActiveRuns,
+        Self::ActiveTasks,
+        Self::ParkedRuns,
+        Self::ScheduledTriggers,
+        Self::ExternalJobs,
+    ];
+
+    /// Returns the canonical database label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ActiveRuns => "active_runs",
+            Self::ActiveTasks => "active_tasks",
+            Self::ParkedRuns => "parked_runs",
+            Self::ScheduledTriggers => "scheduled_triggers",
+            Self::ExternalJobs => "external_jobs",
+        }
+    }
+}
+
+impl FromStr for ExecutionAdmissionResourceDimension {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "active_runs" => Ok(Self::ActiveRuns),
+            "active_tasks" => Ok(Self::ActiveTasks),
+            "parked_runs" => Ok(Self::ParkedRuns),
+            "scheduled_triggers" => Ok(Self::ScheduledTriggers),
+            "external_jobs" => Ok(Self::ExternalJobs),
+            _ => Err(Error::InvalidRepositoryData {
+                message: format!("unknown execution admission resource `{value}`"),
+            }),
+        }
+    }
+}
+
+/// Ceiling utilization and tenant concentration for one bounded admission resource.
+///
+/// Ratios are aggregated inside the database, so no tenant identity leaves the query.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ExecutionAdmissionUtilizationSample {
+    /// Bounded resource whose ceilings were observed.
+    pub resource: ExecutionAdmissionResourceDimension,
+    /// Utilization of the shared fleet ceiling.
+    pub fleet_ratio: f64,
+    /// Highest utilization observed across tenant-scoped ceilings.
+    pub tenant_peak_ratio: f64,
+    /// Largest single tenant's share of everything tenants currently hold.
+    ///
+    /// This is a different question from `tenant_peak_ratio`, which measures a tenant
+    /// against its own ceiling. A small tenant can sit at `tenant_peak_ratio` 1.0 while
+    /// holding almost none of the fleet, and a large tenant can hold the entire fleet
+    /// while far from its own ceiling. Only this ratio answers whether one tenant is
+    /// crowding out the others.
+    pub tenant_max_share_ratio: f64,
+}
+
+/// Bounded nonterminal run phase reported by the fleet run census.
+///
+/// The variants are exactly the nonterminal `moa.execution_run.status` discriminators
+/// carried by the `execution_run_nonterminal_idx` predicate.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionRunPhaseDimension {
+    /// The displayed plan and estimate require owning-user confirmation.
+    AwaitingConfirmation,
+    /// The run is accepted and may materialize or reserve work.
+    Queued,
+    /// At least one task may be executing.
+    Running,
+    /// The run is waiting for task input.
+    WaitingInput,
+    /// The run is waiting for a tenant review decision.
+    WaitingReview,
+    /// The run is waiting for a named external signal.
+    WaitingSignal,
+    /// The run is waiting for an exact durable timer.
+    WaitingTimer,
+    /// The run is waiting for an asynchronous external job.
+    WaitingExternal,
+    /// The run is waiting for a compiler-validated amendment.
+    WaitingReplan,
+    /// An authorized caller requested a safe pause.
+    PauseRequested,
+    /// Active work is reaching safe checkpoint boundaries before pausing.
+    Pausing,
+    /// The run is durably parked without active compute.
+    Paused,
+    /// Forward work is fenced while committed effects are undone in reverse order.
+    Compensating,
+}
+
+impl ExecutionRunPhaseDimension {
+    /// Every bounded nonterminal phase, in durable status order.
+    pub const ALL: [Self; 13] = [
+        Self::AwaitingConfirmation,
+        Self::Queued,
+        Self::Running,
+        Self::WaitingInput,
+        Self::WaitingReview,
+        Self::WaitingSignal,
+        Self::WaitingTimer,
+        Self::WaitingExternal,
+        Self::WaitingReplan,
+        Self::PauseRequested,
+        Self::Pausing,
+        Self::Paused,
+        Self::Compensating,
+    ];
+
+    /// Returns the canonical database label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AwaitingConfirmation => "awaiting_confirmation",
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::WaitingInput => "waiting_input",
+            Self::WaitingReview => "waiting_review",
+            Self::WaitingSignal => "waiting_signal",
+            Self::WaitingTimer => "waiting_timer",
+            Self::WaitingExternal => "waiting_external",
+            Self::WaitingReplan => "waiting_replan",
+            Self::PauseRequested => "pause_requested",
+            Self::Pausing => "pausing",
+            Self::Paused => "paused",
+            Self::Compensating => "compensating",
+        }
+    }
+}
+
+impl FromStr for ExecutionRunPhaseDimension {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "awaiting_confirmation" => Ok(Self::AwaitingConfirmation),
+            "queued" => Ok(Self::Queued),
+            "running" => Ok(Self::Running),
+            "waiting_input" => Ok(Self::WaitingInput),
+            "waiting_review" => Ok(Self::WaitingReview),
+            "waiting_signal" => Ok(Self::WaitingSignal),
+            "waiting_timer" => Ok(Self::WaitingTimer),
+            "waiting_external" => Ok(Self::WaitingExternal),
+            "waiting_replan" => Ok(Self::WaitingReplan),
+            "pause_requested" => Ok(Self::PauseRequested),
+            "pausing" => Ok(Self::Pausing),
+            "paused" => Ok(Self::Paused),
+            "compensating" => Ok(Self::Compensating),
+            _ => Err(Error::InvalidRepositoryData {
+                message: format!("unknown nonterminal execution run status `{value}`"),
+            }),
+        }
+    }
+}
+
+/// Live run count for one bounded nonterminal phase.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ExecutionRunPhaseSample {
+    /// Bounded nonterminal phase.
+    pub phase: ExecutionRunPhaseDimension,
+    /// Runs currently in that phase across the fleet.
+    pub run_count: u64,
+}
+
 /// Bounded trigger/outbox health observed in one scoped transaction.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ExecutionQueueHealthSnapshot {
     /// Canonical database observation time.
     pub observed_at: DateTime<Utc>,
@@ -284,10 +501,18 @@ pub struct ExecutionQueueHealthSnapshot {
     pub due_triggers: ExecutionQueueBacklogSample,
     /// Pending or claim-expired dispatches eligible for delivery.
     pub claimable_dispatches: ExecutionQueueBacklogSample,
-    /// Trigger deliveries that exhausted their retry policy.
-    pub dead_letter_triggers: ExecutionQueueBacklogSample,
     /// Outbox deliveries that exhausted their retry policy.
     pub dead_letter_dispatches: ExecutionQueueBacklogSample,
+    /// Nonterminal runs whose absolute deadline has elapsed, capped at the sample limit.
+    pub overdue_deadlines: u32,
+    /// Start time of the oldest active forward or compensation attempt.
+    pub oldest_active_attempt_at: Option<DateTime<Utc>>,
+    /// Live run count for every bounded nonterminal phase, including idle zeroes.
+    pub run_phases: Vec<ExecutionRunPhaseSample>,
+    /// Creation time of the oldest nonterminal asynchronous external job.
+    pub oldest_external_job_at: Option<DateTime<Utc>>,
+    /// Ceiling utilization for every bounded admission resource, including idle zeroes.
+    pub admission_utilization: Vec<ExecutionAdmissionUtilizationSample>,
 }
 
 /// Database clock and earliest indexed deadline for pending dispatch work.
@@ -470,28 +695,19 @@ impl ExecutionRepository {
             r#"
             SELECT claimable_at
             FROM (
-                SELECT not_before_at AS claimable_at, dispatch_uid
-                FROM moa.execution_dispatch_outbox
-                WHERE state = 'pending' AND not_before_at <= now()
+                (SELECT not_before_at AS claimable_at, created_at, dispatch_uid
+                 FROM moa.execution_dispatch_outbox
+                 WHERE state = 'pending' AND not_before_at <= now()
+                 ORDER BY not_before_at, created_at, dispatch_uid
+                 LIMIT $1)
                 UNION ALL
-                SELECT claim_expires_at AS claimable_at, dispatch_uid
-                FROM moa.execution_dispatch_outbox
-                WHERE state = 'dispatching' AND claim_expires_at <= now()
+                (SELECT claim_expires_at AS claimable_at, created_at, dispatch_uid
+                 FROM moa.execution_dispatch_outbox
+                 WHERE state = 'dispatching' AND claim_expires_at <= now()
+                 ORDER BY claim_expires_at, created_at, dispatch_uid
+                 LIMIT $1)
             ) AS claimable
-            ORDER BY claimable_at, dispatch_uid
-            LIMIT $1
-            "#,
-        )
-        .bind(fetch_limit)
-        .fetch_all(conn.as_mut())
-        .await
-        .map_err(sqlx_error)?;
-        let dead_letter_triggers = sqlx::query_scalar::<_, DateTime<Utc>>(
-            r#"
-            SELECT created_at
-            FROM moa.execution_trigger
-            WHERE state = 'dead_letter'
-            ORDER BY created_at, tenant_id, trigger_uid
+            ORDER BY claimable_at, created_at, dispatch_uid
             LIMIT $1
             "#,
         )
@@ -512,13 +728,128 @@ impl ExecutionRepository {
         .fetch_all(conn.as_mut())
         .await
         .map_err(sqlx_error)?;
+        // The exact-deadline invariant guard. Counting is capped rather than exhaustive
+        // because the alert only distinguishes zero from nonzero, so the cap bounds the
+        // work without changing the answer. `execution_run_overdue_deadline_idx` leads on
+        // `budget_deadline_at` and carries this exact status predicate, so the capped scan
+        // is index-only.
+        let overdue_deadlines = sqlx::query_scalar::<_, i32>(
+            r#"
+            SELECT count(*)::INTEGER
+            FROM (
+                SELECT 1
+                FROM moa.execution_run
+                WHERE status IN (
+                    'awaiting_confirmation', 'queued', 'running', 'waiting_input',
+                    'waiting_review', 'waiting_signal', 'waiting_timer',
+                    'waiting_external', 'waiting_replan', 'pause_requested',
+                    'pausing', 'paused', 'compensating'
+                )
+                  AND budget_deadline_at IS NOT NULL
+                  AND budget_deadline_at <= now()
+                LIMIT $1
+            ) AS overdue
+            "#,
+        )
+        .bind(i64::from(sample_limit))
+        .fetch_one(conn.as_mut())
+        .await
+        .map_err(sqlx_error)?;
+        // Compensation attempts hold the same active-compute reservation as forward attempts,
+        // so a stuck rollback must not be invisible to the stuck-attempt alert. Each branch
+        // takes its own ordered minimum so the aggregate reduces two rows, not two scans.
+        let oldest_active_attempt_at = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+            r#"
+            SELECT min(attempt_started_at)
+            FROM (
+                (SELECT attempt_started_at
+                 FROM moa.execution_task
+                 WHERE status = 'running' AND attempt_state = 'running'
+                   AND attempt_started_at IS NOT NULL
+                 ORDER BY attempt_started_at
+                 LIMIT 1)
+                UNION ALL
+                (SELECT attempt_started_at
+                 FROM moa.execution_compensation
+                 WHERE status = 'running' AND attempt_state = 'running'
+                   AND attempt_started_at IS NOT NULL
+                 ORDER BY attempt_started_at
+                 LIMIT 1)
+            ) AS active_attempt
+            "#,
+        )
+        .fetch_one(conn.as_mut())
+        .await
+        .map_err(sqlx_error)?;
+        // The per-phase census of the live fleet. This is the one aggregate here that is not
+        // capped: a census that stops counting reports a number no dashboard can sum, and the
+        // partial nonterminal index bounds the scan to live work regardless of run history.
+        let run_phase_rows = sqlx::query_as::<_, (String, i64)>(RUN_PHASE_CENSUS_SQL)
+            .fetch_all(conn.as_mut())
+            .await
+            .map_err(sqlx_error)?;
+        // The oldest live asynchronous job, including `unbound` jobs that were never handed to
+        // a provider. `execution_external_job_reconcile_idx` cannot serve this: it excludes
+        // `unbound` and rows with no `next_reconcile_at`, which is exactly where a job that
+        // never started is stranded. `execution_external_job_live_age_idx` leads on `created_at`
+        // and carries this state predicate, so the ordered lookup reads one index tuple.
+        let oldest_external_job_at = sqlx::query_scalar::<_, DateTime<Utc>>(
+            r#"
+            SELECT created_at
+            FROM moa.execution_external_job
+            WHERE state IN (
+                'unbound', 'starting', 'running', 'waiting_reconcile', 'cancel_requested'
+            )
+            ORDER BY created_at, external_job_uid
+            LIMIT 1
+            "#,
+        )
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(sqlx_error)?;
+        // One aggregate over the bounded capacity ledger. Every ratio is reduced inside the
+        // database, so no tenant identifier reaches the metric layer. The share denominator is
+        // the tenant total rather than the fleet bucket's counter so the ratio stays within
+        // [0, 1] by construction instead of depending on cross-scope bookkeeping agreeing.
+        let utilization_rows = sqlx::query_as::<_, (String, f64, f64, f64)>(
+            r#"
+            SELECT resource_dimension,
+                   COALESCE(
+                       max(reserved_quantity::DOUBLE PRECISION
+                           / limit_value::DOUBLE PRECISION)
+                       FILTER (WHERE scope_kind = 'fleet'), 0.0
+                   ) AS fleet_ratio,
+                   COALESCE(
+                       max(reserved_quantity::DOUBLE PRECISION
+                           / limit_value::DOUBLE PRECISION)
+                       FILTER (WHERE scope_kind = 'tenant'), 0.0
+                   ) AS tenant_peak_ratio,
+                   COALESCE(
+                       max(reserved_quantity)
+                       FILTER (WHERE scope_kind = 'tenant')::DOUBLE PRECISION
+                       / NULLIF(
+                           sum(reserved_quantity) FILTER (WHERE scope_kind = 'tenant'), 0
+                       )::DOUBLE PRECISION,
+                       0.0
+                   ) AS tenant_max_share_ratio
+            FROM moa.execution_capacity_bucket
+            GROUP BY resource_dimension
+            "#,
+        )
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(sqlx_error)?;
         conn.commit().await.map_err(storage_error)?;
         Ok(ExecutionQueueHealthSnapshot {
             observed_at,
             due_triggers: backlog_sample(due_triggers, sample_limit),
             claimable_dispatches: backlog_sample(claimable_dispatches, sample_limit),
-            dead_letter_triggers: backlog_sample(dead_letter_triggers, sample_limit),
             dead_letter_dispatches: backlog_sample(dead_letter_dispatches, sample_limit),
+            overdue_deadlines: to_u32(overdue_deadlines, "overdue execution deadlines")?,
+            oldest_active_attempt_at,
+            run_phases: run_phase_samples(&run_phase_rows)?,
+            oldest_external_job_at,
+            admission_utilization: admission_utilization_samples(&utilization_rows)?,
         })
     }
 
@@ -535,6 +866,10 @@ impl ExecutionRepository {
     }
 
     /// Claims a bounded due batch, including claims abandoned past their expiry.
+    ///
+    /// Each eligibility branch is ordered and capped on its own partial index — pending rows
+    /// by `not_before_at`, abandoned claims by `claim_expires_at` — so neither branch reads
+    /// beyond one bounded index window. Only the merged head is then locked.
     pub async fn claim_due_dispatches(
         &self,
         scope: ExecutionScope,
@@ -547,19 +882,36 @@ impl ExecutionRepository {
         let mut conn = scope.begin(&self.pool).await?;
         let rows = sqlx::query(
             r#"
-            WITH claimable AS (
+            WITH head AS (
                 SELECT dispatch_uid
-                FROM moa.execution_dispatch_outbox
-                WHERE (
-                        state = 'pending'
-                    AND not_before_at <= now()
-                ) OR (
-                        state = 'dispatching'
-                    AND claim_expires_at <= now()
-                )
-                ORDER BY not_before_at, created_at, dispatch_uid
+                FROM (
+                    (SELECT dispatch_uid, not_before_at AS claimable_at, created_at
+                     FROM moa.execution_dispatch_outbox
+                     WHERE state = 'pending' AND not_before_at <= now()
+                     ORDER BY not_before_at, created_at, dispatch_uid
+                     LIMIT $1)
+                    UNION ALL
+                    (SELECT dispatch_uid, claim_expires_at AS claimable_at, created_at
+                     FROM moa.execution_dispatch_outbox
+                     WHERE state = 'dispatching' AND claim_expires_at <= now()
+                     ORDER BY claim_expires_at, created_at, dispatch_uid
+                     LIMIT $1)
+                ) AS candidate
+                ORDER BY claimable_at, created_at, dispatch_uid
                 LIMIT $1
-                FOR UPDATE SKIP LOCKED
+            ),
+            claimable AS (
+                SELECT claimed.dispatch_uid
+                FROM moa.execution_dispatch_outbox AS claimed
+                JOIN head ON head.dispatch_uid = claimed.dispatch_uid
+                WHERE (
+                        claimed.state = 'pending'
+                    AND claimed.not_before_at <= now()
+                ) OR (
+                        claimed.state = 'dispatching'
+                    AND claimed.claim_expires_at <= now()
+                )
+                FOR UPDATE OF claimed SKIP LOCKED
             )
             UPDATE moa.execution_dispatch_outbox AS dispatch
             SET state = 'dispatching',
@@ -707,11 +1059,13 @@ impl ExecutionRepository {
         let last_error = error.chars().take(MAX_ERROR_CHARS).collect::<String>();
         let requires_durable_retry = dispatch_requires_durable_retry(dispatch_kind);
         let outcome = if attempts >= retry.max_attempts && !requires_durable_retry {
-            if dispatch_kind == ExecutionDispatchKind::TaskAttempt {
-                repair_dead_lettered_task_dispatch_in_conn(&mut conn, &dispatch).await?;
+            let owner_repaired = if dispatch_kind == ExecutionDispatchKind::TaskAttempt {
+                repair_dead_lettered_task_dispatch_in_conn(&mut conn, &dispatch).await?
             } else if dispatch_kind == ExecutionDispatchKind::CompensationAttempt {
-                repair_dead_lettered_compensation_dispatch_in_conn(&mut conn, &dispatch).await?;
-            }
+                repair_dead_lettered_compensation_dispatch_in_conn(&mut conn, &dispatch).await?
+            } else {
+                true
+            };
             sqlx::query(
                 r#"
                 UPDATE moa.execution_dispatch_outbox
@@ -726,7 +1080,11 @@ impl ExecutionRepository {
             .execute(conn.as_mut())
             .await
             .map_err(sqlx_error)?;
-            ExecutionDispatchFailureOutcome::DeadLettered
+            if owner_repaired {
+                ExecutionDispatchFailureOutcome::DeadLettered
+            } else {
+                ExecutionDispatchFailureOutcome::DeadLetteredWithoutOwnerRepair
+            }
         } else {
             let delay = if attempts >= retry.max_attempts {
                 retry.maximum_delay
@@ -769,10 +1127,14 @@ fn dispatch_requires_durable_retry(kind: ExecutionDispatchKind) -> bool {
     }
 }
 
+/// Settles the never-started task attempt owning one dead-lettered dispatch.
+///
+/// Returns whether the exact `Dispatching` owner was repaired. A `false` result means the
+/// owner was already settled by another writer, which must not block the dead letter.
 async fn repair_dead_lettered_task_dispatch_in_conn(
     conn: &mut super::ScopedConn<'_>,
     dispatch: &ExecutionDispatchRecord,
-) -> Result<()> {
+) -> Result<bool> {
     let request = serde_json::from_value::<ExecutionTaskAttemptRequest>(dispatch.payload.clone())
         .map_err(|error| Error::InvalidRepositoryData {
         message: format!("invalid dead-letter task-attempt payload: {error}"),
@@ -808,22 +1170,25 @@ async fn repair_dead_lettered_task_dispatch_in_conn(
         settled_at,
     )
     .await?;
-    match outcome {
+    Ok(match outcome {
         TaskAttemptSettlementOutcome::Applied { .. }
-        | TaskAttemptSettlementOutcome::Replayed { .. } => Ok(()),
+        | TaskAttemptSettlementOutcome::Replayed { .. } => true,
+        // The owner is already gone, superseded, or settled by another writer, so there is
+        // nothing left to repair. Dead-lettering must still commit: refusing here would
+        // re-poison every drain that reclaims this row and stop the fleet's only pump.
         TaskAttemptSettlementOutcome::NotFound
         | TaskAttemptSettlementOutcome::Stale
-        | TaskAttemptSettlementOutcome::InvalidState => Err(Error::InvalidRepositoryData {
-            message: "task-attempt dead letter could not repair its exact Dispatching owner"
-                .to_string(),
-        }),
-    }
+        | TaskAttemptSettlementOutcome::InvalidState => false,
+    })
 }
 
+/// Settles the never-started compensation attempt owning one dead-lettered dispatch.
+///
+/// Returns whether the exact `Dispatching` owner was repaired; see the task twin.
 async fn repair_dead_lettered_compensation_dispatch_in_conn(
     conn: &mut super::ScopedConn<'_>,
     dispatch: &ExecutionDispatchRecord,
-) -> Result<()> {
+) -> Result<bool> {
     let request =
         serde_json::from_value::<ExecutionCompensationAttemptRequest>(dispatch.payload.clone())
             .map_err(|error| Error::InvalidRepositoryData {
@@ -850,18 +1215,13 @@ async fn repair_dead_lettered_compensation_dispatch_in_conn(
         conn, &request, settled_at,
     )
     .await?;
-    match outcome {
+    Ok(match outcome {
         super::compensation::CompensationAttemptWriteOutcome::Applied(_)
-        | super::compensation::CompensationAttemptWriteOutcome::Replayed(_) => Ok(()),
+        | super::compensation::CompensationAttemptWriteOutcome::Replayed(_) => true,
+        // See the task twin: an already-settled owner must not block the dead letter itself.
         super::compensation::CompensationAttemptWriteOutcome::Conflict
-        | super::compensation::CompensationAttemptWriteOutcome::NotFound => {
-            Err(Error::InvalidRepositoryData {
-                message:
-                    "compensation-attempt dead letter could not repair its exact Dispatching owner"
-                        .to_string(),
-            })
-        }
-    }
+        | super::compensation::CompensationAttemptWriteOutcome::NotFound => false,
+    })
 }
 
 async fn settle_execution_maintenance(
@@ -967,6 +1327,55 @@ fn maintenance_checkpoint_from_row(
     })
 }
 
+/// Expands observed ledger rows to every bounded dimension, defaulting absent ones to idle.
+///
+/// A dimension with no bucket row has never been reserved. It must still be reported, or the
+/// gauge would be absent on a quiet fleet and its `absent()` alert would fire.
+fn admission_utilization_samples(
+    rows: &[(String, f64, f64, f64)],
+) -> Result<Vec<ExecutionAdmissionUtilizationSample>> {
+    for (resource, _, _, _) in rows {
+        resource.parse::<ExecutionAdmissionResourceDimension>()?;
+    }
+    Ok(ExecutionAdmissionResourceDimension::ALL
+        .into_iter()
+        .map(|resource| {
+            let observed = rows
+                .iter()
+                .find(|(label, _, _, _)| label == resource.as_str());
+            ExecutionAdmissionUtilizationSample {
+                resource,
+                fleet_ratio: observed.map_or(0.0, |(_, fleet, _, _)| *fleet),
+                tenant_peak_ratio: observed.map_or(0.0, |(_, _, tenant_peak, _)| *tenant_peak),
+                tenant_max_share_ratio: observed.map_or(0.0, |(_, _, _, share)| *share),
+            }
+        })
+        .collect())
+}
+
+/// Expands observed census rows to every bounded phase, defaulting absent ones to zero.
+///
+/// `GROUP BY status` returns no row for a phase holding no runs, so an idle phase would
+/// leave its gauge unwritten and its `absent()` alert would fire on a quiet fleet. An
+/// unmodelled durable status fails the whole snapshot rather than silently vanishing from
+/// a census whose sum is supposed to equal the live nonterminal fleet.
+fn run_phase_samples(rows: &[(String, i64)]) -> Result<Vec<ExecutionRunPhaseSample>> {
+    for (status, _) in rows {
+        status.parse::<ExecutionRunPhaseDimension>()?;
+    }
+    ExecutionRunPhaseDimension::ALL
+        .into_iter()
+        .map(|phase| {
+            let observed = rows.iter().find(|(label, _)| label == phase.as_str());
+            let run_count = match observed {
+                Some((_, count)) => super::to_u64(*count, "execution run phase count")?,
+                None => 0,
+            };
+            Ok(ExecutionRunPhaseSample { phase, run_count })
+        })
+        .collect()
+}
+
 fn backlog_sample(
     mut timestamps: Vec<DateTime<Utc>>,
     sample_limit: u32,
@@ -1052,7 +1461,9 @@ pub async fn enqueue_dispatch_in_conn(
 /// Requeues one previously accepted dispatch without changing its immutable identity.
 ///
 /// The caller must first establish the authoritative generation fence while holding the
-/// corresponding trigger row lock. A non-delivered replay is left untouched.
+/// corresponding trigger row lock. A non-delivered replay is left untouched. The repair
+/// epoch advances so redelivery cannot attach to the memoized completed invocation the
+/// previous delivery identity already produced.
 pub(super) async fn requeue_delivered_dispatch_in_conn(
     conn: &mut PgConnection,
     request: &NewExecutionDispatch,
@@ -1062,6 +1473,7 @@ pub(super) async fn requeue_delivered_dispatch_in_conn(
         r#"
         UPDATE moa.execution_dispatch_outbox
         SET state = 'pending', delivered_at = NULL, delivery_attempts = 0,
+            repair_epoch = repair_epoch + 1,
             claim_owner = NULL, claimed_at = NULL, claim_expires_at = NULL,
             last_error = NULL, updated_at = now()
         WHERE dispatch_uid = $1 AND state = 'delivered'
@@ -1085,6 +1497,9 @@ pub(super) async fn requeue_delivered_dispatch_in_conn(
 }
 
 /// Requeues a bounded page of accepted run activations whose authoritative wake remains queued.
+///
+/// The repair epoch advances so the replacement activation carries a delivery identity the
+/// original completed controller invocation cannot memoize.
 pub(super) async fn requeue_current_run_activations_in_conn(
     conn: &mut PgConnection,
     batch_size: u32,
@@ -1117,6 +1532,7 @@ pub(super) async fn requeue_current_run_activations_in_conn(
         )
         UPDATE moa.execution_dispatch_outbox AS dispatch
         SET state = 'pending', delivered_at = NULL, delivery_attempts = 0,
+            repair_epoch = dispatch.repair_epoch + 1,
             claim_owner = NULL, claimed_at = NULL, claim_expires_at = NULL,
             last_error = NULL, updated_at = now()
         FROM candidates
@@ -1136,7 +1552,19 @@ pub(super) async fn requeue_current_run_activations_in_conn(
 /// Requeues accepted deliveries only while their exact bounded work has not started.
 ///
 /// A running attempt is deliberately excluded: once effects may have begun, its
-/// watchdog owns ambiguity resolution and the dispatcher must not replay it.
+/// watchdog owns ambiguity resolution and the dispatcher must not replay it. The repair
+/// epoch advances so redelivery carries an identity Restate cannot memoize.
+///
+/// That fully repairs the two cancellation kinds and `external_cancel`, whose targets are
+/// addressed by idempotency key alone. The two attempt kinds split by what Restate still
+/// holds, because a workflow `run` handler is retained under its *workflow key* — the bare
+/// dispatch UID, which `require_dispatch_key` pins — independently of any idempotency key:
+///
+/// - Total Restate state loss, the case this grace window exists for, leaves the workflow
+///   key uninvoked, so redelivery starts the attempt normally.
+/// - A key for which Restate still holds a completed `run` cannot be restarted under any
+///   delivery identity. That attempt stays parked until its `attempt_deadline_at` watchdog
+///   settles it — the same backstop a lost running attempt already relies on.
 pub(super) async fn requeue_current_accepted_dispatches_in_conn(
     conn: &mut PgConnection,
     batch_size: u32,
@@ -1251,6 +1679,7 @@ pub(super) async fn requeue_current_accepted_dispatches_in_conn(
         )
         UPDATE moa.execution_dispatch_outbox AS dispatch
         SET state='pending', delivered_at=NULL, delivery_attempts=0,
+            repair_epoch=dispatch.repair_epoch + 1,
             claim_owner=NULL, claimed_at=NULL, claim_expires_at=NULL,
             last_error=NULL, updated_at=now()
         FROM candidates
@@ -1561,6 +1990,10 @@ fn dispatch_from_row(row: &sqlx::postgres::PgRow) -> Result<ExecutionDispatchRec
             row.try_get("delivery_attempts").map_err(super::row_error)?,
             "delivery attempts",
         )?,
+        repair_epoch: to_u32(
+            row.try_get("repair_epoch").map_err(super::row_error)?,
+            "repair epoch",
+        )?,
         delivered_at: row.try_get("delivered_at").map_err(super::row_error)?,
         last_error: row.try_get("last_error").map_err(super::row_error)?,
         created_at: row.try_get("created_at").map_err(super::row_error)?,
@@ -1582,8 +2015,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ExecutionDispatchKind, NewExecutionDispatch, dispatch_requires_durable_retry,
-        validate_dispatch,
+        ExecutionAdmissionResourceDimension, ExecutionDispatchKind, ExecutionRunPhaseDimension,
+        NewExecutionDispatch, RUN_PHASE_CENSUS_SQL, admission_utilization_samples,
+        dispatch_requires_durable_retry, run_phase_samples, validate_dispatch,
     };
     use crate::{
         state::{CompensationId, ExecutionTaskId},
@@ -1706,6 +2140,130 @@ mod tests {
             payload: serialized_payload,
         };
         validate_dispatch(&dispatch).expect("exact typed compensation cancellation validates");
+    }
+
+    #[test]
+    fn idle_admission_dimensions_still_report_their_healthy_zero_offline() {
+        // Pins: a dimension that has never been reserved has no capacity-bucket row, but its
+        // gauge must still be written. The alerts carry `absent()`, so a utilization series
+        // that only appears once work exists would page on a quiet fleet.
+        let observed = vec![
+            ("active_tasks".to_string(), 0.25, 0.75, 0.6),
+            ("external_jobs".to_string(), 0.5, 0.5, 1.0),
+        ];
+        let samples =
+            admission_utilization_samples(&observed).expect("known dimensions must decode");
+
+        assert_eq!(
+            samples
+                .iter()
+                .map(|sample| sample.resource)
+                .collect::<Vec<_>>(),
+            ExecutionAdmissionResourceDimension::ALL.to_vec(),
+            "every bounded dimension must be reported on every snapshot"
+        );
+        let active_tasks = samples
+            .iter()
+            .find(|sample| sample.resource == ExecutionAdmissionResourceDimension::ActiveTasks)
+            .expect("observed dimension is retained");
+        assert!((active_tasks.fleet_ratio - 0.25).abs() < f64::EPSILON);
+        assert!((active_tasks.tenant_peak_ratio - 0.75).abs() < f64::EPSILON);
+        assert!((active_tasks.tenant_max_share_ratio - 0.6).abs() < f64::EPSILON);
+        for idle in samples.iter().filter(|sample| {
+            !matches!(
+                sample.resource,
+                ExecutionAdmissionResourceDimension::ActiveTasks
+                    | ExecutionAdmissionResourceDimension::ExternalJobs
+            )
+        }) {
+            assert_eq!(idle.fleet_ratio, 0.0, "{:?}", idle.resource);
+            assert_eq!(idle.tenant_peak_ratio, 0.0, "{:?}", idle.resource);
+            assert_eq!(idle.tenant_max_share_ratio, 0.0, "{:?}", idle.resource);
+        }
+
+        assert!(
+            admission_utilization_samples(&[("active_sandboxes".to_string(), 1.0, 1.0, 1.0)])
+                .is_err(),
+            "an unmodelled durable dimension must fail closed, not vanish from the report"
+        );
+    }
+
+    #[test]
+    fn idle_run_phases_still_report_their_healthy_zero_offline() {
+        // Pins: `GROUP BY status` returns no row for a phase holding no runs. Every bounded
+        // phase must still be reported, or its gauge would be absent on a quiet fleet and its
+        // `absent()` alert would page. An unmodelled durable status must fail the snapshot
+        // rather than silently drop runs out of a census whose sum is the live fleet.
+        let observed = vec![("running".to_string(), 7_i64), ("paused".to_string(), 4)];
+        let samples = run_phase_samples(&observed).expect("known statuses must decode");
+
+        assert_eq!(
+            samples
+                .iter()
+                .map(|sample| sample.phase)
+                .collect::<Vec<_>>(),
+            ExecutionRunPhaseDimension::ALL.to_vec(),
+            "every bounded phase must be reported on every snapshot"
+        );
+        let count_of = |phase: ExecutionRunPhaseDimension| {
+            samples
+                .iter()
+                .find(|sample| sample.phase == phase)
+                .map(|sample| sample.run_count)
+                .expect("every phase is reported")
+        };
+        assert_eq!(count_of(ExecutionRunPhaseDimension::Running), 7);
+        assert_eq!(count_of(ExecutionRunPhaseDimension::Paused), 4);
+        for idle in samples.iter().filter(|sample| {
+            !matches!(
+                sample.phase,
+                ExecutionRunPhaseDimension::Running | ExecutionRunPhaseDimension::Paused
+            )
+        }) {
+            assert_eq!(idle.run_count, 0, "{:?}", idle.phase);
+        }
+        assert_eq!(
+            samples.iter().map(|sample| sample.run_count).sum::<u64>(),
+            11,
+            "the census must sum to exactly the observed live fleet"
+        );
+
+        assert!(
+            run_phase_samples(&[("completed".to_string(), 1)]).is_err(),
+            "a terminal status is not a live phase and must fail closed"
+        );
+        assert!(
+            run_phase_samples(&[("quarantined".to_string(), 1)]).is_err(),
+            "an unmodelled durable status must fail closed, not vanish from the census"
+        );
+    }
+
+    #[test]
+    fn run_phase_census_query_covers_exactly_the_bounded_phase_set_offline() {
+        // Pins: the census status list is spelled out in SQL so it matches the partial index
+        // predicate literally and keeps the index-only scan. That literal and the exported
+        // label set can drift apart silently, which would drop a live phase from the census
+        // while every gauge still looked healthy.
+        let (_, after) = RUN_PHASE_CENSUS_SQL
+            .split_once("status IN (")
+            .expect("census query filters on the nonterminal status list");
+        let (list, _) = after
+            .split_once(')')
+            .expect("the status list is parenthesized");
+        let mut queried = list
+            .split(',')
+            .map(|status| status.trim().trim_matches('\'').to_string())
+            .collect::<Vec<_>>();
+        queried.sort();
+        let mut bounded = ExecutionRunPhaseDimension::ALL
+            .iter()
+            .map(|phase| phase.as_str().to_string())
+            .collect::<Vec<_>>();
+        bounded.sort();
+        assert_eq!(
+            queried, bounded,
+            "the census query and the bounded phase set must name the same statuses"
+        );
     }
 
     #[test]

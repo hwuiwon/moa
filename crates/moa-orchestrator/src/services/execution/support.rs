@@ -13,13 +13,13 @@ pub(super) fn scoped_catalog_error(
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(super) struct ExecutionMutationHandoff {
+pub(crate) struct ExecutionMutationHandoff {
     wake_epoch: u64,
     task_ids_to_release: Vec<moa_execution::state::ExecutionTaskId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(super) enum ExecutionMutationAccepted {
+pub(crate) enum ExecutionMutationAccepted {
     Accepted {
         response: ExecutionMutationResponse,
         handoff: ExecutionMutationHandoff,
@@ -30,14 +30,14 @@ pub(super) enum ExecutionMutationAccepted {
 }
 
 impl ExecutionMutationAccepted {
-    pub(super) fn wake_epoch(&self) -> Option<u64> {
+    pub(crate) fn wake_epoch(&self) -> Option<u64> {
         match self {
             Self::Accepted { handoff, .. } => Some(handoff.wake_epoch),
             Self::Rejected { .. } => None,
         }
     }
 
-    pub(super) fn with_task_ids_to_release(
+    pub(crate) fn with_task_ids_to_release(
         mut self,
         task_ids_to_release: Vec<moa_execution::state::ExecutionTaskId>,
     ) -> Self {
@@ -47,7 +47,7 @@ impl ExecutionMutationAccepted {
         self
     }
 
-    pub(super) fn into_response(self) -> ExecutionMutationResponse {
+    pub(crate) fn into_response(self) -> ExecutionMutationResponse {
         match self {
             Self::Accepted { response, .. } | Self::Rejected { response } => response,
         }

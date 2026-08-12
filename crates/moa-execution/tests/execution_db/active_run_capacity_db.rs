@@ -737,7 +737,7 @@ async fn concurrent_deadline_arm_and_terminal_finalization_use_scheduled_before_
     let active_trigger_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM moa.execution_trigger \
          WHERE run_uid=$1 AND trigger_kind='run_deadline' \
-           AND state IN ('pending','dispatching')",
+           AND state = 'pending'",
     )
     .bind(running.run_uid)
     .fetch_one(&pool)
@@ -1304,7 +1304,7 @@ async fn high_fanout_terminal_trigger_cleanup_is_strictly_activation_bounded_db(
         run = commit.run;
         let active: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM moa.execution_trigger \
-             WHERE run_uid = $1 AND state IN ('pending', 'dispatching')",
+             WHERE run_uid = $1 AND state = 'pending'",
         )
         .bind(run.run_uid)
         .fetch_one(&pool)

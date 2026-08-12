@@ -27,9 +27,9 @@ use moa_execution::{
             ExecutionExternalJobStartRecoveryAdoptionOutcome, NewExecutionExternalJobIntent,
         },
         external_job::{ExecutionExternalJobOwner, ExecutionExternalJobState},
-        terminal::PendingTerminalAdvanceOutcome,
+        terminal::{PendingTerminalAdvanceOutcome, PendingTerminalAdvanceStage},
     },
-    state::{ExecutionCompensationOutcome, ExecutionTerminalEvidence},
+    state::{CompensationStatus, ExecutionCompensationOutcome, ExecutionTerminalEvidence},
     wire::{
         ExecutionCompensationAttemptCancelRequest, ExecutionCompensationReleaseIntent,
         ExecutionExternalJobStartRecoveryOwner, ExecutionExternalJobStartRecoveryRequest,
@@ -593,7 +593,7 @@ async fn dispatch_delivery_loss_releases_never_started_compensation_for_retry_db
     assert_eq!(reservation_state, "released");
     let active_watchdogs: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM moa.execution_trigger WHERE trigger_uid=$1 \
-         AND state IN ('pending','dispatching')",
+         AND state = 'pending'",
     )
     .bind(admission.watchdog.trigger.trigger_uid)
     .fetch_one(test_db.store().pool())
@@ -1456,6 +1456,256 @@ async fn direct_external_callback_waits_for_compensation_hand_release_db() -> Te
         } if attempt.attempt_state == CompensationAttemptState::Terminal
     ));
     Ok(())
+}
+
+#[tokio::test]
+async fn terminal_compensation_failure_finalizes_manual_repair_with_nested_cause_db() -> TestResult
+{
+    // Pins: a non-retryable compensation failure terminalizes the run as CompensationFailed and
+    // replaces the held terminal cause with CompensationFailure carrying the original terminal
+    // intent, the exact compensation identity, and the verbatim undo outcome, under manual repair.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let repository = ExecutionRepository::new(test_db.store().pool().clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let config = ExecutionConfig::default();
+    let undo_failure = ExecutionCompensationOutcome::Failed {
+        message: "undo was rejected permanently".to_string(),
+        retryable: false,
+        usage: usage(1),
+    };
+    let (compensation_id, current) = settled_compensation_run(
+        &repository,
+        test_db.store().pool(),
+        scope,
+        tenant_id,
+        "undoable",
+        undo_failure.clone(),
+    )
+    .await?;
+
+    let PendingTerminalAdvanceOutcome::Applied(commit) = repository
+        .advance_pending_terminal_settlement(
+            &config,
+            scope,
+            current.run_uid,
+            current.controller_generation,
+            current.wake_epoch,
+            moa_test_support::fixtures::pg_now(),
+            1,
+        )
+        .await?
+    else {
+        panic!("a failed compensation must advance its held terminal to manual repair");
+    };
+    assert_eq!(
+        commit.stage,
+        PendingTerminalAdvanceStage::ManualRepairRequired
+    );
+    assert!(!commit.work_remaining);
+    assert!(commit.continuation.is_none());
+    assert!(commit.compensation_admission.is_none());
+
+    let expected_cause = ExecutionTerminalCause::CompensationFailure {
+        original_status: ExecutionRunStatus::Failed,
+        original_reason: ExecutionTerminalReason::InternalFailure,
+        original_cause: Box::new(ExecutionTerminalCause::InternalFailure),
+        compensation_id,
+        outcome: undo_failure,
+    };
+    for observed in [
+        commit.run.clone(),
+        repository
+            .load_run(scope, current.run_uid)
+            .await?
+            .expect("manual-repair run stays visible after finalization"),
+    ] {
+        assert_eq!(observed.status, ExecutionRunStatus::Failed);
+        assert_eq!(
+            observed.terminal_reason,
+            Some(ExecutionTerminalReason::CompensationFailed)
+        );
+        assert!(observed.manual_repair_required);
+        assert!(observed.pending_terminal.is_none());
+        assert_eq!(
+            observed
+                .terminal_evidence
+                .as_ref()
+                .map(|evidence| &evidence.cause),
+            Some(&expected_cause)
+        );
+    }
+    assert_eq!(
+        held_non_lifetime_capacity(test_db.store().pool(), current.run_uid).await?,
+        0,
+        "a manual-repair terminal must leave no non-lifetime capacity receipt held"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn successful_compensation_finalizes_the_original_held_terminal_db() -> TestResult {
+    // Pins: when every undo succeeds, the bounded drain installs the terminal intent the run was
+    // already holding — unchanged and without manual repair — instead of tripping the
+    // "completed compensation retained non-lifetime capacity" guard. Both terminal-drain branches
+    // probe for held reservations, so a receipt leaked by compensation settlement wedges the
+    // success path exactly like the failure path.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let repository = ExecutionRepository::new(test_db.store().pool().clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let config = ExecutionConfig::default();
+    let (_, current) = settled_compensation_run(
+        &repository,
+        test_db.store().pool(),
+        scope,
+        tenant_id,
+        "undone",
+        ExecutionCompensationOutcome::Completed {
+            output: json!({"tokens": 0}),
+            usage: usage(1),
+        },
+    )
+    .await?;
+
+    let PendingTerminalAdvanceOutcome::Applied(commit) = repository
+        .advance_pending_terminal_settlement(
+            &config,
+            scope,
+            current.run_uid,
+            current.controller_generation,
+            current.wake_epoch,
+            moa_test_support::fixtures::pg_now(),
+            1,
+        )
+        .await?
+    else {
+        panic!("a fully compensated run must advance its held terminal to finalization");
+    };
+    assert_eq!(commit.stage, PendingTerminalAdvanceStage::Finalized);
+    assert!(!commit.work_remaining);
+    assert!(commit.continuation.is_none());
+    assert!(commit.compensation_admission.is_none());
+
+    for observed in [
+        commit.run.clone(),
+        repository
+            .load_run(scope, current.run_uid)
+            .await?
+            .expect("finalized run stays visible after successful compensation"),
+    ] {
+        assert_eq!(observed.status, ExecutionRunStatus::Failed);
+        assert_eq!(
+            observed.terminal_reason,
+            Some(ExecutionTerminalReason::InternalFailure),
+            "a successful undo must not rewrite the reason the run was failing for"
+        );
+        assert!(
+            !observed.manual_repair_required,
+            "a successful undo needs no operator repair"
+        );
+        assert!(observed.pending_terminal.is_none());
+        assert_eq!(
+            observed
+                .terminal_evidence
+                .as_ref()
+                .map(|evidence| &evidence.cause),
+            Some(&ExecutionTerminalCause::InternalFailure),
+            "the held cause must survive compensation verbatim"
+        );
+    }
+    assert_eq!(
+        held_non_lifetime_capacity(test_db.store().pool(), current.run_uid).await?,
+        0,
+        "a finalized terminal must leave no non-lifetime capacity receipt held"
+    );
+    Ok(())
+}
+
+/// Drives a compensating run's single reverse-order slice to one exact terminal undo outcome.
+///
+/// Returns the settled compensation identity and the run reloaded afterwards, which is the state
+/// the next controller activation observes before it advances the run's held terminal intent.
+async fn settled_compensation_run(
+    repository: &ExecutionRepository,
+    pool: &sqlx::PgPool,
+    scope: ExecutionScope,
+    tenant_id: TenantId,
+    node_id: &str,
+    outcome: ExecutionCompensationOutcome,
+) -> Result<
+    (moa_execution::state::CompensationId, ExecutionRunRecord),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let expected_status = match outcome {
+        ExecutionCompensationOutcome::Completed { .. } => CompensationStatus::Completed,
+        ExecutionCompensationOutcome::Failed { .. } => CompensationStatus::Failed,
+        ExecutionCompensationOutcome::UnknownOutcome { .. } => CompensationStatus::UnknownOutcome,
+    };
+    let (run, _) = compensating_run(repository, scope, tenant_id, &[node_id]).await?;
+    let now = moa_test_support::fixtures::pg_now();
+    let config = ExecutionConfig::default();
+    let admission =
+        active_compensation_admission(repository, scope, &config, run.run_uid, now).await?;
+    let compensation_id = admission.attempt.registration.compensation_id;
+    let fence = fence(&admission);
+    assert!(matches!(
+        repository
+            .start_compensation_attempt(scope, fence, now + Duration::milliseconds(1))
+            .await?,
+        CompensationAttemptWriteOutcome::Applied(_)
+    ));
+    let request = cancel_request(
+        &admission,
+        tenant_id,
+        ExecutionCompensationReleaseIntent::Outcome,
+    );
+    assert!(matches!(
+        repository
+            .begin_compensation_attempt_release(&request, now + Duration::milliseconds(2))
+            .await?,
+        CompensationAttemptReleaseClaimOutcome::Applied(_)
+    ));
+    let release_receipt =
+        persist_compensation_release_receipt(pool, &request, now + Duration::milliseconds(3))
+            .await?;
+    let CompensationAttemptWriteOutcome::Applied(settled) = repository
+        .settle_released_compensation_attempt(
+            &request,
+            outcome,
+            now + Duration::milliseconds(3),
+            Some(release_receipt),
+        )
+        .await?
+    else {
+        panic!("a verified release must settle the compensation attempt");
+    };
+    assert_eq!(settled.registration.status, expected_status);
+    assert_eq!(settled.attempt_state, CompensationAttemptState::Terminal);
+    let current = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("settled-compensation run stays visible before finalization");
+    assert_eq!(current.status, ExecutionRunStatus::Compensating);
+    Ok((compensation_id, current))
+}
+
+/// Counts capacity receipts a terminal run must never still hold.
+///
+/// `active_runs` and `parked_runs` are lifetime receipts released by finalization itself; the
+/// other three dimensions are what both terminal-drain branches refuse to finalize against.
+async fn held_non_lifetime_capacity(
+    pool: &sqlx::PgPool,
+    run_uid: Uuid,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM moa.execution_capacity_reservation WHERE run_uid=$1 \
+         AND resource_dimension IN ('active_tasks','scheduled_triggers','external_jobs') \
+         AND state IN ('reserved','reconciling')",
+    )
+    .bind(run_uid)
+    .fetch_one(pool)
+    .await
 }
 
 #[tokio::test]

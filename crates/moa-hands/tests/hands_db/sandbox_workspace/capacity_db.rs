@@ -4,9 +4,14 @@ use chrono::{Duration as ChronoDuration, Utc};
 use moa_core::{
     error::MoaError,
     types::{
+        action_policy::CallOrigin,
+        hands::{
+            BuiltinPolicyRevision, CpuLimit, DiskLimit, EgressPolicy, LifetimeLimit, MemoryLimit,
+            SandboxPolicySnapshot, SandboxProfile, SandboxTier,
+        },
         identifiers::{
             ExecutionRunScopeId, ExecutionTaskScopeId, ProviderAccountId, SandboxWorkspaceId,
-            TenantId, WorkspaceOperationId,
+            SessionId, TenantId, WorkspaceOperationId,
         },
         sandbox_workspace::{
             DurabilityClass, SandboxWorkspaceScope, SandboxWorkspaceState,
@@ -14,17 +19,28 @@ use moa_core::{
         },
     },
 };
-use moa_hands::core::sandbox_workspace::{
-    capacity::{CapacityQuantity, CapacityReservationRequest, PostgresWorkspaceCapacityRepository},
-    model::{CreateWorkspaceRequest, WorkspaceTransition},
-    operations::{PostgresWorkspaceOperationRepository, WorkspaceOperationIntent},
-    repository::PostgresWorkspaceRepository,
-    storage_resources::{PostgresWorkspaceStorageResourceRepository, StorageResourceCreateIntent},
+use moa_hands::core::{
+    leases::{
+        HandLeasePolicy, HandLeaseProvisionRequest, HandLeaseStore, HandLeaseWorkspaceAttachment,
+        PostgresHandLeaseStore,
+    },
+    sandbox_workspace::{
+        capacity::{
+            ActiveHandCapacityRequest, CapacityQuantity, CapacityReservationRequest,
+            PostgresWorkspaceCapacityRepository,
+        },
+        model::{CreateWorkspaceRequest, WorkspaceTransition, WorkspaceWriterClaim},
+        operations::{PostgresWorkspaceOperationRepository, WorkspaceOperationIntent},
+        repository::PostgresWorkspaceRepository,
+        storage_resources::{
+            PostgresWorkspaceStorageResourceRepository, StorageResourceCreateIntent,
+        },
+    },
 };
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
-use super::database_url;
+use super::{database_url, seed_session};
 
 #[derive(Debug, Clone)]
 struct VolumeCandidate {
@@ -440,6 +456,225 @@ async fn volume_inventory_overlap_headroom_and_exact_limit_are_atomic_db() {
     assert!(!second_reservation);
     assert_ne!(first.workspace_id, second.workspace_id);
 
+    cleanup_volume_account(&pool, account_id).await;
+    pool.close().await;
+}
+
+fn active_hand_lease_policy() -> HandLeasePolicy {
+    let profile = SandboxProfile::new(
+        CpuLimit::Unbounded,
+        MemoryLimit::Unbounded,
+        DiskLimit::Unbounded,
+        EgressPolicy::DenyAll,
+        LifetimeLimit::Unbounded,
+        LifetimeLimit::Unbounded,
+    )
+    .expect("test profile validates");
+    HandLeasePolicy::from_effective(
+        &moa_core::types::hands::resolve_effective_sandbox_profile(
+            &SandboxPolicySnapshot::new("workspace-capacity-deployment", profile)
+                .expect("deployment snapshot"),
+            &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::TenantUnset),
+            &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::AgentUnset),
+            &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::RouteUnset),
+            &SandboxPolicySnapshot::origin(CallOrigin::Production),
+            "workspace-capacity-capabilities-v1",
+        )
+        .expect("test resolution succeeds"),
+    )
+}
+
+/// Drives one workspace to a hydrating writer with a provisioning lease, which
+/// is the exact state `reserve_active_hand` admits from.
+async fn seed_hydrating_hand(
+    pool: &sqlx::PgPool,
+    tenant_id: TenantId,
+    account_id: ProviderAccountId,
+    worker_id: &str,
+) -> ActiveHandCapacityRequest {
+    let session_id = SessionId::new();
+    seed_session(pool, session_id, tenant_id).await;
+    let workspaces = PostgresWorkspaceRepository::new(pool.clone());
+    let workspace_id = SandboxWorkspaceId::new();
+    workspaces
+        .create(&CreateWorkspaceRequest {
+            workspace_id,
+            tenant_id,
+            scope: SandboxWorkspaceScope::ExecutionTask {
+                run_id: ExecutionRunScopeId::new(),
+                task_id: ExecutionTaskScopeId::new(),
+            },
+            provider: "local".to_string(),
+            provider_account_id: account_id,
+            provider_account_generation: 1,
+            durability_class: DurabilityClass::PortableFilesystem,
+            retention_deadline_at: None,
+        })
+        .await
+        .expect("persist active-hand test workspace");
+    assert!(
+        workspaces
+            .transition(WorkspaceTransition {
+                tenant_id,
+                workspace_id,
+                from: SandboxWorkspaceState::Creating,
+                to: SandboxWorkspaceState::Ready,
+                writer_epoch: 0,
+                instance_generation: 0,
+            })
+            .await
+            .expect("make the workspace claimable")
+    );
+    let restoring = workspaces
+        .claim_writer(WorkspaceWriterClaim {
+            tenant_id,
+            workspace_id,
+            expected_state: SandboxWorkspaceState::Ready,
+            expected_writer_epoch: 0,
+            expected_instance_generation: 0,
+        })
+        .await
+        .expect("claim the single writer")
+        .expect("claimed workspace exists");
+    let attachment = HandLeaseWorkspaceAttachment::new(
+        restoring.workspace_id,
+        restoring.writer_epoch,
+        restoring.instance_generation,
+        None,
+    )
+    .expect("claimed workspace attachment validates");
+    let provisioning = PostgresHandLeaseStore::new(pool.clone())
+        .claim_for_provisioning(HandLeaseProvisionRequest {
+            session_id,
+            worker_id,
+            tenant_id,
+            provider: "local",
+            tier: SandboxTier::Local,
+            attachment,
+            policy: &active_hand_lease_policy(),
+            caller_deadline: None,
+        })
+        .await
+        .expect("claim provisioning lease")
+        .expect("provisioning lease exists");
+    ActiveHandCapacityRequest {
+        tenant_id,
+        workspace_id,
+        provider_account_id: account_id,
+        provider_account_generation: 1,
+        provisioning_operation_id: provisioning.provisioning_operation_id,
+        hand_lease_generation: provisioning.generation,
+        expected_writer_epoch: restoring.writer_epoch,
+        expected_instance_generation: restoring.instance_generation,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh V60 compose Postgres via MOA_DATABASE_URL"]
+async fn concurrent_hand_limit_plus_one_is_rejected_in_both_scopes_db() {
+    // Pins: `max_active_hands` is charged against the active_hands dimension in
+    // both the tenant and the provider-account scope, so hand number
+    // limit-plus-one is refused instead of admitted against an absent limit.
+    let pool = PgPoolOptions::new()
+        .max_connections(6)
+        .connect(&database_url())
+        .await
+        .expect("test Postgres should be reachable");
+    let account_id = ProviderAccountId::new();
+    let saturating_tenant = TenantId::new();
+    let starved_tenant = TenantId::new();
+    sqlx::query(
+        r#"
+        INSERT INTO moa.sandbox_provider_accounts (
+            provider_account_id, generation, provider, isolation_cell,
+            organization_fingerprint, configured_limits
+        ) VALUES ($1, 1, 'local', $2, $3, '{"active_hands": 1}'::jsonb)
+        "#,
+    )
+    .bind(account_id)
+    .bind(format!("active-hands-{account_id}"))
+    .bind(format!("org-{account_id}"))
+    .execute(&pool)
+    .await
+    .expect("seed provider-account concurrent-hand ceiling");
+    for (tenant_id, limit) in [(saturating_tenant, 1), (starved_tenant, 2)] {
+        sqlx::query(
+            "INSERT INTO moa.sandbox_tenant_capacity_limits (tenant_id, configured_limits) VALUES ($1, $2)",
+        )
+        .bind(tenant_id)
+        .bind(serde_json::json!({ "active_hands": limit }))
+        .execute(&pool)
+        .await
+        .expect("seed tenant concurrent-hand quota");
+    }
+
+    let capacity = PostgresWorkspaceCapacityRepository::new(pool.clone());
+    let admitted =
+        seed_hydrating_hand(&pool, saturating_tenant, account_id, "capacity-first").await;
+    let reservation = capacity
+        .reserve_active_hand(&admitted)
+        .await
+        .expect("the exact concurrent-hand limit is admitted");
+    assert_eq!(
+        reservation.dimension,
+        WorkspaceCapacityDimension::ActiveHands
+    );
+    assert_eq!(reservation.quantity, 1);
+
+    let over_tenant_limit =
+        seed_hydrating_hand(&pool, saturating_tenant, account_id, "capacity-second").await;
+    let tenant_error = capacity
+        .reserve_active_hand(&over_tenant_limit)
+        .await
+        .expect_err("limit plus one must be refused for the saturating tenant");
+    assert!(
+        matches!(
+            tenant_error,
+            MoaError::ValidationError(ref detail)
+                if detail.contains("tenant active_hands capacity exceeded")
+        ),
+        "concurrent-hand admission must name the exhausted dimension: {tenant_error}"
+    );
+
+    let over_account_limit =
+        seed_hydrating_hand(&pool, starved_tenant, account_id, "capacity-third").await;
+    let account_error = capacity
+        .reserve_active_hand(&over_account_limit)
+        .await
+        .expect_err("a second tenant cannot exceed the shared provider-account ceiling");
+    assert!(
+        matches!(
+            account_error,
+            MoaError::ValidationError(ref detail)
+                if detail.contains("provider account active_hands capacity exceeded")
+        ),
+        "the provider-account ceiling must be the reported scope: {account_error}"
+    );
+
+    let charged = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM moa.sandbox_capacity_reservations WHERE provider_account_id = $1 AND resource_dimension = 'active_hands'",
+    )
+    .bind(account_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count durable concurrent-hand charges");
+    assert_eq!(
+        charged, 1,
+        "a refused admission cannot leave a partial concurrent-hand charge"
+    );
+
+    for tenant_id in [saturating_tenant, starved_tenant] {
+        sqlx::query("DELETE FROM moa.sandbox_tenant_capacity_limits WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .execute(&pool)
+            .await
+            .expect("clean tenant limits");
+    }
+    sqlx::query("DELETE FROM moa.hand_leases WHERE tenant_id = ANY($1)")
+        .bind(vec![saturating_tenant, starved_tenant])
+        .execute(&pool)
+        .await
+        .expect("clean hand leases");
     cleanup_volume_account(&pool, account_id).await;
     pool.close().await;
 }

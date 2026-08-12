@@ -249,7 +249,7 @@ fn compaction_request(
     CompletionRequest {
         model: None,
         messages: vec![
-            ContextMessage::system(include_str!("prompts/summarizer.txt")),
+            ContextMessage::system(include_str!("prompts/summarizer.md")),
             ContextMessage::user(prompt),
         ],
         tools: Vec::new(),

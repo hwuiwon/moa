@@ -1264,9 +1264,17 @@ impl HandProvider for E2BHandProvider {
         )
     }
 
-    async fn pause(&self, _handle: &HandHandle) -> Result<()> {
+    /// Refuses compute suspension: MOA deliberately opts E2B out of auto-pause.
+    ///
+    /// Sandbox creation sets `autoPause: false` and `autoResume.enabled: false`
+    /// so a sandbox's durable state lives in MOA-owned portable checkpoints
+    /// rather than in a provider-side paused snapshot MOA cannot fence or
+    /// account for. Pausing here would reintroduce exactly that hidden state, so
+    /// the continuation boundary uses the checkpoint path instead.
+    async fn suspend(&self, _handle: &HandHandle) -> Result<()> {
         Err(MoaError::Unsupported(
-            "E2B pause retains process memory and is not a filesystem persistence primitive"
+            "E2B pause is deliberately disabled (autoPause/autoResume off); MOA carries sandbox \
+             state in portable checkpoints instead"
                 .to_string(),
         ))
     }

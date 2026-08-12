@@ -418,10 +418,11 @@ pub enum ExecutionTemporalTarget {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionWaitExpiryAction {
-    /// Fail only the waiting logical task.
+    /// Fail the waiting logical task.
+    ///
+    /// Task failure propagates to the run through the normal terminal projection, so a
+    /// separate run-level variant would be indistinguishable at the settlement site.
     FailTask,
-    /// Fail the complete execution run.
-    FailRun,
     /// Settle the wait successfully with a declared structured output.
     ContinueWith {
         /// Structured output supplied to downstream nodes.
@@ -535,8 +536,6 @@ pub enum InputAudience {
 pub enum ExecutionFailureClass {
     /// Transient failure eligible for retry policy.
     Retryable,
-    /// A required predecessor ended in terminal failure.
-    DependencyFailed,
     /// Task input was invalid.
     InvalidInput,
     /// Task output did not satisfy its schema.

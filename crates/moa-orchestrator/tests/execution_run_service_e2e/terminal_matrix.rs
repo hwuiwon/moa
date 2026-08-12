@@ -895,7 +895,7 @@ fn output_candidate(
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                     delay_seconds: 86_400,
                 },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
             input_schema: empty_object_schema(),
             output_schema: schema.clone(),
@@ -930,7 +930,7 @@ fn replan_candidate(objective: &str) -> GeneratedExecutionCandidate {
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                     delay_seconds: 86_400,
                 },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
             input_schema: empty_object_schema(),
             output_schema: schema.clone(),

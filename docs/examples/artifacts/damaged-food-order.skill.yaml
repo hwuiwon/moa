@@ -41,7 +41,7 @@ definition:
             kind: after
             delay_seconds: 86400
           on_expiry:
-            kind: fail_run
+            kind: fail_task
         input_schema:
           type: object
           properties:
@@ -62,6 +62,10 @@ definition:
                 $ref: $.input.evidence_summary
             output_schema:
               type: object
+              required: [evidence_sufficient]
+              properties:
+                evidence_sufficient:
+                  type: boolean
             operation:
               kind: capability
               reference:
@@ -72,6 +76,16 @@ definition:
               max_attempts: 2
               initial_backoff_ms: 100
               max_backoff_ms: 1000
+          # The two nodes below are mutually exclusive branches on the same verified
+          # value. Exactly one of them runs; the other is committed as `skipped`, which
+          # releases its dependents for ordering without producing an output.
+          #
+          # A conditional node is an effectful leaf: nothing may read its output, because
+          # a skipped branch has none. That is why the terminal output below reports the
+          # verified order rather than whichever branch happened to fire, and why
+          # `req_damaged_order` is also served by two unconditional nodes — a requirement
+          # served only by conditional nodes could end a run with nothing eligible to
+          # satisfy it.
           - id: reorder_confirmation
             requirement_ids: [req_damaged_order]
             depends_on: [verify_order]
@@ -122,17 +136,15 @@ definition:
               max_backoff_ms: 1000
           - id: output
             requirement_ids: [req_damaged_order]
-            depends_on: [reorder_confirmation, notify_restaurant]
+            depends_on: [verify_order, reorder_confirmation, notify_restaurant]
             input: {}
             output_schema:
               type: object
             operation:
               kind: output
               value:
-                reorder_confirmation:
-                  $ref: $.nodes.reorder_confirmation.output
-                restaurant_notification:
-                  $ref: $.nodes.notify_restaurant.output
+                verified_order:
+                  $ref: $.nodes.verify_order.output
             compensation: null
             retry:
               max_attempts: 1

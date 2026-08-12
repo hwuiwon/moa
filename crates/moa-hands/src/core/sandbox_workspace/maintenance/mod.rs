@@ -35,13 +35,13 @@ use moa_core::{
         sandbox_workspace::{
             ProviderAccountStorageInventory, ProviderInventoryResourceKind, ProviderStorageKind,
             ProviderStorageRef, SandboxWorkspaceState, TenantStoragePurgeRequest,
-            WorkspaceConfirmedDisposition, WorkspaceOperationOutcome, WorkspaceReconcileRequest,
-            WorkspaceStorageOperation,
+            WorkspaceCapacityDimension, WorkspaceConfirmedDisposition, WorkspaceOperationOutcome,
+            WorkspaceReconcileRequest, WorkspaceStorageOperation,
         },
     },
 };
 use moa_db::ScopedConn;
-use moa_observability::SandboxWorkspaceInventoryDrift;
+use moa_observability::{SandboxStorageResourceMetricState, SandboxWorkspaceInventoryDrift};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, types::Json};
 use uuid::Uuid;
@@ -57,7 +57,11 @@ use super::{
 };
 use crate::core::{
     leases::{LeaseHandle, PostgresHandLeaseStore},
-    telemetry::{record_workspace_inventory_drift, record_workspace_state},
+    telemetry::{
+        record_workspace_active_hands, record_workspace_inventory_drift,
+        record_workspace_parked_tasks_with_active_hands, record_workspace_quota_utilization,
+        record_workspace_state, record_workspace_storage_resource_state,
+    },
 };
 
 /// One bounded checkpoint-retention pass.
@@ -319,6 +323,166 @@ impl WorkspaceMaintenanceCoordinator {
                 record_workspace_state(provider, state, count);
             }
         }
+        self.emit_storage_resource_metrics().await?;
+        self.emit_active_hand_metrics().await?;
+        self.emit_quota_utilization_metrics().await?;
+        self.emit_parked_task_compute_violations().await?;
+        Ok(())
+    }
+
+    /// Emits a zero-filled durable storage-resource fleet snapshot.
+    async fn emit_storage_resource_metrics(&self) -> Result<()> {
+        let mut conn = maintenance_conn(&self.pool).await?;
+        let rows = sqlx::query(
+            "SELECT provider_account.provider AS provider, resource.lifecycle_state, \
+                    count(*)::BIGINT AS count \
+             FROM moa.sandbox_storage_resources AS resource \
+             JOIN moa.sandbox_provider_accounts AS provider_account \
+               ON provider_account.provider_account_id = resource.provider_account_id \
+             GROUP BY provider_account.provider, resource.lifecycle_state",
+        )
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx)?;
+        conn.commit().await?;
+        let mut counts = HashMap::new();
+        for row in rows {
+            let provider =
+                provider_metric_label(&row.try_get::<String, _>("provider").map_err(map_sqlx)?)
+                    .to_string();
+            let state = row
+                .try_get::<String, _>("lifecycle_state")
+                .map_err(map_sqlx)?;
+            *counts.entry((provider, state)).or_insert(0u64) +=
+                u64::try_from(row.try_get::<i64, _>("count").map_err(map_sqlx)?).unwrap_or(0);
+        }
+        // Zero-fill every provider/state pair: the alerts on these series are
+        // `absent()`-guarded, so a gauge written only when rows exist would page on a
+        // healthy fleet that simply has no storage resources in that state.
+        for provider in ["local", "daytona", "e2b", "other"] {
+            for state in all_storage_resource_states() {
+                let count = counts
+                    .get(&(provider.to_string(), state.as_str().to_string()))
+                    .copied()
+                    .unwrap_or(0);
+                record_workspace_storage_resource_state(provider, state, count);
+            }
+        }
+        Ok(())
+    }
+
+    /// Emits the per-provider count of sandbox compute instances holding capacity.
+    async fn emit_active_hand_metrics(&self) -> Result<()> {
+        let mut conn = maintenance_conn(&self.pool).await?;
+        let rows = sqlx::query(
+            "SELECT provider_account.provider AS provider, count(*)::BIGINT AS count \
+             FROM moa.sandbox_capacity_reservations AS reservation \
+             JOIN moa.sandbox_provider_accounts AS provider_account \
+               ON provider_account.provider_account_id = reservation.provider_account_id \
+             WHERE reservation.resource_dimension = 'active_hands' \
+               AND reservation.reservation_state <> 'released' \
+             GROUP BY provider_account.provider",
+        )
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx)?;
+        conn.commit().await?;
+        let mut counts = HashMap::new();
+        for row in rows {
+            let provider =
+                provider_metric_label(&row.try_get::<String, _>("provider").map_err(map_sqlx)?)
+                    .to_string();
+            *counts.entry(provider).or_insert(0u64) +=
+                u64::try_from(row.try_get::<i64, _>("count").map_err(map_sqlx)?).unwrap_or(0);
+        }
+        for provider in ["local", "daytona", "e2b", "other"] {
+            record_workspace_active_hands(provider, counts.get(provider).copied().unwrap_or(0));
+        }
+        Ok(())
+    }
+
+    /// Emits the fleet-wide utilization ratio for every capacity dimension.
+    async fn emit_quota_utilization_metrics(&self) -> Result<()> {
+        let mut conn = maintenance_conn(&self.pool).await?;
+        let rows = sqlx::query(
+            "SELECT reservation.resource_dimension, \
+                    sum(reservation.quantity)::BIGINT AS reserved, \
+                    max(limits.limit_value)::BIGINT AS limit_value \
+             FROM moa.sandbox_capacity_reservations AS reservation \
+             LEFT JOIN moa.sandbox_tenant_capacity_limits AS limits \
+               ON limits.tenant_id = reservation.tenant_id \
+              AND limits.resource_dimension = reservation.resource_dimension \
+             WHERE reservation.reservation_state <> 'released' \
+             GROUP BY reservation.resource_dimension",
+        )
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx)?;
+        conn.commit().await?;
+        let mut ratios = HashMap::new();
+        for row in rows {
+            let dimension = row
+                .try_get::<String, _>("resource_dimension")
+                .map_err(map_sqlx)?;
+            let reserved = row.try_get::<i64, _>("reserved").map_err(map_sqlx)?.max(0);
+            let limit = row
+                .try_get::<Option<i64>, _>("limit_value")
+                .map_err(map_sqlx)?
+                .unwrap_or(0);
+            // An absent or zero limit means the dimension is unbounded for every tenant
+            // observed, which is 0.0 pressure rather than a division by zero.
+            let ratio = if limit > 0 {
+                reserved as f64 / limit as f64
+            } else {
+                0.0
+            };
+            ratios.insert(dimension, ratio);
+        }
+        for dimension in all_capacity_dimensions() {
+            let ratio = ratios.get(dimension.as_str()).copied().unwrap_or(0.0);
+            record_workspace_quota_utilization(dimension, ratio);
+        }
+        Ok(())
+    }
+
+    /// Emits the count of parked execution tasks that still own sandbox compute.
+    ///
+    /// This is the only automated guard on the invariant that a parked run owns no
+    /// sandbox. A `pending` release receipt is excluded deliberately: that row marks the
+    /// legitimate in-flight checkpoint-and-release window, so counting it would make every
+    /// normal yield trip a critical alert.
+    async fn emit_parked_task_compute_violations(&self) -> Result<()> {
+        let mut conn = maintenance_conn(&self.pool).await?;
+        let violations: i64 = sqlx::query_scalar(
+            "SELECT count(*)::BIGINT \
+             FROM moa.hand_leases AS lease \
+             JOIN moa.sandbox_workspaces AS workspace \
+               ON workspace.workspace_id = lease.workspace_id \
+              AND workspace.tenant_id = lease.tenant_id \
+             JOIN moa.execution_task AS task \
+               ON task.task_id = workspace.scope_task_id \
+              AND task.run_uid = workspace.scope_run_id \
+              AND task.tenant_id = workspace.tenant_id \
+             WHERE lease.status IN ('provisioning', 'active') \
+               AND workspace.scope_kind = 'execution_task' \
+               AND task.status IN ( \
+                     'waiting_input', 'waiting_review', 'waiting_signal', \
+                     'waiting_timer', 'waiting_external', 'waiting_replan') \
+               AND NOT EXISTS ( \
+                     SELECT 1 FROM moa.sandbox_execution_hand_release_receipts AS receipt \
+                     WHERE receipt.tenant_id = task.tenant_id \
+                       AND receipt.run_uid = task.run_uid \
+                       AND receipt.task_id = task.task_id \
+                       AND receipt.owner_kind = 'task' \
+                       AND receipt.receipt_state = 'pending')",
+        )
+        .fetch_one(conn.as_mut())
+        .await
+        .map_err(map_sqlx)?;
+        conn.commit().await?;
+        record_workspace_parked_tasks_with_active_hands(
+            u64::try_from(violations.max(0)).unwrap_or(0),
+        );
         Ok(())
     }
 
@@ -390,6 +554,28 @@ fn all_workspace_states() -> [SandboxWorkspaceState; 10] {
         SandboxWorkspaceState::Failed,
         SandboxWorkspaceState::Deleting,
         SandboxWorkspaceState::Deleted,
+    ]
+}
+
+fn all_storage_resource_states() -> [SandboxStorageResourceMetricState; 7] {
+    [
+        SandboxStorageResourceMetricState::Creating,
+        SandboxStorageResourceMetricState::Ready,
+        SandboxStorageResourceMetricState::Attached,
+        SandboxStorageResourceMetricState::Deleting,
+        SandboxStorageResourceMetricState::Deleted,
+        SandboxStorageResourceMetricState::Unknown,
+        SandboxStorageResourceMetricState::Failed,
+    ]
+}
+
+fn all_capacity_dimensions() -> [WorkspaceCapacityDimension; 5] {
+    [
+        WorkspaceCapacityDimension::Workspaces,
+        WorkspaceCapacityDimension::ActiveHands,
+        WorkspaceCapacityDimension::Volumes,
+        WorkspaceCapacityDimension::Checkpoints,
+        WorkspaceCapacityDimension::LogicalBytes,
     ]
 }
 

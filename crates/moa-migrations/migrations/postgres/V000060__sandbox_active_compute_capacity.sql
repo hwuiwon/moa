@@ -283,6 +283,74 @@ CREATE TRIGGER sandbox_execution_hand_release_receipt_delete_guard
 BEFORE DELETE ON moa.sandbox_execution_hand_release_receipts
 FOR EACH ROW EXECUTE FUNCTION moa.reject_execution_immutable_payload();
 
+-- Release receipts carry tenant_id, so tenant offboarding owns them and the
+-- purge catalog must list them; the drift check in run_tenant_purge_batch scans
+-- every tenant-scoped table in moa/public/analytics/pii_vault and aborts the
+-- whole offboarding for an unregistered one. `sandbox_provider_inventory_claims`
+-- has no tenant_id -- it is global maintenance authority keyed by provider
+-- account -- so its absence from the catalog is correct.
+CREATE TRIGGER moa_tenant_purge_fence_insert
+AFTER INSERT ON moa.sandbox_execution_hand_release_receipts
+REFERENCING NEW TABLE AS tenant_purge_new_rows
+FOR EACH STATEMENT EXECUTE FUNCTION moa.guard_tenant_write_statement('tenant_id');
+CREATE TRIGGER moa_tenant_purge_fence_update
+AFTER UPDATE ON moa.sandbox_execution_hand_release_receipts
+REFERENCING OLD TABLE AS tenant_purge_old_rows NEW TABLE AS tenant_purge_new_rows
+FOR EACH STATEMENT EXECUTE FUNCTION moa.guard_tenant_write_statement('tenant_id');
+
+-- Every receipt FK is ON DELETE RESTRICT, so receipts must drain before
+-- execution_task, execution_compensation, sandbox_workspaces, and
+-- sandbox_workspace_checkpoints. The checkpoint stage is the earliest of the
+-- four; shift through a remote range and take the slot immediately before it.
+UPDATE moa.tenant_purge_catalog
+SET stage_order = stage_order + 1000
+WHERE stage_order >= (
+    SELECT stage_order FROM moa.tenant_purge_catalog
+    WHERE stage_name = 'moa.sandbox_workspace_checkpoints'
+);
+
+UPDATE moa.tenant_purge_catalog
+SET stage_order = stage_order - 999
+WHERE stage_order >= 1000;
+
+INSERT INTO moa.tenant_purge_catalog (
+    stage_order, stage_name, table_schema, table_name, scope_mode, action_mode
+)
+SELECT checkpoint_stage.stage_order - 1,
+       'moa.sandbox_execution_hand_release_receipts',
+       'moa',
+       'sandbox_execution_hand_release_receipts',
+       'tenant_id',
+       'delete'
+FROM moa.tenant_purge_catalog AS checkpoint_stage
+WHERE checkpoint_stage.stage_name = 'moa.sandbox_workspace_checkpoints';
+
+COMMENT ON TABLE moa.tenant_purge_catalog IS
+    'Closed 158-table tenant-offboarding residue surface. Fleet capacity-bucket rows, sandbox provider accounts, sandbox provider inventory claims, and inventory findings are global maintenance authority; the two nullable-scope simulator certification authority tables are also intentionally global and absent.';
+
+DO $sandbox_hand_release_receipt_purge_function$
+DECLARE
+    predecessor TEXT;
+    replacement TEXT;
+BEGIN
+    SELECT pg_get_functiondef('moa.run_tenant_purge_batch(uuid,text)'::REGPROCEDURE)
+    INTO predecessor;
+    IF predecessor NOT LIKE '%catalog_count <> 157%'
+       OR predecessor NOT LIKE '%exactly 157 tables%' THEN
+        RAISE EXCEPTION 'unexpected V59 tenant purge function definition'
+            USING ERRCODE = '55000';
+    END IF;
+    replacement := replace(predecessor, 'catalog_count <> 157', 'catalog_count <> 158');
+    replacement := replace(replacement, 'exactly 157 tables', 'exactly 158 tables');
+    EXECUTE replacement;
+END
+$sandbox_hand_release_receipt_purge_function$;
+
+ALTER FUNCTION moa.run_tenant_purge_batch(UUID, TEXT) OWNER TO moa_owner;
+REVOKE ALL ON FUNCTION moa.run_tenant_purge_batch(UUID, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION moa.run_tenant_purge_batch(UUID, TEXT)
+    TO moa_app, moa_promoter, moa_workspace_maintenance;
+
 CREATE FUNCTION moa.guard_pending_task_hand_release_attempt()
 RETURNS TRIGGER
 LANGUAGE plpgsql

@@ -564,7 +564,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 ('failed','deadline_exceeded','deadline_exceeded')
             ), failure_class(value) AS (
                 VALUES
-                ('retryable'),('dependency_failed'),('invalid_input'),
+                ('retryable'),('invalid_input'),
                 ('invalid_output'),('authorization_denied'),('budget_exceeded'),
                 ('deadline_exceeded'),('cancelled'),('unsupported'),('terminal')
             ), task_failure AS (
@@ -606,17 +606,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 FROM completion
                 UNION ALL
                 SELECT status,cause,'generated_plan',expected FROM task_failure
-                UNION ALL
-                SELECT
-                    status,'{"kind":"scheduler_no_progress"}'::JSONB,
-                    'generated_plan',
-                    CASE status
-                        WHEN 'unsupported' THEN 'unsupported_plan'
-                        ELSE 'no_progress'
-                    END
-                FROM (
-                    VALUES ('partial'),('blocked'),('unsupported'),('failed')
-                ) projection(status)
                 UNION ALL
                 SELECT
                     status,
@@ -673,6 +662,15 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                     'generated_plan'),
                 ('failed',
                     '{"kind":"task_failure","class":"not_a_class"}',
+                    'generated_plan'),
+                -- The two terminal-vocabulary values V59 retires. Both were accepted by
+                -- the V27 baseline, so these cells fail if the V59 patch to
+                -- moa.execution_terminal_reason_for stops applying.
+                ('blocked',
+                    '{"kind":"scheduler_no_progress"}',
+                    'generated_plan'),
+                ('failed',
+                    '{"kind":"task_failure","class":"dependency_failed"}',
                     'generated_plan')
             ) cell(status,cause,source_kind)
             WHERE moa.execution_terminal_reason_for(
@@ -844,7 +842,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                             'expiry',jsonb_build_object(
                                 'kind','after','delay_seconds',1
                             ),
-                            'on_expiry',jsonb_build_object('kind','fail_run')
+                            'on_expiry',jsonb_build_object('kind','fail_task')
                         ),
                         'nodes','[]'::JSONB
                     ),
@@ -859,7 +857,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                             'expiry',jsonb_build_object(
                                 'kind','after','delay_seconds',1
                             ),
-                            'on_expiry',jsonb_build_object('kind','fail_run')
+                            'on_expiry',jsonb_build_object('kind','fail_task')
                         ),
                         'nodes','[]'::JSONB
                     ),
@@ -899,13 +897,13 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 0,0,1,0,0
             );
             INSERT INTO moa.execution_action_review_outbox (
-                review_uid,tenant_id,contact_id,run_uid,task_id,generation,
+                review_uid,tenant_id,contact_id,run_uid,operation_id,owner_kind,generation,
                 resolution,traceparent,tracestate,task_traceparent,task_tracestate
             ) VALUES (
                 '00000000-0000-0000-0000-000000337043',
                 '00000000-0000-0000-0000-000000337020',NULL,
                 '00000000-0000-0000-0000-000000337041',
-                '00000000-0000-0000-0000-000000337042',1,'{}',
+                '00000000-0000-0000-0000-000000337042','task',1,'{}',
                 '00-11111111111111111111111111111111-2222222222222222-01',
                 'a=one',
                 '00-33333333333333333333333333333333-4444444444444444-00',
@@ -988,7 +986,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                                 'expiry',jsonb_build_object(\
                                     'kind','after','delay_seconds',1\
                                 ),\
-                                'on_expiry',jsonb_build_object('kind','fail_run')\
+                                'on_expiry',jsonb_build_object('kind','fail_task')\
                             ),\
                             'nodes','[]'::JSONB\
                         ),\
@@ -1003,7 +1001,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                                 'expiry',jsonb_build_object(\
                                     'kind','after','delay_seconds',1\
                                 ),\
-                                'on_expiry',jsonb_build_object('kind','fail_run')\
+                                'on_expiry',jsonb_build_object('kind','fail_task')\
                             ),\
                             'nodes','[]'::JSONB\
                         ),\
@@ -1051,20 +1049,20 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
             )
             .await
             .is_err();
-        let outbox_scope_rejected = target
+        let outbox_scope_rejected = postgres_error_fact(target
             .execute(
                 "INSERT INTO moa.execution_action_review_outbox (\
-                    review_uid,tenant_id,contact_id,run_uid,task_id,generation,resolution\
+                    review_uid,tenant_id,contact_id,run_uid,operation_id,owner_kind,generation,resolution\
                  ) VALUES (\
                     '00000000-0000-0000-0000-000000337054',\
                     '00000000-0000-0000-0000-000000337020',\
                     '00000000-0000-0000-0000-000000337051',\
                     '00000000-0000-0000-0000-000000337041',\
-                    '00000000-0000-0000-0000-000000337042',1,'{}'\
+                    '00000000-0000-0000-0000-000000337042','task',1,'{}'\
                  )",
             )
             .await
-            .is_err();
+            .expect_err("a cross-scope action review row must be rejected"));
 
         target
             .execute(
@@ -1294,8 +1292,8 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
     assert_eq!(removed_mode_sql_state.as_deref(), Some("42703"));
     assert_eq!(invalid_insert_residue, 0);
     assert!(!old_route_envelope_valid);
-    assert_eq!(valid_terminal_cells, 71);
-    assert_eq!(invalid_terminal_cells, 7);
+    assert_eq!(valid_terminal_cells, 63);
+    assert_eq!(invalid_terminal_cells, 9);
     assert_eq!(provenance_matrix, (true, true, true, false, false, false));
     assert_eq!(json_vectors, (true, false, false, false, true));
     assert_eq!(
@@ -1305,7 +1303,18 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
     assert!(second_run_seq > first_run_seq);
     assert!(planning_context_scope_rejected);
     assert!(task_scope_rejected);
-    assert!(outbox_scope_rejected);
+    // Pinned by constraint, not just `is_err`: while the column was still named
+    // `task_id` this probe passed on an undefined-column error, so it proved
+    // nothing about scoping. Assert the composite
+    // (run_uid, tenant_id, contact_scope_id) fence is what rejects the row.
+    assert_eq!(
+        outbox_scope_rejected,
+        (
+            Some("23503".to_string()),
+            Some("execution_action_review_outbox_run_normalized_scope_fkey".to_string())
+        ),
+        "a cross-scope action review row must be rejected by the scope fence"
+    );
     assert!(outbox_trace_mutation_rejected);
     assert!(review_trace_mutation_rejected);
     assert_eq!(
@@ -1697,14 +1706,15 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
         let catalog_shape: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
             r#"
             SELECT
-                (SELECT count(*) = 142
+                (SELECT count(*) = 143
                  FROM information_schema.columns
                  WHERE table_schema = 'moa'
                    AND (
                      (table_name = 'execution_run' AND column_name IN (
                         'admitted_identity', 'controller_generation', 'activation_state',
                         'next_wake_at', 'waiting_since', 'last_progress_at',
-                        'pause_requested_at', 'paused_at', 'ready_task_count',
+                        'pause_requested_at', 'paused_at',
+                        'activation_failure_count', 'ready_task_count',
                         'active_task_count', 'waiting_task_count',
                         'waiting_input_task_count', 'waiting_input_user_task_count',
                         'waiting_input_tenant_admin_task_count',
@@ -1835,13 +1845,13 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
                      'execution_task_checkpoint', 'execution_terminal_archive',
                      'execution_terminal_archive_segment'
                    )),
-                (SELECT count(*) = 46
+                (SELECT count(*) = 44
                  FROM pg_indexes
                  WHERE schemaname = 'moa'
                    AND indexname IN (
                      'execution_run_terminal_retention_idx',
                      'execution_task_ready_idx',
-                     'execution_task_active_attempt_watchdog_idx',
+                     'execution_task_tenant_ready_order_idx',
                      'execution_trigger_due_idx',
                      'execution_dispatch_outbox_pending_idx',
                      'execution_dispatch_outbox_task_attempt_uidx',
@@ -1849,14 +1859,11 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
                      'execution_schedule_due_idx',
                      'execution_task_terminal_retention_idx',
                      'execution_dispatch_outbox_compensation_attempt_uidx',
-                     'execution_compensation_active_watchdog_idx',
                      'execution_capacity_bucket_lock_order_idx',
                      'execution_tenant_dispatch_fairness_idx',
-                     'execution_dispatch_outbox_claim_expiry_idx',
-                     'execution_trigger_claim_expiry_idx'
+                     'execution_dispatch_outbox_claim_expiry_idx'
                      ,'execution_run_schedule_occurrence_uidx'
                      ,'execution_external_job_callback_receipt_retention_idx'
-                     ,'execution_trigger_dead_letter_idx'
                      ,'execution_dispatch_outbox_dead_letter_idx'
                      ,'execution_dispatch_outbox_task_attempt_cancel_uidx'
                      ,'execution_dispatch_outbox_compensation_attempt_cancel_uidx'
@@ -1873,8 +1880,6 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
                      ,'execution_capacity_reservation_parked_run_owner_uidx'
                      ,'execution_capacity_reservation_trigger_owner_uidx'
                      ,'execution_capacity_reservation_external_job_owner_uidx'
-                     ,'execution_task_cancelling_reconciliation_idx'
-                     ,'execution_compensation_cancelling_reconciliation_idx'
                      ,'execution_completion_scan_actionable_idx'
                      ,'execution_task_failure_fingerprint_idx'
                      ,'execution_amendment_receipt_retention_idx'
@@ -1885,6 +1890,9 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
                      ,'execution_task_waiting_projection_idx'
                      ,'execution_trigger_run_wake_idx'
                      ,'execution_dispatch_outbox_external_cancel_uidx'
+                     ,'execution_run_overdue_deadline_idx'
+                     ,'execution_task_active_attempt_started_idx'
+                     ,'execution_compensation_active_attempt_started_idx'
                    )),
                 moa.execution_admitted_identity_is_valid(admitted_identity, tenant_id)
                     AND activation_state = 'terminal'
@@ -2043,7 +2051,8 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
                  FROM pg_trigger AS trigger
                  JOIN pg_proc AS proc ON proc.oid = trigger.tgfoid
                  WHERE trigger.tgrelid = 'moa.execution_task'::REGCLASS
-                   AND NOT trigger.tgisinternal)
+                   AND NOT trigger.tgisinternal
+                   AND proc.proname LIKE 'enforce_execution_task%')
                 AND
                 to_regprocedure('moa.enforce_execution_task_long_horizon_update()') IS NULL
                 AND
@@ -2070,6 +2079,67 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
             "#,
         )
         .bind(run_uid)
+        .fetch_one(&target)
+        .await?;
+
+        // A tenant-scoped table that is not registered in moa.tenant_purge_catalog
+        // makes run_tenant_purge_batch raise 55000 in its last stage, for every
+        // tenant, after rows are already deleted -- so right-to-erasure can never
+        // discharge. Reproduce both halves of that gate here: the count constant
+        // compiled into the function, and the drift scan it runs.
+        let purge_catalog: (i64, Option<i64>, Option<Vec<String>>, bool) = sqlx::query_as(
+            r#"
+            SELECT
+                (SELECT count(*) FROM moa.tenant_purge_catalog),
+                (substring(
+                    pg_get_functiondef(
+                        'moa.run_tenant_purge_batch(uuid,text)'::REGPROCEDURE
+                    )
+                    FROM 'catalog_count <> ([0-9]+)'
+                ))::BIGINT,
+                (SELECT array_agg(
+                            format('%I.%I', namespace.nspname, table_row.relname)
+                            ORDER BY 1
+                        )
+                 FROM pg_class AS table_row
+                 JOIN pg_namespace AS namespace
+                   ON namespace.oid = table_row.relnamespace
+                 JOIN pg_attribute AS column_row ON column_row.attrelid = table_row.oid
+                 WHERE table_row.relkind IN ('r', 'p')
+                   AND NOT table_row.relispartition
+                   AND namespace.nspname IN ('public', 'moa', 'analytics', 'pii_vault')
+                   AND column_row.attnum > 0
+                   AND NOT column_row.attisdropped
+                   AND column_row.attname IN ('tenant_id', 'storage_partition_id')
+                   AND NOT (
+                     namespace.nspname = 'moa'
+                     AND table_row.relname IN (
+                       'simulator_certification_mandate',
+                       'simulator_certification_evidence_import'
+                     )
+                   )
+                   AND NOT EXISTS (
+                     SELECT 1 FROM moa.tenant_purge_catalog AS catalog
+                     WHERE catalog.table_schema = namespace.nspname
+                       AND catalog.table_name = table_row.relname
+                   )),
+                COALESCE(
+                    (SELECT count(*) = 4 AND bool_and(
+                        parent.stage_order > (
+                            SELECT stage_order FROM moa.tenant_purge_catalog
+                            WHERE stage_name
+                                = 'moa.sandbox_execution_hand_release_receipts'
+                        )
+                     )
+                     FROM moa.tenant_purge_catalog AS parent
+                     WHERE parent.stage_name IN (
+                       'moa.execution_task', 'moa.execution_compensation',
+                       'moa.sandbox_workspaces', 'moa.sandbox_workspace_checkpoints'
+                     )),
+                    FALSE
+                )
+            "#,
+        )
         .fetch_one(&target)
         .await?;
 
@@ -2107,6 +2177,7 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
             input_resume_counters,
             invalid_attempt_generation_rejected,
             catalog_shape,
+            purge_catalog,
             duplicate_activation_rejected,
         ))
     }
@@ -2124,6 +2195,7 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
         input_resume_counters,
         invalid_attempt_generation_rejected,
         catalog_shape,
+        purge_catalog,
         duplicate_activation_rejected,
     ) = outcome.expect("long-horizon migration assertions should complete");
     assert!(
@@ -2146,8 +2218,234 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
         "attempt generation may only advance one fence at a time"
     );
     assert_eq!(catalog_shape, (true, true, true, true, true, true));
+    let (purge_catalog_count, purge_batch_constant, purge_catalog_drift, receipts_drain_first) =
+        purge_catalog;
+    assert_eq!(
+        purge_batch_constant,
+        Some(purge_catalog_count),
+        "run_tenant_purge_batch's catalog-count constant must equal the catalog it guards"
+    );
+    assert_eq!(
+        purge_catalog_drift, None,
+        "every tenant-scoped table must be registered in moa.tenant_purge_catalog"
+    );
+    assert!(
+        receipts_drain_first,
+        "sandbox hand-release receipts must purge before every ON DELETE RESTRICT parent"
+    );
     assert!(
         duplicate_activation_rejected,
         "one run generation/wake epoch must have exactly one dispatch"
+    );
+}
+
+/// Seeds one confirmed-shape queued execution run and returns its `run_uid`.
+async fn seed_queued_execution_run(
+    target: &sqlx::PgPool,
+    tenant_id: uuid::Uuid,
+    session_id: uuid::Uuid,
+    planning_context_uid: uuid::Uuid,
+) -> Result<uuid::Uuid, Box<dyn std::error::Error + Send + Sync>> {
+    let run_uid = uuid::Uuid::new_v4();
+    let plan_hash = "1".repeat(64);
+    let plan = serde_json::json!({
+        "definition": {
+            "cancel_policy": "retain_effects",
+            "input_schema": {},
+            "output_schema": {},
+            "input_wait_policy": {
+                "expiry": {"kind": "after", "delay_seconds": 3600},
+                "on_expiry": {"kind": "fail_task"}
+            },
+            "nodes": [{
+                "id": "output",
+                "requirement_ids": [],
+                "depends_on": [],
+                "when": null,
+                "input": {},
+                "output_schema": {},
+                "operation": {"kind": "output", "value": {}},
+                "compensation": null,
+                "retry": {
+                    "max_attempts": 1,
+                    "initial_backoff_ms": 1,
+                    "max_backoff_ms": 1
+                },
+                "budget": null
+            }]
+        },
+        "plan_hash": plan_hash,
+        "catalog_hash": "0".repeat(64),
+        "estimate": {
+            "cost_microusd": 0,
+            "tokens": 0,
+            "tool_calls": 0,
+            "retrieved_bytes": 0,
+            "tasks": 1
+        },
+        "report": {"issues": []}
+    });
+    sqlx::query(
+        "INSERT INTO moa.execution_run ( \
+            run_uid, tenant_id, session_id, originating_user_sequence_num, \
+            planning_context_uid, planning_context_hash, owner_user_id, goal_contract, \
+            initial_plan, active_plan, initial_plan_hash, active_plan_hash, \
+            capability_catalog, authorization_envelope, source_provenance, source_kind, \
+            input, status, admitted_identity \
+         ) VALUES ( \
+            $1, $2, $3, 0, $4, $5, 'migration-test', $6, $7, $7, $8, $8, \
+            $9, $10, $11, 'generated_plan', '{}'::JSONB, 'queued', $12 \
+         )",
+    )
+    .bind(run_uid)
+    .bind(tenant_id)
+    .bind(session_id)
+    .bind(planning_context_uid)
+    .bind("2".repeat(64))
+    .bind(serde_json::json!({
+        "objective": "migration",
+        "requirements": [],
+        "deliverables": [],
+        "coverage": [],
+        "constraints": [],
+        "completion_checks": []
+    }))
+    .bind(&plan)
+    .bind(&plan_hash)
+    .bind(serde_json::json!({
+        "capabilities": [],
+        "catalog_hash": "0".repeat(64)
+    }))
+    .bind(serde_json::json!({"capability_refs": [], "skill_refs": []}))
+    .bind(serde_json::json!({
+        "kind": "generated_plan",
+        "planner": {
+            "model": "migration-test",
+            "prompt_version": "planner",
+            "candidate_hash": "3".repeat(64),
+            "compiler_report_hash": "4".repeat(64),
+            "final_plan_hash": plan_hash,
+            "repair_attempts": 0
+        }
+    }))
+    .bind(serde_json::json!({
+        "identity_type": "operator",
+        "id": uuid::Uuid::new_v4(),
+        "tenant_id": tenant_id,
+        "api_key_id": null,
+        "acting_on_behalf_of": null
+    }))
+    .execute(target)
+    .await?;
+    sqlx::query(
+        "UPDATE moa.execution_run SET status = 'pause_requested', \
+             activation_state = 'paused', active_task_count = 1, \
+             pause_requested_at = now(), updated_at = now() WHERE run_uid = $1",
+    )
+    .bind(run_uid)
+    .execute(target)
+    .await?;
+    sqlx::query(
+        "UPDATE moa.execution_run SET status = 'pausing', updated_at = now() \
+         WHERE run_uid = $1",
+    )
+    .bind(run_uid)
+    .execute(target)
+    .await?;
+    Ok(run_uid)
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn draining_pausing_run_promotes_only_an_unchosen_status_db() {
+    // Pins: attempt settlement only adjusts counters, so draining the last active
+    // attempt must still complete the pause; but a writer that chooses its own
+    // status out of `pausing` keeps it. Swallowing a terminal write into `paused`
+    // wedges the run, because `paused` admits only `queued` and `cancelled`.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect pause-promotion maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create pause-promotion database");
+    let target_url = with_database(&admin_url, &db_name);
+
+    let outcome = async {
+        install_required_extensions(&target_url).await?;
+        run_reporting_applied_serialized(&target_url).await?;
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+
+        let tenant_id = uuid::Uuid::new_v4();
+        let session_id = uuid::Uuid::new_v4();
+        let planning_context_uid = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO moa.execution_planning_context ( \
+                planning_context_uid, tenant_id, session_id, \
+                originating_user_sequence_num, originating_user_event_hash, \
+                owner_user_id, planning_context_hash, snapshot \
+             ) VALUES ($1, $2, $3, 0, $4, 'migration-test', $4, '{}'::JSONB)",
+        )
+        .bind(planning_context_uid)
+        .bind(tenant_id)
+        .bind(session_id)
+        .bind("2".repeat(64))
+        .execute(&target)
+        .await?;
+
+        let drained =
+            seed_queued_execution_run(&target, tenant_id, session_id, planning_context_uid).await?;
+        let terminalized =
+            seed_queued_execution_run(&target, tenant_id, session_id, planning_context_uid).await?;
+
+        // Attempt settlement writes counters only; the run keeps `pausing`.
+        let promoted: (String, String, bool) = sqlx::query_as(
+            "UPDATE moa.execution_run SET active_task_count = 0, updated_at = now() \
+             WHERE run_uid = $1 \
+             RETURNING status, activation_state, paused_at IS NOT NULL",
+        )
+        .bind(drained)
+        .fetch_one(&target)
+        .await?;
+
+        // A pending terminal commits its status alongside the same zeroed counter.
+        let terminal: (String, i64) = sqlx::query_as(
+            "UPDATE moa.execution_run SET status = 'failed', active_task_count = 0, \
+                 terminal_reason = 'internal_failure', \
+                 terminal_cause = '{\"kind\":\"internal_failure\"}'::JSONB, \
+                 terminal_satisfied_requirement_count = 0, \
+                 terminal_requirement_count = 0, activation_state = 'terminal', \
+                 completed_at = now(), updated_at = now() \
+             WHERE run_uid = $1 RETURNING status, active_task_count",
+        )
+        .bind(terminalized)
+        .fetch_one(&target)
+        .await?;
+
+        target.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((promoted, terminal))
+    }
+    .await;
+
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+
+    let (promoted, terminal) = outcome.expect("pause promotion assertions should complete");
+    assert_eq!(
+        promoted,
+        ("paused".to_string(), "paused".to_string(), true),
+        "draining the last active attempt must complete the pause"
+    );
+    assert_eq!(
+        terminal,
+        ("failed".to_string(), 0),
+        "a chosen terminal status must survive the pausing promotion"
     );
 }

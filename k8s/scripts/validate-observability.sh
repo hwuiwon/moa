@@ -29,6 +29,7 @@ LOCAL_LGTM="${REPO_ROOT}/k8s/overlays/local/lgtm.yaml"
 LOCAL_LGTM_RESTATE="${REPO_ROOT}/k8s/overlays/local/otelcol-local-restate.yaml"
 LOCAL_RESTATE_PATCH="${REPO_ROOT}/k8s/overlays/local/patches/restate-cluster.yaml"
 PRODUCTION_RESTATE_PATCH="${REPO_ROOT}/k8s/overlays/production/patches/restate-observability.yaml"
+RUNTIME_METRICS_RS="${REPO_ROOT}/crates/moa-observability/src/runtime_metrics.rs"
 
 # Pinned tool versions. A validator that accepts whatever binary happens to be on
 # PATH cannot tell "this config is valid" from "this version of the checker did
@@ -57,7 +58,6 @@ EXPECTED_ALERTS=(
   MOAExecutionOverdueDeadlines
   MOAExecutionQueueSampleSaturated
   MOAExecutionRetentionStale
-  MOAExecutionTriggerDeadLetters
   MOAExecutionTriggerLagHigh
   MOALLMFailoverElevated
   MOALineageDeadLettering
@@ -631,9 +631,11 @@ PY
 done
 
 echo "Cross-checking alert metric names against the Rust source..."
-# The check nothing else performs. A metric renamed in Rust leaves the alert
-# expression parsing perfectly and matching no series forever, and neither
-# promtool nor kubeconform nor the compiler can see it.
+# A metric renamed in Rust leaves the alert expression parsing perfectly and
+# matching no series forever, and neither promtool nor kubeconform nor the
+# compiler can see it. This proves only that the NAME still exists in Rust. It
+# proves nothing about emission - see the recorder-caller check below, which is
+# the half this check used to claim and never performed.
 REFERENCED_METRICS="${WORK_DIR}/referenced-metrics.txt"
 [[ -s "${REFERENCED_METRICS}" ]] \
   || die "no metric names were extracted from any alert expression"
@@ -654,9 +656,34 @@ while read -r metric; do
   fi
 done < <(sort -u "${REFERENCED_METRICS}")
 if [[ "${#MISSING_METRICS[@]}" -gt 0 ]]; then
-  die "alert rules reference metrics that no crate emits: ${MISSING_METRICS[*]}"
+  die "alert rules reference metrics that no crate names: ${MISSING_METRICS[*]}"
 fi
-echo "  $(sort -u "${REFERENCED_METRICS}" | wc -l | tr -d ' ') referenced metrics all emitted"
+echo "  $(sort -u "${REFERENCED_METRICS}" | wc -l | tr -d ' ') referenced metric names resolve in crates/"
+
+echo "Checking that every metric recorder has a production caller..."
+# The check nothing else performs. Name presence is not emission: a `gauge!()`
+# inside a function nobody invokes satisfies every check above, which is how
+# eleven metrics and the six alerts reading them shipped permanently dead - three
+# of them critical, including the only guards on the parked-hand and exact-deadline
+# invariants. A recorder emits only if non-test code outside its own definition
+# file calls it, so `tests/` binaries and the `#[cfg(test)]` module inside
+# runtime_metrics.rs are deliberately not counted as callers.
+#
+# A recorder restored ahead of its call site fails here on purpose: the failure is
+# the work item, and it clears when the owning path starts recording. Silencing it
+# by exempting a name, by counting a test caller, or by deleting the recorder again
+# reintroduces exactly the blind spot this check exists to close.
+UNCALLED_RECORDERS=()
+while read -r recorder; do
+  grep -rl --include='*.rs' -E "${recorder}[[:space:]]*\(" "${REPO_ROOT}/crates" \
+    | grep -qvE "(runtime_metrics\.rs|/tests/)" \
+    || UNCALLED_RECORDERS+=("${recorder}")
+done < <(grep -oE '^pub fn record_[a-z0-9_]+' "${RUNTIME_METRICS_RS}" | awk '{print $3}')
+if [[ "${#UNCALLED_RECORDERS[@]}" -gt 0 ]]; then
+  die "$(printf 'runtime_metrics.rs declares recorders that only its own file or a test binary calls, so their metrics never exist in production and any alert on them can never fire:\n  %s\nWire each one into its owning path, or delete the recorder, its describe/bucket registration and its alert together.' \
+    "${UNCALLED_RECORDERS[*]}")"
+fi
+echo "  $(grep -cE '^pub fn record_[a-z0-9_]+' "${RUNTIME_METRICS_RS}") metric recorders all have production callers"
 
 echo "Checking the declared alert set..."
 DECLARED_ALERTS="$(grep -ohE '^ *- alert: [A-Za-z0-9]+' "${FILTERED_RULE_FILES[@]}" \
@@ -815,12 +842,10 @@ expected = {
     "moa_execution_overdue_deadlines",
     "moa_execution_runs",
     "moa_execution_tenant_max_share_ratio",
-    "moa_execution_trigger_dead_letters",
     "moa_execution_trigger_due",
     "moa_execution_trigger_lag_seconds",
+    "moa_restate_draining_deployment_blocking_invocations",
     "moa_restate_draining_deployment_oldest_age_seconds",
-    "moa_restate_draining_deployment_replica_hours",
-    "moa_restate_draining_deployment_replicas",
     "moa_restate_draining_deployments",
     "moa_sandbox_workspace_active_hands",
     "moa_sandbox_workspace_parked_tasks_with_active_hands",
@@ -829,7 +854,7 @@ expected = {
 }
 for metric in expected:
     if f'"{metric}"' not in runtime_metrics:
-        raise SystemExit(f"long-horizon metric {metric} is not emitted by runtime_metrics.rs")
+        raise SystemExit(f"long-horizon metric {metric} is not declared by runtime_metrics.rs")
 
 execution_source = runtime_metrics[
     runtime_metrics.index("pub fn record_execution_run_phase") :
@@ -863,8 +888,8 @@ rules = [
     for group in alerts.get("spec", {}).get("groups") or []
     for rule in group.get("rules") or []
 ]
-if len(rules) != 12:
-    raise SystemExit(f"{alerts_path} must contain exactly twelve actionable alerts")
+if len(rules) != 11:
+    raise SystemExit(f"{alerts_path} must contain exactly eleven actionable alerts")
 alert_expressions = "\n".join(rule.get("expr", "") for rule in rules)
 required_alert_metrics = {
     "moa_execution_active_attempt_oldest_age_seconds",
@@ -879,7 +904,6 @@ required_alert_metrics = {
     "moa_execution_outbox_lag_seconds",
     "moa_execution_queue_sample_saturated",
     "moa_execution_overdue_deadlines",
-    "moa_execution_trigger_dead_letters",
     "moa_execution_trigger_lag_seconds",
 }
 observed_alert_metrics = set(re.findall(r"moa_execution_[a-z0-9_]+", alert_expressions))
@@ -904,6 +928,23 @@ for required_clause in (
             "MOAExecutionRetentionStale must alert on missing, unready, and older-than-two-hour receipts"
         )
 
+# A bare `max(metric) > N` evaluates to *no data* when nothing emits the series, so
+# a guard that loses its producer stops guarding instead of firing. Every unlabeled
+# scalar rule must therefore carry an `absent()` clause. The two `by (...)` rules are
+# exempt: absent() yields a label-less vector that would render their own
+# annotations empty, and MOAExecutionMaintenanceReconcileStale - emitted by the same
+# handler - is their absence guard.
+labelled_alerts = {"MOAExecutionAdmissionSaturated", "MOAExecutionQueueSampleSaturated"}
+for rule in rules:
+    name = rule.get("alert")
+    if name in labelled_alerts:
+        continue
+    if "absent(" not in rule.get("expr", ""):
+        raise SystemExit(
+            f"{name} has no absent() clause, so a missing producer evaluates to no "
+            "data and the alert silently stops guarding instead of firing"
+        )
+
 kustomization = (root / "ops/prometheus/alerts/kustomization.yaml").read_text(
     encoding="utf-8"
 )
@@ -913,7 +954,8 @@ if kustomization.count("moa-long-horizon-execution.yaml") != 1:
     )
 
 print(
-    f"  OK {len(expected)} low-cardinality metrics back {len(rules)} long-horizon alerts"
+    f"  OK {len(expected)} low-cardinality metrics back {len(rules)} long-horizon alerts, "
+    "each with an absence guard"
 )
 PY
 echo "Checking the sandbox workspace metrics/dashboard/alert contract..."
@@ -1043,6 +1085,23 @@ rules = [
 ]
 if len(rules) != 8:
     raise SystemExit(f"{alerts_path} must contain exactly eight actionable alerts")
+
+# The parked-hand rule is the only automated guard on the invariant that a parked
+# run owns no sandbox. Without absent() a missing producer reads as zero violations,
+# which is how it shipped inert.
+parked_hand = [
+    rule for rule in rules if rule.get("alert") == "MOASandboxParkedTaskRetainsActiveHand"
+]
+if len(parked_hand) != 1:
+    raise SystemExit("sandbox alerts must define MOASandboxParkedTaskRetainsActiveHand exactly once")
+if "absent(moa_sandbox_workspace_parked_tasks_with_active_hands)" not in parked_hand[0].get(
+    "expr", ""
+):
+    raise SystemExit(
+        "MOASandboxParkedTaskRetainsActiveHand must fire when nothing publishes the "
+        "parked-hand invariant series, not treat absence as zero violations"
+    )
+
 for rule in rules:
     expression = rule.get("expr", "")
     annotations = rule.get("annotations") or {}

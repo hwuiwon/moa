@@ -1229,6 +1229,7 @@ async fn task_watchdog_preparation_is_due_fenced_and_exact_owner_replay_safe_db(
                     reduce_cursor: None,
                     source_exhausted: true,
                     terminal_output: None,
+                    condition_skipped: false,
                     tasks: vec![logical_task(
                         run.run_uid,
                         "watchdog-work",
@@ -1343,6 +1344,124 @@ async fn task_watchdog_preparation_is_due_fenced_and_exact_owner_replay_safe_db(
 }
 
 #[tokio::test]
+async fn one_attempt_generation_admits_exactly_one_armed_watchdog_db() -> TestResult {
+    // Pins: `execution_trigger_current_run_generation_uidx` still keys the armed-trigger
+    // uniqueness on the single `pending` state after the trigger claim apparatus was
+    // deleted. A second watchdog for the same attempt generation must be rejected by the
+    // index, and rearming after the first one settles must be admitted again — the second
+    // half fails if the partial predicate is widened past `pending`.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let repository = ExecutionRepository::new(pool.clone());
+    let config = execution_capacity_config();
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let mut candidate = new_run(
+        tenant_id,
+        None,
+        "watchdog-generation-uniqueness",
+        ExecutionRunStatus::Queued,
+        budget(10),
+    );
+    candidate.plan.definition.nodes = vec![watchdog_output_node()];
+    let run = create_run(&repository, scope, candidate).await?;
+    assert!(
+        repository
+            .initialize_scheduler_state(scope, run.run_uid)
+            .await?
+    );
+    assert!(matches!(
+        repository
+            .materialize_ready_page(
+                scope,
+                &config,
+                ReadyMaterializationRequest {
+                    run_uid: run.run_uid,
+                    plan_revision: 1,
+                    node_id: "watchdog-work".to_string(),
+                    expected_cursor: 0,
+                    reduce_cursor: None,
+                    source_exhausted: true,
+                    terminal_output: None,
+                    condition_skipped: false,
+                    tasks: vec![logical_task(
+                        run.run_uid,
+                        "watchdog-work",
+                        "one",
+                        estimate(1),
+                    )],
+                },
+            )
+            .await?,
+        ReadyMaterializationOutcome::Applied { .. }
+    ));
+    let admitted = repository
+        .admit_ready_attempts(&config, 1, Utc::now())
+        .await?
+        .admitted
+        .into_iter()
+        .next()
+        .expect("one task must be admitted");
+    let armed_state: String =
+        sqlx::query_scalar("SELECT state FROM moa.execution_trigger WHERE trigger_uid=$1")
+            .bind(admitted.watchdog_trigger_uid)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        armed_state, "pending",
+        "an armed watchdog is never claimed; claiming lives on the dispatch outbox"
+    );
+
+    let duplicate = task_watchdog(
+        Uuid::now_v7(),
+        tenant_id,
+        admitted.run_uid,
+        admitted.task_id.as_uuid(),
+        admitted.controller_generation,
+        admitted.attempt_generation,
+        pg_deadline(Duration::minutes(5)),
+    );
+    let mut transaction = pool.begin().await?;
+    let conflict = create_trigger_with_dispatch_in_conn(&mut transaction, &config, &duplicate)
+        .await
+        .expect_err("one attempt generation must never arm two watchdogs");
+    transaction.rollback().await?;
+    let moa_execution::Error::Database { source } = conflict else {
+        panic!("a duplicate armed watchdog must surface the unique-index violation");
+    };
+    let violation = source
+        .as_database_error()
+        .expect("the unique violation must carry its PostgreSQL provenance");
+    assert_eq!(violation.code().as_deref(), Some("23505"));
+    assert_eq!(
+        violation.constraint(),
+        Some("execution_trigger_current_run_generation_uidx")
+    );
+
+    assert_eq!(
+        repository
+            .settle_watchdog_trigger(scope, admitted.watchdog_trigger_uid)
+            .await?,
+        ExecutionTriggerSupersedeOutcome::Superseded
+    );
+    let mut transaction = pool.begin().await?;
+    let rearmed =
+        create_trigger_with_dispatch_in_conn(&mut transaction, &config, &duplicate).await?;
+    transaction.commit().await?;
+    assert_eq!(rearmed.trigger.trigger_uid, duplicate.trigger_uid);
+    assert_eq!(rearmed.trigger.state, ExecutionDeliveryState::Pending);
+    let armed_uids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT trigger_uid FROM moa.execution_trigger \
+         WHERE run_uid=$1 AND trigger_kind='task_watchdog' AND state='pending'",
+    )
+    .bind(run.run_uid)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(armed_uids, vec![duplicate.trigger_uid]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn task_external_start_recovery_adopts_started_not_started_and_replay_atomically_db()
 -> TestResult {
     // Pins: task recovery consumes a provisional checkpoint under exact active-resource fences.
@@ -1382,6 +1501,7 @@ async fn task_external_start_recovery_adopts_started_not_started_and_replay_atom
                     reduce_cursor: None,
                     source_exhausted: true,
                     terminal_output: None,
+                    condition_skipped: false,
                     tasks: ["not-started", "started", "missing-checkpoint"]
                         .into_iter()
                         .map(|item| {
@@ -2457,6 +2577,7 @@ async fn terminal_callback_before_task_release_commits_then_settles_once_db() ->
                     reduce_cursor: None,
                     source_exhausted: true,
                     terminal_output: None,
+                    condition_skipped: false,
                     tasks: vec![logical_task(
                         run.run_uid,
                         "watchdog-work",
@@ -2635,6 +2756,7 @@ async fn retry_settlement_preserves_cancelling_until_ready_transition_db() -> Te
                     reduce_cursor: None,
                     source_exhausted: true,
                     terminal_output: None,
+                    condition_skipped: false,
                     tasks: vec![logical_task(
                         run.run_uid,
                         "watchdog-work",
@@ -2766,6 +2888,7 @@ async fn durable_task_release_receipt_splits_capacity_from_outcome_settlement_db
                     reduce_cursor: None,
                     source_exhausted: true,
                     terminal_output: None,
+                    condition_skipped: false,
                     tasks: vec![logical_task(
                         run.run_uid,
                         "watchdog-work",
@@ -3203,6 +3326,7 @@ async fn assert_paused_task_review_resolution(
                     reduce_cursor: None,
                     source_exhausted: true,
                     terminal_output: None,
+                    condition_skipped: false,
                     tasks: vec![logical_task(
                         run.run_uid,
                         "watchdog-work",
@@ -3391,6 +3515,34 @@ fn run_deadline(
         kind: ExecutionTriggerKind::RunDeadline,
         controller_generation: Some(controller_generation),
         attempt_generation: None,
+        compensation_generation: None,
+        compensation_attempt_generation: None,
+        occurrence_sequence: None,
+        due_at,
+        payload: json!({}),
+    }
+}
+
+fn task_watchdog(
+    trigger_uid: Uuid,
+    tenant_id: TenantId,
+    run_uid: Uuid,
+    task_id: Uuid,
+    controller_generation: u64,
+    attempt_generation: u64,
+    due_at: chrono::DateTime<Utc>,
+) -> NewExecutionTrigger {
+    NewExecutionTrigger {
+        trigger_uid,
+        tenant_id,
+        run_uid: Some(run_uid),
+        task_id: Some(task_id),
+        compensation_id: None,
+        schedule_uid: None,
+        schedule_incarnation: None,
+        kind: ExecutionTriggerKind::TaskWatchdog,
+        controller_generation: Some(controller_generation),
+        attempt_generation: Some(attempt_generation),
         compensation_generation: None,
         compensation_attempt_generation: None,
         occurrence_sequence: None,

@@ -563,8 +563,6 @@ pub enum ExecutionTerminalCause {
         /// Exact exhausted limit, with deadline taking precedence over budget.
         reason: ExecutionLimitStop,
     },
-    /// Pending work existed but the scheduler could neither dispatch nor wait.
-    SchedulerNoProgress,
     /// Deterministic replan stop policy ended the run.
     ReplanStop {
         /// Exact closed replan stop reason.
@@ -601,7 +599,6 @@ enum StrictExecutionTerminalCause {
     LimitStop {
         reason: ExecutionLimitStop,
     },
-    SchedulerNoProgress {},
     ReplanStop {
         reason: ReplanStopReason,
     },
@@ -628,7 +625,6 @@ impl<'de> Deserialize<'de> for ExecutionTerminalCause {
                 }
                 StrictExecutionTerminalCause::TaskFailure { class } => Self::TaskFailure { class },
                 StrictExecutionTerminalCause::LimitStop { reason } => Self::LimitStop { reason },
-                StrictExecutionTerminalCause::SchedulerNoProgress {} => Self::SchedulerNoProgress,
                 StrictExecutionTerminalCause::ReplanStop { reason } => Self::ReplanStop { reason },
                 StrictExecutionTerminalCause::Cancellation {} => Self::Cancellation,
                 StrictExecutionTerminalCause::InternalFailure {} => Self::InternalFailure,
@@ -921,26 +917,7 @@ impl LogicalTaskKind {
     }
 }
 
-/// Pure scheduler decision.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ScheduleDecision {
-    /// Newly ready logical tasks.
-    Ready(Vec<LogicalTask>),
-    /// One storage-only wait reached its deterministic settlement time.
-    SettleWait(WaitSettlement),
-    /// Durable work is waiting on execution or an external condition.
-    Waiting(Vec<WaitingReason>),
-    /// The run has a terminal projection.
-    Terminal(TerminalProjection),
-    /// Unfinished nodes exist but no work or wait can advance them.
-    NoProgress {
-        /// Stable pending node IDs, sorted and duplicate-free.
-        pending_node_ids: Vec<String>,
-    },
-}
-
-/// One deterministic storage-only wait transition selected by the scheduler.
+/// One deterministic storage-only wait transition applied by the repository.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WaitSettlement {
@@ -1120,26 +1097,6 @@ pub struct FailureFingerprintInput {
     pub capability_ref: Option<CapabilityReference>,
     /// Human-readable failure message, normalized before hashing.
     pub message: String,
-}
-
-/// Compact task summary supplied to a completion verifier.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct VerifierTaskSummary {
-    /// Stable task ID.
-    pub task_id: ExecutionTaskId,
-    /// Stable node ID.
-    pub node_id: String,
-    /// Stable task item key.
-    pub item_key: String,
-    /// Current terminal task status.
-    pub status: ExecutionTaskStatus,
-    /// Canonical structured-output hash when output exists.
-    pub output_hash: Option<crate::capability::ExecutionHash>,
-    /// Typed failure when present.
-    pub failure: Option<ExecutionTaskFailure>,
-    /// Sorted unique citation source IDs.
-    pub citation_source_ids: Vec<String>,
 }
 
 /// Derives the durable task status implied by one persisted outcome.
@@ -1411,12 +1368,14 @@ fn append_frame(output: &mut Vec<u8>, value: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use moa_artifacts::execution_plan::{ExecutionFailureClass, ExecutionTaskResult, RetryPolicy};
+    use moa_artifacts::execution_plan::{
+        ExecutionFailureClass, ExecutionTaskResult, ExecutionUsage, RetryPolicy,
+    };
     use serde_json::json;
 
     use super::{
-        CompensationId, CompensationStatus, ExecutionLimitStop, ExecutionRunStatus,
-        ExecutionTaskId, ExecutionTerminalCause, ExecutionTerminalEvidence,
+        CompensationId, CompensationStatus, ExecutionCompensationOutcome, ExecutionLimitStop,
+        ExecutionRunStatus, ExecutionTaskId, ExecutionTerminalCause, ExecutionTerminalEvidence,
         ExecutionTerminalReason, PendingExecutionTerminal, exhaust_retry_outcome,
         failed_task_outcome, retry_delay_ms,
     };
@@ -1448,10 +1407,6 @@ mod tests {
                 json!({"kind":"limit_stop","reason":"budget_exceeded"}),
             ),
             (
-                ExecutionTerminalCause::SchedulerNoProgress,
-                json!({"kind":"scheduler_no_progress"}),
-            ),
-            (
                 ExecutionTerminalCause::ReplanStop {
                     reason: ReplanStopReason::DuplicateAmendment,
                 },
@@ -1464,6 +1419,37 @@ mod tests {
             (
                 ExecutionTerminalCause::InternalFailure,
                 json!({"kind":"internal_failure"}),
+            ),
+            (
+                ExecutionTerminalCause::CompensationFailure {
+                    original_status: ExecutionRunStatus::Cancelled,
+                    original_reason: ExecutionTerminalReason::Cancelled,
+                    original_cause: Box::new(ExecutionTerminalCause::Cancellation),
+                    compensation_id: compensation_id(),
+                    outcome: ExecutionCompensationOutcome::Failed {
+                        message: "undo rejected".to_string(),
+                        retryable: false,
+                        usage: usage(),
+                    },
+                },
+                json!({
+                    "kind":"compensation_failure",
+                    "original_status":"cancelled",
+                    "original_reason":"cancelled",
+                    "original_cause":{"kind":"cancellation"},
+                    "compensation_id": compensation_id().as_uuid(),
+                    "outcome":{
+                        "kind":"failed",
+                        "message":"undo rejected",
+                        "retryable":false,
+                        "usage":{
+                            "cost_microusd":7,
+                            "tokens":11,
+                            "tool_calls":1,
+                            "retrieved_bytes":0,
+                        },
+                    },
+                }),
             ),
         ];
         for (cause, expected) in cases {
@@ -1489,6 +1475,65 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            serde_json::from_value::<ExecutionTerminalCause>(json!({
+                "kind":"compensation_failure",
+                "original_status":"cancelled",
+                "original_reason":"cancelled",
+                "original_cause":{"kind":"cancellation","message":"not schema"},
+                "compensation_id": compensation_id().as_uuid(),
+                "outcome":{
+                    "kind":"failed",
+                    "message":"undo rejected",
+                    "retryable":false,
+                    "usage":{
+                        "cost_microusd":7,
+                        "tokens":11,
+                        "tool_calls":1,
+                        "retrieved_bytes":0,
+                    },
+                },
+            }))
+            .is_err(),
+            "the boxed original cause must stay closed to unknown fields"
+        );
+        assert!(
+            serde_json::from_value::<ExecutionTerminalCause>(json!({
+                "kind":"compensation_failure",
+                "original_status":"cancelled",
+                "original_reason":"cancelled",
+                "compensation_id": compensation_id().as_uuid(),
+                "outcome":{
+                    "kind":"failed",
+                    "message":"undo rejected",
+                    "retryable":false,
+                    "usage":{
+                        "cost_microusd":7,
+                        "tokens":11,
+                        "tool_calls":1,
+                        "retrieved_bytes":0,
+                    },
+                },
+            }))
+            .is_err(),
+            "a compensation failure must never default away the terminal decision it superseded"
+        );
+    }
+
+    fn compensation_id() -> CompensationId {
+        CompensationId::derive(ExecutionTaskId::from_uuid(
+            uuid::Uuid::parse_str("019c2222-3333-7444-8555-666666666666")
+                .expect("valid compensation forward task UUID"),
+        ))
+    }
+
+    fn usage() -> ExecutionUsage {
+        ExecutionUsage {
+            cost_microusd: 7,
+            tokens: 11,
+            tool_calls: 1,
+            retrieved_bytes: 0,
+        }
     }
 
     #[test]

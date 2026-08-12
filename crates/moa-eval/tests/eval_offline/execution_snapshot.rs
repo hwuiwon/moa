@@ -482,7 +482,7 @@ fn canonical_plan(catalog_hash: ExecutionHash) -> CanonicalExecutionPlan {
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::At {
                     at: fixed_time() + chrono::TimeDelta::hours(1),
                 },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),

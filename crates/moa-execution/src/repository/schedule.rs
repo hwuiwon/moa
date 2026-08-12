@@ -1026,7 +1026,7 @@ async fn cancel_armed_occurrences(
     let trigger_uids = sqlx::query_scalar::<_, Uuid>(
         "SELECT trigger_uid FROM moa.execution_trigger \
          WHERE schedule_uid=$1 AND schedule_incarnation=$2 \
-           AND trigger_kind='schedule_occurrence' AND state IN ('pending','dispatching') \
+           AND trigger_kind='schedule_occurrence' AND state = 'pending' \
          ORDER BY trigger_uid LIMIT 2 FOR UPDATE",
     )
     .bind(schedule.schedule_uid)

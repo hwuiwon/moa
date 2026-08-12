@@ -226,7 +226,7 @@ fn fixture_input_wait_policy(
         expiry: ExecutionTemporalTarget::After {
             delay_seconds: remaining_seconds / 2,
         },
-        on_expiry: ExecutionWaitExpiryAction::FailRun,
+        on_expiry: ExecutionWaitExpiryAction::FailTask,
     })
 }
 

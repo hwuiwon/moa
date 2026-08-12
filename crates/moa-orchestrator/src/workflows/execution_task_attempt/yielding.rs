@@ -3,7 +3,9 @@
 use chrono::{Duration, Utc};
 use moa_artifacts::execution_plan::{ExecutionTaskOutcome, ExecutionTaskResult};
 use moa_core::types::action_policy::{ActionReviewOwner, ExecutionTaskOrigin};
-use moa_core::types::sandbox_workspace::ExecutionHandReleaseReceipt;
+use moa_core::types::sandbox_workspace::{
+    ExecutionHandContinuationDisposition, ExecutionHandReleaseReceipt,
+};
 use moa_execution::{
     repository::{
         ExecutionAttemptState, ExecutionScope,
@@ -28,9 +30,14 @@ use crate::{
     services::{
         action_reviews::{AcknowledgeExecutionActionReviewRequest, ActionReviewsClient},
         llm_gateway::{LLMCompletionOwner, cancel_completion_owner},
-        tool_executor::{CheckpointAndReleaseExecutionHandsRequest, ToolExecutorClient},
+        tool_executor::{
+            CheckpointAndReleaseExecutionHandsRequest,
+            CheckpointExecutionHandsRetainingComputeRequest, ToolExecutorClient,
+        },
     },
     workflows::{
+        attempt_slice::durable_utc_now_shared,
+        durable_utc_now,
         errors::execution_error_to_handler_error,
         execution_task_attempt::{
             ExecutionTaskAttemptImpl,
@@ -74,8 +81,7 @@ pub(super) async fn park_review(
     else {
         return Ok(());
     };
-    let workspace_release_receipt =
-        checkpoint_task_hands_workflow(workflow, ctx, request, &started).await?;
+    let workspace_release_receipt = checkpoint_task_hands_workflow(ctx, request, &started).await?;
     let review_uid = continuation
         .pending_review_uid()
         .ok_or_else(|| TerminalError::new("review continuation is missing its review UID"))?;
@@ -98,7 +104,7 @@ pub(super) async fn park_review(
         schema_version: continuation.schema_version,
         payload,
         workspace_release_receipt,
-        created_at: journal_now_workflow(ctx, "task_review_checkpointed_at").await?,
+        created_at: durable_utc_now(ctx, "task_review_checkpointed_at").await?,
     };
     let parked = ctx
         .run(|| async move {
@@ -165,8 +171,24 @@ pub(super) async fn yield_continuation(
     else {
         return Ok(());
     };
-    let workspace_release_receipt =
-        checkpoint_task_hands_workflow(workflow, ctx, request, &started).await?;
+    // A continuation is not a wait: the yield below marks the task ready and enqueues
+    // its run activation immediately, so the next slice is admitted in seconds. The
+    // durable checkpoint head still advances here, and the sandbox is kept — suspended
+    // where the provider can genuinely release compute, briefly hot where it cannot —
+    // instead of destroyed and re-provisioned across a zero-length yield. Every genuine
+    // park — review, input, external job, cancel, pause — still releases unconditionally.
+    let disposition = continue_task_hands_workflow(ctx, request, &started).await?;
+    // A failed suspension leaves the hand running with no owner willing to bet on it,
+    // so it finishes the ordinary checkpoint-and-destroy path and fences the resulting
+    // receipt into this checkpoint exactly as a genuine park would.
+    let workspace_release_receipt = match disposition {
+        ExecutionHandContinuationDisposition::SuspendFailed => {
+            checkpoint_task_hands_workflow(ctx, request, &started).await?
+        }
+        ExecutionHandContinuationDisposition::NoComputeOwned
+        | ExecutionHandContinuationDisposition::Suspended
+        | ExecutionHandContinuationDisposition::RetainedHot => None,
+    };
     let payload = continuation.to_bounded_json().map_err(TerminalError::new)?;
     let repository = workflow.repository.clone();
     let checkpoint = NewTaskAttemptCheckpoint {
@@ -176,7 +198,7 @@ pub(super) async fn yield_continuation(
         schema_version: continuation.schema_version,
         payload,
         workspace_release_receipt,
-        created_at: journal_now_workflow(ctx, "task_agent_continuation_checkpointed_at").await?,
+        created_at: durable_utc_now(ctx, "task_agent_continuation_checkpointed_at").await?,
     };
     ctx.run(|| async move {
         repository
@@ -223,10 +245,9 @@ pub(super) async fn park_input(
     else {
         return Ok(());
     };
-    let workspace_release_receipt =
-        checkpoint_task_hands_workflow(workflow, ctx, request, &started).await?;
+    let workspace_release_receipt = checkpoint_task_hands_workflow(ctx, request, &started).await?;
     let payload = continuation.to_bounded_json().map_err(TerminalError::new)?;
-    let settled_at = journal_now_workflow(ctx, "task_input_checkpointed_at").await?;
+    let settled_at = durable_utc_now(ctx, "task_input_checkpointed_at").await?;
     let checkpoint = NewTaskAttemptCheckpoint {
         fence: task_attempt_fence(request),
         task_generation: started.task.generation,
@@ -317,7 +338,7 @@ pub(super) async fn cancel_task_attempt(
     if task.status == ExecutionTaskStatus::Dispatching
         && task.attempt_state == ExecutionAttemptState::Cancelling
     {
-        let now = journal_now_shared(ctx, "unstarted_task_cancel_settled_at").await?;
+        let now = durable_utc_now_shared(ctx, "unstarted_task_cancel_settled_at").await?;
         let attempt_deadline_at = task.attempt_deadline_at.ok_or_else(|| {
             TerminalError::new("unstarted cancelled task is missing its attempt deadline")
         })?;
@@ -387,8 +408,8 @@ pub(super) async fn cancel_task_attempt(
     // Re-running the ordinary release claim here would compare those generations,
     // return `Stale`, and acknowledge the cancel without draining active capacity.
     let started = TaskAttemptRecord { run, task };
-    let receipt = checkpoint_task_hands_shared(workflow, ctx, &attempt_request, &started).await?;
-    let now = journal_now_shared(ctx, "task_cancel_settled_at").await?;
+    let receipt = checkpoint_task_hands_shared(ctx, &attempt_request, &started).await?;
+    let now = durable_utc_now_shared(ctx, "task_cancel_settled_at").await?;
     let repository = workflow.repository.clone();
     let config = workflow.config.clone();
     let fence = task_attempt_fence(&attempt_request);
@@ -443,6 +464,7 @@ pub(super) async fn cancel_task_attempt(
     Ok(())
 }
 
+/// Claims exclusive release ownership of one exact attempt before any teardown.
 pub(super) async fn begin_release_workflow(
     workflow: &ExecutionTaskAttemptImpl,
     ctx: &WorkflowContext<'_>,
@@ -450,7 +472,7 @@ pub(super) async fn begin_release_workflow(
     task_generation: u64,
     reason: &'static str,
 ) -> Result<Option<TaskAttemptRecord>, HandlerError> {
-    let claimed_at = journal_now_workflow(ctx, "task_attempt_release_claimed_at").await?;
+    let claimed_at = durable_utc_now(ctx, "task_attempt_release_claimed_at").await?;
     let repository = workflow.repository.clone();
     let fence = task_attempt_fence(request);
     let outcome = ctx
@@ -464,15 +486,10 @@ pub(super) async fn begin_release_workflow(
         .name("begin_task_attempt_release")
         .await?
         .into_inner();
-    Ok(match outcome {
-        TaskAttemptReleaseClaimOutcome::Applied(record)
-        | TaskAttemptReleaseClaimOutcome::Replayed(record) => Some(*record),
-        TaskAttemptReleaseClaimOutcome::NotFound
-        | TaskAttemptReleaseClaimOutcome::Stale
-        | TaskAttemptReleaseClaimOutcome::InvalidState => None,
-    })
+    Ok(release_claim(outcome))
 }
 
+/// Claims exclusive release ownership from a shared watchdog or cancellation handler.
 pub(super) async fn begin_release_shared(
     workflow: &ExecutionTaskAttemptImpl,
     ctx: &SharedWorkflowContext<'_>,
@@ -480,7 +497,7 @@ pub(super) async fn begin_release_shared(
     task_generation: u64,
     reason: &'static str,
 ) -> Result<Option<TaskAttemptRecord>, HandlerError> {
-    let claimed_at = journal_now_shared(ctx, "task_attempt_release_claimed_at").await?;
+    let claimed_at = durable_utc_now_shared(ctx, "task_attempt_release_claimed_at").await?;
     let repository = workflow.repository.clone();
     let fence = task_attempt_fence(request);
     let outcome = ctx
@@ -494,22 +511,65 @@ pub(super) async fn begin_release_shared(
         .name("begin_task_attempt_release")
         .await?
         .into_inner();
-    Ok(match outcome {
+    Ok(release_claim(outcome))
+}
+
+/// Keeps only a claim that actually owns the exact attempt's release.
+fn release_claim(outcome: TaskAttemptReleaseClaimOutcome) -> Option<TaskAttemptRecord> {
+    match outcome {
         TaskAttemptReleaseClaimOutcome::Applied(record)
         | TaskAttemptReleaseClaimOutcome::Replayed(record) => Some(*record),
         TaskAttemptReleaseClaimOutcome::NotFound
         | TaskAttemptReleaseClaimOutcome::Stale
         | TaskAttemptReleaseClaimOutcome::InvalidState => None,
-    })
+    }
 }
 
+/// Publishes the attempt's checkpoint and keeps its sandbox for the next slice.
+///
+/// The published checkpoint is what makes keeping the sandbox safe at all: whether
+/// it is suspended or held hot, losing it before the next slice arrives costs a
+/// restore from this exact head and nothing else. Which of the two happens is a
+/// provider capability question, so it is decided in the hands layer and reported
+/// back rather than guessed here.
+pub(super) async fn continue_task_hands_workflow(
+    ctx: &WorkflowContext<'_>,
+    request: &ExecutionTaskAttemptRequest,
+    started: &TaskAttemptRecord,
+) -> Result<ExecutionHandContinuationDisposition, HandlerError> {
+    let publish_started_at = durable_utc_now(ctx, "task_hand_continuation_started_at").await?;
+    Ok(crate::restate_identity::replay_safe_request(
+        ctx.service_client::<ToolExecutorClient>()
+            .checkpoint_execution_hands_retaining_compute(Json::from(
+                CheckpointExecutionHandsRetainingComputeRequest {
+                    tenant_id: request.tenant_id,
+                    session_id: started.run.session_id,
+                    run_uid: request.run_uid,
+                    task_id: moa_core::types::identifiers::ExecutionTaskScopeId(
+                        request.task_id.as_uuid(),
+                    ),
+                    logical_generation: started.task.generation,
+                    attempt_generation: request.attempt_generation,
+                    publish_deadline_at: task_hand_release_deadline(publish_started_at),
+                    retention_deadline_at: task_hand_retention_deadline(
+                        publish_started_at,
+                        request.attempt_deadline_at,
+                    ),
+                },
+            )),
+    )
+    .call()
+    .await?
+    .into_inner())
+}
+
+/// Obtains provider-verified checkpoint and release proof for the attempt's hands.
 pub(super) async fn checkpoint_task_hands_workflow(
-    _workflow: &ExecutionTaskAttemptImpl,
     ctx: &WorkflowContext<'_>,
     request: &ExecutionTaskAttemptRequest,
     started: &TaskAttemptRecord,
 ) -> Result<Option<ExecutionHandReleaseReceipt>, HandlerError> {
-    let release_started_at = journal_now_workflow(ctx, "task_hand_release_started_at").await?;
+    let release_started_at = durable_utc_now(ctx, "task_hand_release_started_at").await?;
     let receipt = crate::restate_identity::replay_safe_request(
         ctx.service_client::<ToolExecutorClient>()
             .checkpoint_and_release_execution_hands(Json::from(checkpoint_request(
@@ -524,13 +584,13 @@ pub(super) async fn checkpoint_task_hands_workflow(
     Ok(Some(receipt))
 }
 
+/// Obtains the same release proof from a shared watchdog or cancellation handler.
 pub(super) async fn checkpoint_task_hands_shared(
-    _workflow: &ExecutionTaskAttemptImpl,
     ctx: &SharedWorkflowContext<'_>,
     request: &ExecutionTaskAttemptRequest,
     started: &TaskAttemptRecord,
 ) -> Result<Option<ExecutionHandReleaseReceipt>, HandlerError> {
-    let release_started_at = journal_now_shared(ctx, "task_hand_release_started_at").await?;
+    let release_started_at = durable_utc_now_shared(ctx, "task_hand_release_started_at").await?;
     let receipt = crate::restate_identity::replay_safe_request(
         ctx.service_client::<ToolExecutorClient>()
             .checkpoint_and_release_execution_hands(Json::from(checkpoint_request(
@@ -567,34 +627,44 @@ fn task_hand_release_deadline(release_started_at: chrono::DateTime<Utc>) -> chro
     release_started_at + Duration::minutes(5)
 }
 
-async fn journal_now_workflow(
-    ctx: &WorkflowContext<'_>,
-    name: &'static str,
-) -> Result<chrono::DateTime<Utc>, HandlerError> {
-    Ok(ctx
-        .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
-        .name(name)
-        .await?
-        .into_inner())
-}
+/// How long a continuation boundary may keep an unsuspendable sandbox hot.
+///
+/// This bound only applies to providers that cannot actually release compute, where
+/// the sandbox stays fully billed and keeps its `ActiveHands` admission slot for the
+/// whole window. That is a bet that the next slice arrives before the window closes,
+/// and it only pays off when it arrives *fast*: a longer window does not raise the
+/// odds, it just extends the loss when the bet fails — hot idle compute plus a slot
+/// withheld from runnable work plus, in the end, the full restore anyway.
+///
+/// One reaper interval is therefore the whole budget. It matches
+/// `HandLeaseReaperConfig::interval` (30s by default,
+/// `crates/moa-hands/src/core/reaper.rs`), which is also the granularity at which the
+/// deadline can actually be enforced — a shorter value would not be observed sooner,
+/// and a longer one buys nothing the fast path needs. Providers with real suspension
+/// never reach this constant: they release compute in the yield path instead.
+const TASK_CONTINUATION_HAND_RETENTION: Duration = Duration::seconds(30);
 
-pub(super) async fn journal_now_shared(
-    ctx: &SharedWorkflowContext<'_>,
-    name: &'static str,
-) -> Result<chrono::DateTime<Utc>, HandlerError> {
-    Ok(ctx
-        .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
-        .name(name)
-        .await?
-        .into_inner())
+/// Bounds retention by both the retention window and the attempt's own deadline.
+///
+/// The sandbox was admitted under this attempt's compute deadline, so retention never
+/// carries it past that instant even when the window would allow it.
+fn task_hand_retention_deadline(
+    published_at: chrono::DateTime<Utc>,
+    attempt_deadline_at: chrono::DateTime<Utc>,
+) -> chrono::DateTime<Utc> {
+    (published_at + TASK_CONTINUATION_HAND_RETENTION).min(attempt_deadline_at)
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use moa_execution::wire::ExecutionAttemptCancelReason;
+    use moa_hands::core::reaper::HandLeaseReaperConfig;
 
-    use super::{TaskCancelSettlement, task_cancel_settlement, task_hand_release_deadline};
+    use super::{
+        TASK_CONTINUATION_HAND_RETENTION, TaskCancelSettlement, task_cancel_settlement,
+        task_hand_release_deadline, task_hand_retention_deadline,
+    };
 
     #[test]
     fn pause_cancel_uses_nonterminal_release_finalizer() {
@@ -619,6 +689,44 @@ mod tests {
                 TaskCancelSettlement::Terminal,
             );
         }
+    }
+
+    #[test]
+    fn continuation_retention_never_outlives_the_attempt_that_was_admitted_for_it() {
+        // Pins: a retained continuation hand is bounded by the retention window and, when
+        // the attempt ends sooner, by the attempt deadline it was admitted under. Losing
+        // either bound would let one task hold a fleet active-hands slot indefinitely.
+        let published_at = Utc
+            .with_ymd_and_hms(2026, 8, 12, 9, 0, 0)
+            .single()
+            .expect("fixture timestamp is valid");
+
+        let roomy_attempt_deadline = published_at + Duration::hours(1);
+        assert_eq!(
+            task_hand_retention_deadline(published_at, roomy_attempt_deadline),
+            published_at + TASK_CONTINUATION_HAND_RETENTION,
+        );
+
+        let expiring_attempt_deadline = published_at + Duration::seconds(10);
+        assert_eq!(
+            task_hand_retention_deadline(published_at, expiring_attempt_deadline),
+            expiring_attempt_deadline,
+        );
+        assert!(TASK_CONTINUATION_HAND_RETENTION < Duration::minutes(10));
+    }
+
+    #[test]
+    fn hot_retention_never_outlives_one_reaper_sweep() {
+        // Pins: hot retention on an unsuspendable provider is one reaper interval and no
+        // more. The window is fully billed compute that also withholds an admission slot
+        // from runnable work, so a longer bet does not improve the odds of the next slice
+        // arriving — it only enlarges the loss when the bet fails. The bound is the
+        // 30s `HandLeaseReaperConfig::interval` default that actually enforces it.
+        assert_eq!(
+            TASK_CONTINUATION_HAND_RETENTION,
+            Duration::from_std(HandLeaseReaperConfig::default().interval)
+                .expect("the reaper interval fits a chrono duration"),
+        );
     }
 
     #[test]

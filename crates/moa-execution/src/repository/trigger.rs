@@ -1040,8 +1040,7 @@ impl ExecutionRepository {
             rearmed_trigger_delivery_dispatch_uid(request.trigger_uid, retry_at);
         sqlx::query(
             "UPDATE moa.execution_trigger SET state='pending', due_at=$2, \
-             claim_owner=NULL,claimed_at=NULL,claim_expires_at=NULL,delivered_at=NULL, \
-             last_error=$3,updated_at=now() WHERE trigger_uid=$1",
+             delivered_at=NULL, last_error=$3, updated_at=now() WHERE trigger_uid=$1",
         )
         .bind(request.trigger_uid)
         .bind(retry_at)
@@ -1440,11 +1439,9 @@ pub async fn create_trigger_with_dispatch_in_conn(
     request: &NewExecutionTrigger,
 ) -> Result<ExecutionTriggerWrite> {
     let trigger = create_trigger_in_conn(conn, request).await?;
-    if matches!(
-        trigger.state,
-        ExecutionDeliveryState::Pending | ExecutionDeliveryState::Dispatching
-    ) && reserve_capacity_in_tx(conn, config, trigger_capacity_request(&trigger)).await?
-        == CapacityReserveOutcome::Saturated
+    if trigger.state == ExecutionDeliveryState::Pending
+        && reserve_capacity_in_tx(conn, config, trigger_capacity_request(&trigger)).await?
+            == CapacityReserveOutcome::Saturated
     {
         return Err(Error::CapacitySaturated {
             dimension: ExecutionCapacityDimension::ScheduledTriggers.as_str(),
@@ -1516,9 +1513,8 @@ pub async fn fire_trigger_in_conn(
         sqlx::query(
             r#"
             UPDATE moa.execution_trigger
-            SET state = 'superseded', claim_owner = NULL, claimed_at = NULL,
-                claim_expires_at = NULL, updated_at = now()
-            WHERE trigger_uid = $1 AND state IN ('pending', 'dispatching')
+            SET state = 'superseded', updated_at = now()
+            WHERE trigger_uid = $1 AND state = 'pending'
             "#,
         )
         .bind(trigger_uid)
@@ -1535,10 +1531,9 @@ pub async fn fire_trigger_in_conn(
     sqlx::query(
         r#"
         UPDATE moa.execution_trigger
-        SET state = 'delivered', delivered_at = now(), claim_owner = NULL,
-            claimed_at = NULL, claim_expires_at = NULL, last_error = NULL,
+        SET state = 'delivered', delivered_at = now(), last_error = NULL,
             updated_at = now()
-        WHERE trigger_uid = $1 AND state IN ('pending', 'dispatching')
+        WHERE trigger_uid = $1 AND state = 'pending'
         "#,
     )
     .bind(trigger_uid)
@@ -1637,9 +1632,8 @@ pub(super) async fn deliver_wait_trigger_in_conn(
     }
     if !trigger_is_current(conn, &trigger).await? {
         sqlx::query(
-            "UPDATE moa.execution_trigger SET state='superseded', claim_owner=NULL, \
-             claimed_at=NULL, claim_expires_at=NULL, updated_at=now() \
-             WHERE trigger_uid=$1 AND state IN ('pending','dispatching')",
+            "UPDATE moa.execution_trigger SET state='superseded', updated_at=now() \
+             WHERE trigger_uid=$1 AND state='pending'",
         )
         .bind(trigger_uid)
         .execute(&mut *conn)
@@ -1656,8 +1650,8 @@ pub(super) async fn deliver_wait_trigger_in_conn(
         .map_err(super::row_error)?;
     sqlx::query(
         "UPDATE moa.execution_trigger SET state='delivered', delivered_at=$2, \
-         claim_owner=NULL, claimed_at=NULL, claim_expires_at=NULL, last_error=NULL, \
-         updated_at=now() WHERE trigger_uid=$1 AND state IN ('pending','dispatching')",
+         last_error=NULL, updated_at=now() \
+         WHERE trigger_uid=$1 AND state='pending'",
     )
     .bind(trigger_uid)
     .bind(observed_at)
@@ -1727,8 +1721,7 @@ pub async fn supersede_trigger_in_conn(
             sqlx::query(
                 r#"
                 UPDATE moa.execution_trigger
-                SET state = 'superseded', claim_owner = NULL, claimed_at = NULL,
-                    claim_expires_at = NULL, updated_at = now()
+                SET state = 'superseded', updated_at = now()
                 WHERE trigger_uid = $1
                 "#,
             )
@@ -2371,7 +2364,7 @@ fn trigger_matches_request(record: &ExecutionTriggerRecord, request: &NewExecuti
         && record.payload == request.payload
 }
 
-fn trigger_from_row(row: &sqlx::postgres::PgRow) -> Result<ExecutionTriggerRecord> {
+pub(super) fn trigger_from_row(row: &sqlx::postgres::PgRow) -> Result<ExecutionTriggerRecord> {
     let controller_generation = row
         .try_get::<Option<i64>, _>("controller_generation")
         .map_err(super::row_error)?;

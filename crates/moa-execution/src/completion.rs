@@ -338,15 +338,6 @@ pub fn execution_terminal_reason(
             }
             terminal_reason_from_limit(*reason)
         }
-        ExecutionTerminalCause::SchedulerNoProgress => match projection {
-            TerminalProjection::Unsupported { .. } => ExecutionTerminalReason::UnsupportedPlan,
-            TerminalProjection::Partial { .. }
-            | TerminalProjection::Blocked { .. }
-            | TerminalProjection::Failed { .. } => ExecutionTerminalReason::NoProgress,
-            TerminalProjection::Completed { .. } | TerminalProjection::Cancelled { .. } => {
-                return invalid_terminal_combination(cause, projection);
-            }
-        },
         ExecutionTerminalCause::TaskFailure { class } => match projection {
             TerminalProjection::Unsupported { .. } => ExecutionTerminalReason::UnsupportedPlan,
             TerminalProjection::Blocked { .. } => ExecutionTerminalReason::Blocked,
@@ -356,7 +347,6 @@ pub fn execution_terminal_reason(
                 }
                 ExecutionFailureClass::BudgetExceeded => ExecutionTerminalReason::BudgetExceeded,
                 ExecutionFailureClass::Retryable
-                | ExecutionFailureClass::DependencyFailed
                 | ExecutionFailureClass::InvalidInput
                 | ExecutionFailureClass::InvalidOutput
                 | ExecutionFailureClass::AuthorizationDenied
@@ -370,7 +360,6 @@ pub fn execution_terminal_reason(
                 }
                 ExecutionFailureClass::BudgetExceeded => ExecutionTerminalReason::BudgetExceeded,
                 ExecutionFailureClass::Retryable
-                | ExecutionFailureClass::DependencyFailed
                 | ExecutionFailureClass::InvalidInput
                 | ExecutionFailureClass::InvalidOutput
                 | ExecutionFailureClass::AuthorizationDenied

@@ -11,9 +11,10 @@ use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::workflows::{
+    durable_utc_now,
     errors::execution_error_to_handler_error,
     execution_task_attempt::{
-        ExecutionTaskAttemptImpl, active::TaskAttemptContinuation, journal_now, task_attempt_fence,
+        ExecutionTaskAttemptImpl, active::TaskAttemptContinuation, task_attempt_fence,
         yielding::checkpoint_task_hands_workflow,
     },
 };
@@ -32,7 +33,7 @@ pub(super) async fn yield_external_job(
             .bind_external_job(external_job_uid)
             .map_err(TerminalError::new)?;
     }
-    let claimed_at = journal_now(ctx, "task_external_job_release_claimed_at").await?;
+    let claimed_at = durable_utc_now(ctx, "task_external_job_release_claimed_at").await?;
     let repository = workflow.repository.clone();
     let fence = task_attempt_fence(request);
     let task_generation = started.task.generation;
@@ -66,8 +67,8 @@ pub(super) async fn yield_external_job(
     let Some(started) = started else {
         return Ok(());
     };
-    let release_receipt = checkpoint_task_hands_workflow(workflow, ctx, request, &started).await?;
-    let yielded_at = journal_now(ctx, "task_external_job_yielded_at").await?;
+    let release_receipt = checkpoint_task_hands_workflow(ctx, request, &started).await?;
+    let yielded_at = durable_utc_now(ctx, "task_external_job_yielded_at").await?;
     let continuation_checkpoint = continuation
         .map(|mut continuation| {
             continuation.workspace_release_receipt_id =

@@ -96,14 +96,14 @@ fn all_eight_execution_operations_round_trip_exact_json_and_yaml() {
         (
             ExecutionOperation::Review {
                 prompt: "Approve the report?".to_string(),
-                wait_policy: wait_policy(ExecutionWaitExpiryAction::FailRun),
+                wait_policy: wait_policy(ExecutionWaitExpiryAction::FailTask),
             },
             json!({
                 "kind": "review",
                 "prompt": "Approve the report?",
                 "wait_policy": {
                     "expiry": { "kind": "after", "delay_seconds": 3600 },
-                    "on_expiry": { "kind": "fail_run" }
+                    "on_expiry": { "kind": "fail_task" }
                 }
             }),
         ),
@@ -173,8 +173,8 @@ fn wait_expiry_actions_round_trip_with_canonical_tagged_shapes() {
             json!({ "kind": "fail_task" }),
         ),
         (
-            ExecutionWaitExpiryAction::FailRun,
-            json!({ "kind": "fail_run" }),
+            ExecutionWaitExpiryAction::FailTask,
+            json!({ "kind": "fail_task" }),
         ),
         (
             ExecutionWaitExpiryAction::ContinueWith {
@@ -280,7 +280,7 @@ fn reusable_plan_templates_reject_absolute_temporal_targets_at_every_wait_surfac
         prompt: "Approve?".to_string(),
         wait_policy: ExecutionWaitPolicy {
             expiry: absolute_target(),
-            on_expiry: ExecutionWaitExpiryAction::FailRun,
+            on_expiry: ExecutionWaitExpiryAction::FailTask,
         },
     };
     cases.push((
@@ -341,7 +341,7 @@ fn skill_schema_and_rust_types_require_the_same_wait_contract() {
     let wait_operations = [
         ExecutionOperation::Review {
             prompt: "Approve?".to_string(),
-            wait_policy: wait_policy(ExecutionWaitExpiryAction::FailRun),
+            wait_policy: wait_policy(ExecutionWaitExpiryAction::FailTask),
         },
         ExecutionOperation::WaitSignal {
             signal_name: "ready".to_string(),
@@ -350,8 +350,8 @@ fn skill_schema_and_rust_types_require_the_same_wait_contract() {
             }),
         },
         ExecutionOperation::WaitUntil {
-            wake: ExecutionTemporalTarget::At {
-                at: at("2030-01-02T02:00:00Z"),
+            wake: ExecutionTemporalTarget::After {
+                delay_seconds: 3_600,
             },
             result: json!({ "ready": true }),
         },
@@ -363,6 +363,24 @@ fn skill_schema_and_rust_types_require_the_same_wait_contract() {
             "skill schema must accept canonical operation: {encoded}"
         );
     }
+
+    // A skill is a reusable template, so `validate_skill` passes
+    // `allow_absolute_temporal_targets = false` and rejects every absolute target.
+    // The schema used to advertise the `at` branch anyway, which meant it accepted
+    // documents the canonical validator always refused. Both layers now agree.
+    let absolute_timer = json!({
+        "kind": "wait_until",
+        "wake": { "kind": "at", "at": "2030-01-02T02:00:00Z" },
+        "result": { "ready": true }
+    });
+    assert!(
+        serde_json::from_value::<ExecutionOperation>(absolute_timer.clone()).is_ok(),
+        "the canonical Rust type still carries the absolute branch for compiled plans"
+    );
+    assert!(
+        !operation_validator.is_valid(&absolute_timer),
+        "skill schema must reject an absolute temporal target that skill validation always refuses"
+    );
 
     let stale_review = json!({
         "kind": "review",
@@ -403,7 +421,7 @@ fn skill_schema_and_rust_types_require_the_same_wait_contract() {
         plan_validator.is_valid(&plan_json),
         "skill schema must accept the canonical Rust plan"
     );
-    let mut stale_plan = plan_json;
+    let mut stale_plan = plan_json.clone();
     stale_plan
         .as_object_mut()
         .expect("plan is an object")
@@ -415,6 +433,34 @@ fn skill_schema_and_rust_types_require_the_same_wait_contract() {
     assert!(
         !plan_validator.is_valid(&stale_plan),
         "skill schema must reject a plan without input_wait_policy"
+    );
+
+    // The plan-level policy settles whichever task returned NeedsInput, so a declared
+    // continue_with output has no node output_schema to be checked against. The
+    // canonical validator refuses it, and the schema must refuse it at the same
+    // place — while still accepting continue_with on a node-owned wait, which does
+    // have an owning schema.
+    let mut continued_input_wait = plan_json;
+    continued_input_wait["input_wait_policy"]["on_expiry"] =
+        json!({ "kind": "continue_with", "output": { "approved": true } });
+    assert!(
+        !plan_validator.is_valid(&continued_input_wait),
+        "skill schema must reject continue_with on the plan-level input wait policy"
+    );
+    let mut definition =
+        serde_json::from_value::<ExecutionPlanDefinition>(continued_input_wait.clone())
+            .expect("plan-level continue_with is still a well-formed value");
+    assert!(
+        validate_execution_plan_definition(&definition)
+            .errors
+            .iter()
+            .any(|error| error.path == "execution_plan.input_wait_policy.on_expiry"),
+        "canonical validation must reject continue_with on the input wait policy"
+    );
+    definition.input_wait_policy.on_expiry = ExecutionWaitExpiryAction::FailTask;
+    assert!(
+        plan_validator.is_valid(&serde_json::to_value(&definition).expect("serialize plan")),
+        "schema must still accept a failing input wait expiry"
     );
 }
 
@@ -502,7 +548,7 @@ fn skill_reference_paths_cover_agent_map_and_reducer_agents_only() {
                             "cancel_policy": "retain_effects",
                             "input_wait_policy": {
                                 "expiry": { "kind": "after", "delay_seconds": 3600 },
-                                "on_expiry": { "kind": "fail_run" }
+                                "on_expiry": { "kind": "fail_task" }
                             },
                             "input_schema": { "type": "object" },
                             "output_schema": { "type": "object" },
@@ -628,7 +674,7 @@ fn execution_plan_round_trips_without_a_nested_version() {
         encoded["input_wait_policy"],
         json!({
             "expiry": { "kind": "after", "delay_seconds": 3600 },
-            "on_expiry": { "kind": "fail_run" }
+            "on_expiry": { "kind": "fail_task" }
         })
     );
     assert_eq!(
@@ -1301,6 +1347,51 @@ fn execution_task_outcome_enforces_512_character_citation_id_limit() {
 }
 
 #[test]
+fn conditional_nodes_are_effectful_leaves_nothing_reads_or_depends_on_for_completion() {
+    // Pins: the artifact layer refuses a plan whose meaning needs a conditional node to have
+    // run, before the plan ever reaches a compiler. A false condition commits a skipped node
+    // with a null output, so reading that output, making it the terminal output, or serving a
+    // requirement only through conditional nodes each describes a run nobody can satisfy.
+    let mut read_output = valid_plan();
+    read_output.nodes[0].when = Some(ExecutionCondition::Exists {
+        reference: ExecutionReference {
+            path: "$.input.order_id".to_string(),
+        },
+    });
+    assert_error(
+        &validate_execution_plan_definition(&read_output),
+        "execution_plan.nodes[1].operation.value",
+        "a conditional node's output cannot be read; it is null when the condition is false",
+    );
+
+    let mut conditional_output = valid_plan();
+    conditional_output.nodes[1].when = Some(ExecutionCondition::Exists {
+        reference: ExecutionReference {
+            path: "$.input.order_id".to_string(),
+        },
+    });
+    assert_error(
+        &validate_execution_plan_definition(&conditional_output),
+        "execution_plan.nodes[1].when",
+        "the terminal output node must not be conditional",
+    );
+
+    let mut only_conditional = valid_plan();
+    only_conditional.nodes[0].when = Some(ExecutionCondition::Exists {
+        reference: ExecutionReference {
+            path: "$.input.order_id".to_string(),
+        },
+    });
+    only_conditional.nodes[0].requirement_ids = vec!["req_branch".to_string()];
+    assert_error(
+        &validate_execution_plan_definition(&only_conditional),
+        "execution_plan.nodes",
+        "every node serving requirement `req_branch` is conditional, so all branches \
+         evaluating false would leave it with no eligible node",
+    );
+}
+
+#[test]
 fn conditions_use_the_same_reference_visibility_rules() {
     // Pins: conditional execution cannot inspect undeclared node output.
     let mut plan = valid_plan();
@@ -1372,7 +1463,7 @@ fn task_outcome_variants_round_trip_without_extra_envelope_fields() {
 fn valid_plan() -> ExecutionPlanDefinition {
     ExecutionPlanDefinition {
         cancel_policy: ExecutionCancelPolicy::RetainEffects,
-        input_wait_policy: wait_policy(ExecutionWaitExpiryAction::FailRun),
+        input_wait_policy: wait_policy(ExecutionWaitExpiryAction::FailTask),
         input_schema: json!({ "type": "object" }),
         output_schema: json!({ "type": "object" }),
         nodes: vec![

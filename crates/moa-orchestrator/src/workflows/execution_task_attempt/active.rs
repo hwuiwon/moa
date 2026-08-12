@@ -45,9 +45,10 @@ use crate::{
         GovernedInvocationRequest, invoke_governed_tool,
     },
     workflows::{
+        durable_utc_now,
         errors::moa_error_to_handler_error,
         execution_task_attempt::{
-            ExecutionTaskAttemptImpl, capability_tool_name, journal_now, task_attempt_fence,
+            ExecutionTaskAttemptImpl, capability_tool_name, task_attempt_fence,
         },
     },
 };
@@ -355,7 +356,7 @@ async fn persist_external_start_checkpoint(
         schema_version: continuation.schema_version,
         payload: continuation.to_bounded_json().map_err(TerminalError::new)?,
         workspace_release_receipt: None,
-        created_at: journal_now(ctx, "task_external_start_checkpointed_at").await?,
+        created_at: durable_utc_now(ctx, "task_external_start_checkpointed_at").await?,
     };
     let repository = workflow.repository.clone();
     Ok(ctx

@@ -9,9 +9,10 @@ use uuid::Uuid;
 
 use crate::services::tool_executor::ToolExecutorClient;
 use crate::workflows::{
+    durable_utc_now,
     errors::execution_error_to_handler_error,
     execution_compensation_attempt::{
-        ExecutionCompensationAttemptImpl, journal_now,
+        ExecutionCompensationAttemptImpl,
         yielding::{release_hands_request, release_request},
     },
 };
@@ -24,7 +25,7 @@ pub(super) async fn yield_external_job(
     external_job_uid: Uuid,
 ) -> Result<(), HandlerError> {
     let release_request = release_request(request, ExecutionCompensationReleaseIntent::ExternalJob);
-    let claimed_at = journal_now(ctx, "compensation_external_release_claimed_at").await?;
+    let claimed_at = durable_utc_now(ctx, "compensation_external_release_claimed_at").await?;
     let repository = workflow.repository.clone();
     let request_for_claim = release_request.clone();
     let started = ctx
@@ -55,7 +56,7 @@ pub(super) async fn yield_external_job(
     .call()
     .await?
     .into_inner();
-    let yielded_at = journal_now(ctx, "compensation_external_job_yielded_at").await?;
+    let yielded_at = durable_utc_now(ctx, "compensation_external_job_yielded_at").await?;
     let repository = workflow.repository.clone();
     ctx.run(|| async move {
         repository

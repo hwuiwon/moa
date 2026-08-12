@@ -228,7 +228,7 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::At {
                     at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
                 },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
@@ -520,7 +520,7 @@ async fn execution_service_rows_require_parent_session_and_keep_authorization_im
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::At {
                     at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
                 },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),

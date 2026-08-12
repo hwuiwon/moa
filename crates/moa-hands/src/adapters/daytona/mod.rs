@@ -1211,7 +1211,18 @@ impl HandProvider for DaytonaHandProvider {
         })
     }
 
-    async fn pause(&self, handle: &HandHandle) -> Result<()> {
+    fn supports_suspend(&self) -> bool {
+        true
+    }
+
+    /// Stops the sandbox, releasing its CPU and memory while keeping the filesystem.
+    ///
+    /// `POST /api/sandbox/{id}/stop` is a real compute release on Daytona's
+    /// billing model, not a freeze: the sandbox moves to `stopped` (which
+    /// [`DaytonaHandProvider::status`] maps to [`HandStatus::Stopped`]) and
+    /// [`DaytonaHandProvider::resume`] brings it back with `/start`. This is the
+    /// only genuine compute-release-with-filesystem-retention primitive MOA has.
+    async fn suspend(&self, handle: &HandHandle) -> Result<()> {
         let workspace_id = handle.daytona_id()?;
         let (account_id, account_generation) = cloud_account(handle, "Daytona")?;
         let attempt = self

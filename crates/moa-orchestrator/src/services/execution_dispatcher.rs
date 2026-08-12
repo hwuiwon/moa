@@ -6,9 +6,10 @@ use chrono::{DateTime, Utc};
 use moa_execution::repository::{
     ExecutionRepository, ExecutionScope,
     outbox::{
+        ExecutionAdmissionResourceDimension, ExecutionAdmissionUtilizationSample,
         ExecutionDispatchFailureOutcome, ExecutionDispatchRetryPolicy, ExecutionMaintenanceJobKind,
         ExecutionMaintenanceSettlementOutcome, ExecutionQueueBacklogSample,
-        ExecutionQueueHealthSnapshot,
+        ExecutionQueueHealthSnapshot, ExecutionRunPhaseDimension, ExecutionRunPhaseSample,
     },
 };
 use restate_sdk::prelude::*;
@@ -62,6 +63,8 @@ pub struct DrainExecutionDispatchesResponse {
     pub dead_lettered: usize,
     /// Claims changed ownership before settlement.
     pub stale_claims: usize,
+    /// Claims whose durable settlement failed and was deferred to claim expiry.
+    pub settlement_failures: usize,
 }
 
 /// Operational request for one bounded due-trigger repair pass.
@@ -99,14 +102,20 @@ pub struct ExecutionQueueHealthReport {
     pub claimable_dispatches_saturated: bool,
     /// Age of the oldest observed claimable dispatch.
     pub outbox_lag_seconds: f64,
-    /// Trigger dead letters observed up to the sample cap.
-    pub dead_letter_triggers: u32,
-    /// Whether trigger dead letters exceeded the sample cap.
-    pub dead_letter_triggers_saturated: bool,
     /// Dispatch dead letters observed up to the sample cap.
     pub dead_letter_dispatches: u32,
     /// Whether dispatch dead letters exceeded the sample cap.
     pub dead_letter_dispatches_saturated: bool,
+    /// Nonterminal runs whose absolute deadline has elapsed, capped at the sample limit.
+    pub overdue_deadlines: u32,
+    /// Age of the oldest active forward or compensation attempt, zero when none is active.
+    pub active_attempt_oldest_age_seconds: f64,
+    /// Live run count for every bounded nonterminal phase, including idle zeroes.
+    pub run_phases: Vec<ExecutionRunPhaseSample>,
+    /// Age of the oldest nonterminal external job, zero when none is live.
+    pub external_job_oldest_age_seconds: f64,
+    /// Ceiling utilization for every bounded admission resource, including idle zeroes.
+    pub admission_utilization: Vec<ExecutionAdmissionUtilizationSample>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -114,11 +123,23 @@ struct JournaledDispatchAckBatch {
     delivered_dispatch_uids: Vec<uuid::Uuid>,
 }
 
+/// One journaled claimed row paired with the repair generation of its persisted identity.
+///
+/// The repair epoch cannot be recovered from the row after the claim, so it is journaled
+/// alongside it: replay must address the same Restate invocation this episode did.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ClaimedExecutionDispatch {
+    dispatch: JournaledExecutionDispatch,
+    repair_epoch: u32,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum JournaledDispatchFailure {
     RetryScheduled,
     DeadLettered,
+    DeadLetteredWithoutOwnerRepair,
     StaleClaim,
 }
 
@@ -282,7 +303,10 @@ impl ExecutionDispatchDrain for ExecutionDispatchDrainImpl {
                             Json::from(
                                 records
                                     .into_iter()
-                                    .map(JournaledExecutionDispatch::from)
+                                    .map(|record| ClaimedExecutionDispatch {
+                                        repair_epoch: record.repair_epoch,
+                                        dispatch: JournaledExecutionDispatch::from(record),
+                                    })
                                     .collect::<Vec<_>>(),
                             )
                         })
@@ -299,14 +323,15 @@ impl ExecutionDispatchDrain for ExecutionDispatchDrainImpl {
             retry_scheduled: 0,
             dead_lettered: 0,
             stale_claims: 0,
+            settlement_failures: 0,
         };
         let delivery_results = accept_batch(&ctx, &journaled).await?;
         let mut delivered_dispatch_uids = Vec::with_capacity(journaled.len());
         let mut failed_dispatches = Vec::new();
-        for (dispatch, accepted) in journaled.into_iter().zip(delivery_results) {
+        for (claimed, accepted) in journaled.into_iter().zip(delivery_results) {
             match accepted {
-                Ok(()) => delivered_dispatch_uids.push(dispatch.dispatch_uid),
-                Err(error) => failed_dispatches.push((dispatch, error)),
+                Ok(()) => delivered_dispatch_uids.push(claimed.dispatch.dispatch_uid),
+                Err(error) => failed_dispatches.push((claimed.dispatch, error)),
             }
         }
         settle_delivered_batch(
@@ -317,6 +342,8 @@ impl ExecutionDispatchDrain for ExecutionDispatchDrainImpl {
             &mut response,
         )
         .await?;
+        // One unsettleable row must never abort the pass: the successor scheduled below is the
+        // fleet's only self-perpetuating pump, and an unsettled claim is recovered at expiry.
         for (dispatch, error) in failed_dispatches {
             settle_failure(
                 &ctx,
@@ -326,7 +353,7 @@ impl ExecutionDispatchDrain for ExecutionDispatchDrainImpl {
                 error,
                 &mut response,
             )
-            .await?;
+            .await;
         }
         // Synchronous trigger/controller deliveries can materialize Ready tasks without another
         // outbox continuation. Admit once more inside this bounded drain episode so the resulting
@@ -360,11 +387,14 @@ impl ExecutionDispatchDrain for ExecutionDispatchDrainImpl {
         moa_observability::runtime_metrics::record_execution_dispatch_batch_size(
             admission.admitted_count,
         );
-        if let Some(age) = admission.oldest_ready_age_millis {
-            moa_observability::runtime_metrics::record_execution_oldest_ready_age(
-                Duration::from_millis(age),
-            );
-        }
+        // Written on every drain, including the empty one. A gauge set only while work exists
+        // holds its last value forever once the queue drains, so its SLO alert would page on a
+        // queue that emptied hours earlier.
+        moa_observability::runtime_metrics::record_execution_oldest_ready_age(
+            admission
+                .oldest_ready_age_millis
+                .map_or(Duration::ZERO, Duration::from_millis),
+        );
         let repository = self.repository.clone();
         let wake = ctx
             .run(|| async move {
@@ -411,6 +441,20 @@ fn dispatch_head_idempotency_key(
         next_due_at.timestamp_micros(),
         head_updated_at.timestamp_micros()
     )
+}
+
+/// Returns the repair-scoped Restate delivery identity for one claimed outbox row.
+///
+/// Restate retains a completed invocation's response under its idempotency key for the
+/// endpoint's retention window, so a recovery requeue that reused the bare `dispatch_uid`
+/// would attach to that memoized response and never execute its target. Each requeue
+/// advances the row's repair epoch; the steady-state identity is unchanged at epoch zero.
+fn delivery_identity(dispatch_uid: uuid::Uuid, repair_epoch: u32) -> String {
+    if repair_epoch == 0 {
+        dispatch_uid.to_string()
+    } else {
+        format!("{dispatch_uid}:{repair_epoch}")
+    }
 }
 
 fn reconciliation_drain_idempotency_key(generation: u64) -> String {
@@ -712,16 +756,34 @@ fn queue_health_report(snapshot: ExecutionQueueHealthSnapshot) -> ExecutionQueue
         claimable_dispatches_saturated: snapshot.claimable_dispatches.saturated,
         outbox_lag_seconds: backlog_age(snapshot.observed_at, &snapshot.claimable_dispatches)
             .as_secs_f64(),
-        dead_letter_triggers: snapshot.dead_letter_triggers.observed_count,
-        dead_letter_triggers_saturated: snapshot.dead_letter_triggers.saturated,
         dead_letter_dispatches: snapshot.dead_letter_dispatches.observed_count,
         dead_letter_dispatches_saturated: snapshot.dead_letter_dispatches.saturated,
+        overdue_deadlines: snapshot.overdue_deadlines,
+        active_attempt_oldest_age_seconds: age_since(
+            snapshot.observed_at,
+            snapshot.oldest_active_attempt_at,
+        )
+        .as_secs_f64(),
+        run_phases: snapshot.run_phases,
+        external_job_oldest_age_seconds: age_since(
+            snapshot.observed_at,
+            snapshot.oldest_external_job_at,
+        )
+        .as_secs_f64(),
+        admission_utilization: snapshot.admission_utilization,
     }
 }
 
 fn backlog_age(observed_at: DateTime<Utc>, sample: &ExecutionQueueBacklogSample) -> Duration {
-    sample
-        .oldest_at
+    age_since(observed_at, sample.oldest_at)
+}
+
+/// Returns the age of one observed timestamp, reporting zero when nothing was observed.
+///
+/// An absent observation is a healthy zero rather than a gap: these ages back `absent()`
+/// guarded alerts, so a quiet fleet must still publish a value.
+fn age_since(observed_at: DateTime<Utc>, oldest_at: Option<DateTime<Utc>>) -> Duration {
+    oldest_at
         .map(|oldest_at| observed_at.signed_duration_since(oldest_at))
         .and_then(|age| age.to_std().ok())
         .unwrap_or(Duration::ZERO)
@@ -732,8 +794,6 @@ fn record_queue_health(health: &ExecutionQueueHealthReport) {
         Duration::from_secs_f64(health.trigger_lag_seconds),
         u64::from(health.due_triggers),
         health.due_triggers_saturated,
-        u64::from(health.dead_letter_triggers),
-        health.dead_letter_triggers_saturated,
     );
     moa_observability::runtime_metrics::record_execution_outbox_queue(
         Duration::from_secs_f64(health.outbox_lag_seconds),
@@ -742,6 +802,83 @@ fn record_queue_health(health: &ExecutionQueueHealthReport) {
         u64::from(health.dead_letter_dispatches),
         health.dead_letter_dispatches_saturated,
     );
+    // Every gauge below is written on each snapshot, including its healthy zero: the alerts
+    // carry `absent()`, so a gauge written only while work exists would page on a quiet fleet.
+    moa_observability::runtime_metrics::record_execution_overdue_deadlines(u64::from(
+        health.overdue_deadlines,
+    ));
+    moa_observability::runtime_metrics::record_execution_active_attempt_oldest_age(
+        Duration::from_secs_f64(health.active_attempt_oldest_age_seconds),
+    );
+    moa_observability::runtime_metrics::record_execution_external_job_oldest_age(
+        Duration::from_secs_f64(health.external_job_oldest_age_seconds),
+    );
+    for sample in &health.run_phases {
+        moa_observability::runtime_metrics::record_execution_run_phase(
+            run_phase_metric(sample.phase),
+            sample.run_count,
+        );
+    }
+    for sample in &health.admission_utilization {
+        let resource = admission_resource_metric(sample.resource);
+        moa_observability::runtime_metrics::record_execution_admission_utilization(
+            resource,
+            moa_observability::runtime_metrics::ExecutionAdmissionScope::Fleet,
+            sample.fleet_ratio,
+        );
+        moa_observability::runtime_metrics::record_execution_admission_utilization(
+            resource,
+            moa_observability::runtime_metrics::ExecutionAdmissionScope::TenantPeak,
+            sample.tenant_peak_ratio,
+        );
+        moa_observability::runtime_metrics::record_execution_tenant_max_share(
+            resource,
+            sample.tenant_max_share_ratio,
+        );
+    }
+}
+
+/// Maps one durable nonterminal run status to its metric phase label.
+///
+/// Both sides are the exact nonterminal `moa.execution_run.status` labels; the match exists
+/// only because the repository cannot depend on the observability crate. It is total, so a
+/// new durable phase cannot reach the census without being given a label.
+fn run_phase_metric(
+    phase: ExecutionRunPhaseDimension,
+) -> moa_observability::runtime_metrics::ExecutionRunMetricPhase {
+    use moa_observability::runtime_metrics::ExecutionRunMetricPhase as Metric;
+    match phase {
+        ExecutionRunPhaseDimension::AwaitingConfirmation => Metric::AwaitingConfirmation,
+        ExecutionRunPhaseDimension::Queued => Metric::Queued,
+        ExecutionRunPhaseDimension::Running => Metric::Running,
+        ExecutionRunPhaseDimension::WaitingInput => Metric::WaitingInput,
+        ExecutionRunPhaseDimension::WaitingReview => Metric::WaitingReview,
+        ExecutionRunPhaseDimension::WaitingSignal => Metric::WaitingSignal,
+        ExecutionRunPhaseDimension::WaitingTimer => Metric::WaitingTimer,
+        ExecutionRunPhaseDimension::WaitingExternal => Metric::WaitingExternal,
+        ExecutionRunPhaseDimension::WaitingReplan => Metric::WaitingReplan,
+        ExecutionRunPhaseDimension::PauseRequested => Metric::PauseRequested,
+        ExecutionRunPhaseDimension::Pausing => Metric::Pausing,
+        ExecutionRunPhaseDimension::Paused => Metric::Paused,
+        ExecutionRunPhaseDimension::Compensating => Metric::Compensating,
+    }
+}
+
+/// Maps one durable capacity dimension to its metric label.
+///
+/// Both sides are the exact `moa.execution_capacity_bucket.resource_dimension` labels; the
+/// match exists only because the repository cannot depend on the observability crate.
+fn admission_resource_metric(
+    resource: ExecutionAdmissionResourceDimension,
+) -> moa_observability::runtime_metrics::ExecutionAdmissionResource {
+    use moa_observability::runtime_metrics::ExecutionAdmissionResource as Metric;
+    match resource {
+        ExecutionAdmissionResourceDimension::ActiveRuns => Metric::ActiveRuns,
+        ExecutionAdmissionResourceDimension::ActiveTasks => Metric::ActiveTasks,
+        ExecutionAdmissionResourceDimension::ParkedRuns => Metric::ParkedRuns,
+        ExecutionAdmissionResourceDimension::ScheduledTriggers => Metric::ScheduledTriggers,
+        ExecutionAdmissionResourceDimension::ExternalJobs => Metric::ExternalJobs,
+    }
 }
 
 async fn settle_delivered_batch(
@@ -788,6 +925,10 @@ async fn settle_delivered_batch(
     Ok(())
 }
 
+/// Records one delivery failure, tolerating a durable settlement that cannot be applied.
+///
+/// A row whose settlement fails keeps its claim until expiry and is reclaimed by a later
+/// drain, so the failure is counted and the pass continues rather than aborting the fleet.
 async fn settle_failure(
     ctx: &ObjectContext<'_>,
     repository: &ExecutionRepository,
@@ -795,11 +936,11 @@ async fn settle_failure(
     dispatch: JournaledExecutionDispatch,
     error: String,
     response: &mut DrainExecutionDispatchesResponse,
-) -> Result<(), HandlerError> {
+) {
     let repository = repository.clone();
     let claim_owner = claim_owner.to_string();
     let dispatch_uid = dispatch.dispatch_uid;
-    let outcome = ctx
+    let settlement = ctx
         .run(|| async move {
             repository
                 .record_dispatch_failure(
@@ -818,6 +959,9 @@ async fn settle_failure(
                         ExecutionDispatchFailureOutcome::DeadLettered => {
                             JournaledDispatchFailure::DeadLettered
                         }
+                        ExecutionDispatchFailureOutcome::DeadLetteredWithoutOwnerRepair => {
+                            JournaledDispatchFailure::DeadLetteredWithoutOwnerRepair
+                        }
                         ExecutionDispatchFailureOutcome::StaleClaim => {
                             JournaledDispatchFailure::StaleClaim
                         }
@@ -826,23 +970,47 @@ async fn settle_failure(
                 .map_err(execution_error_to_handler_error)
         })
         .name(format!("execution_dispatch_fail_{dispatch_uid}"))
-        .await?
-        .into_inner();
+        .await;
+    let outcome = match settlement {
+        Ok(outcome) => outcome.into_inner(),
+        Err(settlement_error) => {
+            tracing::warn!(
+                dispatch_uid = %dispatch_uid,
+                error = %settlement_error,
+                "execution dispatch delivery failure could not be settled; deferring to claim expiry"
+            );
+            response.settlement_failures += 1;
+            return;
+        }
+    };
     match outcome {
         JournaledDispatchFailure::RetryScheduled => response.retry_scheduled += 1,
         JournaledDispatchFailure::DeadLettered => response.dead_lettered += 1,
+        JournaledDispatchFailure::DeadLetteredWithoutOwnerRepair => {
+            response.dead_lettered += 1;
+            tracing::warn!(
+                dispatch_uid = %dispatch_uid,
+                "execution dispatch dead-lettered while its attempt owner was already settled"
+            );
+        }
         JournaledDispatchFailure::StaleClaim => response.stale_claims += 1,
     }
-    Ok(())
 }
 
 async fn accept_batch(
     ctx: &ObjectContext<'_>,
-    dispatches: &[JournaledExecutionDispatch],
+    dispatches: &[ClaimedExecutionDispatch],
 ) -> Result<Vec<Result<(), String>>, HandlerError> {
     let targets = dispatches
         .iter()
-        .map(JournaledExecutionDispatch::target)
+        .map(|claimed| {
+            claimed.dispatch.target().map(|target| {
+                (
+                    target,
+                    delivery_identity(claimed.dispatch.dispatch_uid, claimed.repair_epoch),
+                )
+            })
+        })
         .collect::<Vec<_>>();
     let mut results = (0..targets.len()).map(|_| None).collect::<Vec<_>>();
     let mut run_slots = Vec::new();
@@ -855,8 +1023,7 @@ async fn accept_batch(
     // are retained in homogeneous durable fan-ins and reassembled by stable slot below.
     for (slot, target) in targets.into_iter().enumerate() {
         match target {
-            Ok(ExecutionDispatchTarget::RunActivation(request)) => {
-                let dispatch_uid = request.dispatch_uid;
+            Ok((ExecutionDispatchTarget::RunActivation(request), identity)) => {
                 run_slots.push(slot);
                 run_calls.push(
                     crate::restate_identity::replay_safe_request(
@@ -864,24 +1031,25 @@ async fn accept_batch(
                             request.run_uid.to_string(),
                         )
                         .advance(Json::from(request))
-                        .idempotency_key(dispatch_uid.to_string()),
+                        .idempotency_key(identity),
                     )
                     .call(),
                 );
             }
-            Ok(ExecutionDispatchTarget::TriggerDelivery(request)) => {
-                let dispatch_uid = request.dispatch_uid;
+            Ok((ExecutionDispatchTarget::TriggerDelivery(request), identity)) => {
                 trigger_slots.push(slot);
                 trigger_calls.push(
                     crate::restate_identity::replay_safe_request(
                         ctx.service_client::<ExecutionTriggerClient>()
                             .fire(Json::from(request))
-                            .idempotency_key(dispatch_uid.to_string()),
+                            .idempotency_key(identity),
                     )
                     .call(),
                 );
             }
-            Ok(target) => results[slot] = Some(accept_target(ctx, target).await.map(|_| ())),
+            Ok((target, identity)) => {
+                results[slot] = Some(accept_target(ctx, target, identity).await.map(|_| ()));
+            }
             Err(error) => results[slot] = Some(Err(error.to_string())),
         }
     }
@@ -909,17 +1077,24 @@ async fn accept_batch(
 async fn accept_target(
     ctx: &ObjectContext<'_>,
     target: ExecutionDispatchTarget,
+    identity: String,
 ) -> Result<String, String> {
     match target {
         ExecutionDispatchTarget::RunActivation(_) | ExecutionDispatchTarget::TriggerDelivery(_) => {
             Err("synchronous dispatch target bypassed bounded fan-out".to_string())
         }
         ExecutionDispatchTarget::TaskAttempt(request) => {
-            let dispatch_uid = request.dispatch_uid;
+            // The workflow key stays the bare dispatch UID: `ExecutionTaskAttempt::run` asserts
+            // `ctx.key() == request.dispatch_uid`, and cancellation addresses the same workflow
+            // through the task row's `active_dispatch_uid`. A repair therefore only restarts
+            // this attempt while Restate holds no completed `run` for that key — see
+            // `requeue_current_accepted_dispatches_in_conn` for the two cases and the watchdog
+            // backstop that covers the other one.
+            let workflow_key = request.dispatch_uid.to_string();
             let handle = crate::restate_identity::replay_safe_request(
-                ctx.workflow_client::<ExecutionTaskAttemptClient>(dispatch_uid.to_string())
+                ctx.workflow_client::<ExecutionTaskAttemptClient>(workflow_key)
                     .run(Json::from(request))
-                    .idempotency_key(dispatch_uid.to_string()),
+                    .idempotency_key(identity),
             )
             .send();
             handle
@@ -928,12 +1103,11 @@ async fn accept_target(
                 .map_err(|error| error.to_string())
         }
         ExecutionDispatchTarget::TaskAttemptCancel(request) => {
-            let dispatch_uid = request.cancellation_dispatch_uid;
             let workflow_key = request.active_dispatch_uid.to_string();
             let handle = crate::restate_identity::replay_safe_request(
                 ctx.workflow_client::<ExecutionTaskAttemptClient>(workflow_key)
                     .cancel(Json::from(request))
-                    .idempotency_key(dispatch_uid.to_string()),
+                    .idempotency_key(identity),
             )
             .send();
             handle
@@ -942,11 +1116,13 @@ async fn accept_target(
                 .map_err(|error| error.to_string())
         }
         ExecutionDispatchTarget::CompensationAttempt(request) => {
-            let dispatch_uid = request.dispatch_uid;
+            // See the task-attempt arm: the compensation workflow asserts the same key identity
+            // and carries the same repair split.
+            let workflow_key = request.dispatch_uid.to_string();
             let handle = crate::restate_identity::replay_safe_request(
-                ctx.workflow_client::<ExecutionCompensationAttemptClient>(dispatch_uid.to_string())
+                ctx.workflow_client::<ExecutionCompensationAttemptClient>(workflow_key)
                     .run(Json::from(request))
-                    .idempotency_key(dispatch_uid.to_string()),
+                    .idempotency_key(identity),
             )
             .send();
             handle
@@ -955,12 +1131,11 @@ async fn accept_target(
                 .map_err(|error| error.to_string())
         }
         ExecutionDispatchTarget::CompensationAttemptCancel(request) => {
-            let dispatch_uid = request.cancellation_dispatch_uid;
             let workflow_key = request.active_dispatch_uid.to_string();
             let handle = crate::restate_identity::replay_safe_request(
                 ctx.workflow_client::<ExecutionCompensationAttemptClient>(workflow_key)
                     .cancel(Json::from(request))
-                    .idempotency_key(dispatch_uid.to_string()),
+                    .idempotency_key(identity),
             )
             .send();
             handle
@@ -968,14 +1143,11 @@ async fn accept_target(
                 .await
                 .map_err(|error| error.to_string())
         }
-        ExecutionDispatchTarget::ExternalCancel {
-            dispatch_uid,
-            request,
-        } => {
+        ExecutionDispatchTarget::ExternalCancel { request, .. } => {
             let handle = crate::restate_identity::replay_safe_request(
                 ctx.service_client::<ToolExecutorClient>()
                     .cancel_external_job(Json::from(request))
-                    .idempotency_key(dispatch_uid.to_string()),
+                    .idempotency_key(identity),
             )
             .send();
             handle
@@ -989,8 +1161,9 @@ async fn accept_target(
 #[cfg(test)]
 mod tests {
     use super::{
-        dispatch_head_idempotency_key, next_dispatch_delay, next_dispatch_successor,
-        reconciliation_drain_idempotency_key,
+        ExecutionRunPhaseDimension, delivery_identity, dispatch_head_idempotency_key,
+        next_dispatch_delay, next_dispatch_successor, queue_health_report,
+        reconciliation_drain_idempotency_key, run_phase_metric,
     };
     use chrono::{TimeDelta, Utc};
     use std::time::Duration;
@@ -1063,6 +1236,20 @@ mod tests {
     }
 
     #[test]
+    fn repaired_delivery_identity_leaves_steady_state_keys_untouched() {
+        // Pins: Restate memoizes a completed invocation's response under its idempotency key,
+        // so every recovery requeue must address a distinct identity while an unrepaired row
+        // keeps the bare dispatch UID that producers and replays already coalesce on.
+        let dispatch_uid = uuid::Uuid::from_u128(1);
+        assert_eq!(delivery_identity(dispatch_uid, 0), dispatch_uid.to_string());
+        let first_repair = delivery_identity(dispatch_uid, 1);
+        assert_ne!(first_repair, dispatch_uid.to_string());
+        assert_eq!(first_repair, delivery_identity(dispatch_uid, 1));
+        assert_ne!(first_repair, delivery_identity(dispatch_uid, 2));
+        assert_ne!(first_repair, delivery_identity(uuid::Uuid::from_u128(2), 1));
+    }
+
+    #[test]
     fn reconciliation_redrive_does_not_reuse_a_completed_head_identity() {
         // Pins: repair can requeue the same dispatch UID and due time after downstream loss; each
         // persisted maintenance generation must therefore bypass the normal completed head key.
@@ -1072,5 +1259,118 @@ mod tests {
         assert_ne!(head_key, first_repair);
         assert_eq!(first_repair, reconciliation_drain_idempotency_key(7));
         assert_ne!(first_repair, reconciliation_drain_idempotency_key(8));
+    }
+
+    /// Builds the snapshot a quiet fleet produces, with the two live-work fields injectable.
+    fn quiet_snapshot(
+        observed_at: chrono::DateTime<Utc>,
+        running_runs: u64,
+        oldest_external_job_at: Option<chrono::DateTime<Utc>>,
+    ) -> moa_execution::repository::outbox::ExecutionQueueHealthSnapshot {
+        use moa_execution::repository::outbox::{
+            ExecutionAdmissionResourceDimension, ExecutionAdmissionUtilizationSample,
+            ExecutionQueueBacklogSample, ExecutionQueueHealthSnapshot, ExecutionRunPhaseSample,
+        };
+
+        let idle_backlog = ExecutionQueueBacklogSample {
+            oldest_at: None,
+            observed_count: 0,
+            saturated: false,
+        };
+        // Exactly what the repository fold produces: every bounded phase present, and every
+        // phase holding no runs carrying its explicit zero.
+        let run_phases = ExecutionRunPhaseDimension::ALL
+            .into_iter()
+            .map(|phase| ExecutionRunPhaseSample {
+                phase,
+                run_count: if phase == ExecutionRunPhaseDimension::Running {
+                    running_runs
+                } else {
+                    0
+                },
+            })
+            .collect();
+        ExecutionQueueHealthSnapshot {
+            observed_at,
+            due_triggers: idle_backlog.clone(),
+            claimable_dispatches: idle_backlog.clone(),
+            dead_letter_dispatches: idle_backlog,
+            overdue_deadlines: 0,
+            oldest_active_attempt_at: None,
+            run_phases,
+            oldest_external_job_at,
+            admission_utilization: vec![ExecutionAdmissionUtilizationSample {
+                resource: ExecutionAdmissionResourceDimension::ActiveRuns,
+                fleet_ratio: 0.1,
+                tenant_peak_ratio: 1.0,
+                tenant_max_share_ratio: 0.75,
+            }],
+        }
+    }
+
+    #[test]
+    fn quiet_fleet_still_reports_every_run_phase_and_external_job_age() {
+        // Pins: the reconciliation pass publishes these gauges, and their alerts carry
+        // `absent()`. A phase holding no runs and a fleet with no live external job must
+        // still produce a written zero, so the report may neither drop an idle phase nor
+        // leave the external-job age unset when the repository observed nothing.
+        let observed_at = Utc::now();
+
+        let report = queue_health_report(quiet_snapshot(observed_at, 3, None));
+        assert_eq!(
+            report.run_phases.len(),
+            ExecutionRunPhaseDimension::ALL.len(),
+            "an idle phase must survive the report boundary and publish its zero"
+        );
+        assert_eq!(
+            report
+                .run_phases
+                .iter()
+                .filter(|sample| sample.run_count == 0)
+                .count(),
+            ExecutionRunPhaseDimension::ALL.len() - 1
+        );
+        assert_eq!(
+            report.run_phases.iter().map(|s| s.run_count).sum::<u64>(),
+            3,
+            "the census must still sum to the live fleet"
+        );
+        assert_eq!(report.external_job_oldest_age_seconds, 0.0);
+        assert_eq!(
+            report.admission_utilization[0].tenant_max_share_ratio, 0.75,
+            "tenant concentration must reach the metric layer unmodified"
+        );
+
+        // A live external job is reported as its real age, not as the same healthy zero.
+        let live = queue_health_report(quiet_snapshot(
+            observed_at,
+            0,
+            Some(observed_at - TimeDelta::seconds(90)),
+        ));
+        assert_eq!(live.external_job_oldest_age_seconds, 90.0);
+        assert_eq!(
+            live.run_phases.len(),
+            ExecutionRunPhaseDimension::ALL.len(),
+            "a fleet with no runs at all still reports every phase"
+        );
+    }
+
+    #[test]
+    fn every_bounded_run_phase_maps_to_a_distinct_metric_label() {
+        // Pins: the census is one gauge series per phase label. If two durable phases mapped
+        // onto one label they would overwrite each other's series, and the census would
+        // report a number smaller than the live fleet while every gauge still looked healthy.
+        let labels = ExecutionRunPhaseDimension::ALL
+            .into_iter()
+            .map(|phase| run_phase_metric(phase).as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(labels.len(), ExecutionRunPhaseDimension::ALL.len());
+        for phase in ExecutionRunPhaseDimension::ALL {
+            assert_eq!(
+                run_phase_metric(phase).as_str(),
+                phase.as_str(),
+                "the metric label must be the durable status label"
+            );
+        }
     }
 }

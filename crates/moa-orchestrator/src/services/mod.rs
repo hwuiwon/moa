@@ -18,6 +18,7 @@ pub mod contacts;
 pub mod dual_control;
 pub mod durable_timeout;
 pub mod execution;
+pub mod execution_amendment_planner;
 pub mod execution_dispatcher;
 pub mod execution_retention;
 pub mod execution_schedule;

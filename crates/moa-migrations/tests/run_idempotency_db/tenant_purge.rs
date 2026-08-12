@@ -709,7 +709,7 @@ async fn seed_tenant_purge_activated_release_chain(
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
 async fn bounded_tenant_purge_final_schema_executes_bounded_batches_db() {
-    // Pins: a pristine final schema persists exactly 142 purge stages, installs
+    // Pins: a pristine final schema persists exactly 158 purge stages, installs
     // statement fences, and advances a real purge in fixed-size batches.
     let admin_url = test_database_url();
     let db_name = unique_db_name();
@@ -1308,7 +1308,7 @@ async fn bounded_tenant_purge_final_schema_executes_bounded_batches_db() {
             true,
         )
     );
-    assert_eq!(catalog_count, 142);
+    assert_eq!(catalog_count, 158);
     assert_eq!(
         trigger_kinds,
         vec![
@@ -1419,9 +1419,9 @@ async fn bounded_tenant_purge_final_schema_executes_bounded_batches_db() {
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
 async fn sandbox_workspace_purge_catalog_db() {
-    // Pins: V58 extends the current 134-stage catalog to exactly 142 with all
-    // workspace rows fenced and checkpoint head/parent ordering encoded in the
-    // bounded owner-only purge function.
+    // Pins: a full clean apply lands a 158-stage catalog (V58 took it to 142, V59
+    // to 157, V60 to 158) with all workspace rows fenced and checkpoint
+    // head/parent ordering encoded in the bounded owner-only purge function.
     let admin_url = test_database_url();
     let db_name = unique_db_name();
     let tenant_id = uuid::Uuid::new_v4();
@@ -1559,7 +1559,7 @@ async fn sandbox_workspace_purge_catalog_db() {
     ) = outcome.expect("sandbox workspace purge schema assertions should complete");
     assert_eq!(first, expected_migration_labels());
     assert!(second.is_empty(), "V58 must not reapply: {second:?}");
-    assert_eq!(catalog_count, 142);
+    assert_eq!(catalog_count, 158);
     assert_eq!(
         workspace_stages,
         vec![
@@ -1596,8 +1596,8 @@ async fn sandbox_workspace_purge_catalog_db() {
     );
     assert_eq!(fence_count, 14);
     assert_eq!(global_catalog_count, 0);
-    assert!(purge_definition.contains("catalog_count <> 142"));
-    assert!(purge_definition.contains("exactly 142 tables"));
+    assert!(purge_definition.contains("catalog_count <> 158"));
+    assert!(purge_definition.contains("exactly 158 tables"));
     assert!(purge_definition.contains("SET current_checkpoint_id = NULL"));
     assert!(purge_definition.contains("ORDER BY target.generation DESC"));
     assert_eq!(checkpoint_columns.len(), 7);

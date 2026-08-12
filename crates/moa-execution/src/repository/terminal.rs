@@ -485,7 +485,7 @@ impl ExecutionRepository {
         let has_pending_trigger_work: bool = sqlx::query_scalar(
             "SELECT \
                EXISTS (SELECT 1 FROM moa.execution_trigger \
-                 WHERE run_uid = $1 AND state IN ('pending', 'dispatching')) \
+                 WHERE run_uid = $1 AND state = 'pending') \
                OR EXISTS (SELECT 1 FROM moa.execution_dispatch_outbox \
                  WHERE run_uid = $1 AND trigger_uid IS NOT NULL \
                    AND state IN ('pending', 'dispatching')) \
@@ -571,7 +571,7 @@ pub(super) async fn drain_run_triggers_page_in_conn(
         "SELECT trigger_uid, trigger_kind, controller_generation, attempt_generation, \
                 compensation_generation, compensation_attempt_generation \
          FROM moa.execution_trigger \
-         WHERE run_uid = $1 AND state IN ('pending', 'dispatching') \
+         WHERE run_uid = $1 AND state = 'pending' \
          ORDER BY trigger_kind, trigger_uid LIMIT $2 FOR UPDATE",
     )
     .bind(run.run_uid)
@@ -615,7 +615,7 @@ pub(super) async fn drain_run_triggers_page_in_conn(
     }
     let next_wake_at: Option<DateTime<Utc>> = sqlx::query_scalar(
         "SELECT MIN(due_at) FROM moa.execution_trigger \
-         WHERE run_uid = $1 AND state IN ('pending', 'dispatching')",
+         WHERE run_uid = $1 AND state = 'pending'",
     )
     .bind(run.run_uid)
     .fetch_one(conn.as_mut())

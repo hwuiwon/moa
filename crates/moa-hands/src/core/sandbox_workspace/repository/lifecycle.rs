@@ -1018,7 +1018,9 @@ impl PostgresWorkspaceRepository {
               AND hand_lease_generation = $6
               AND expected_writer_epoch = $7 AND expected_instance_generation = $8
               AND resource_dimension = 'active_hands'
-              AND reservation_state = 'committed'
+              -- A pending charge is still a charge: destroying the yielded hand
+              -- must settle it rather than roll the whole release back.
+              AND reservation_state IN ('pending', 'committed')
             "#,
         )
         .bind(binding.tenant_id)

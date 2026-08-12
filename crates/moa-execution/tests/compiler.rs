@@ -1152,15 +1152,8 @@ fn compile_rejects_unknown_dependency_output_reference_path_before_persistence()
 }
 
 #[test]
-fn compile_checks_reference_paths_in_conditions_map_and_reduce_items() {
-    // Pins: every condition and operation-level collection binding receives the same schema-aware path check.
-    let mut condition = valid_request();
-    condition.plan.nodes[0].when = Some(ExecutionCondition::Exists {
-        reference: ExecutionReference {
-            path: "$.input.missing".to_string(),
-        },
-    });
-
+fn compile_checks_reference_paths_in_map_and_reduce_items() {
+    // Pins: every operation-level collection binding receives the same schema-aware path check.
     let mut map = valid_request();
     map.plan.nodes[0].operation = ExecutionOperation::Map {
         items: json!({ "$ref": "$.input.missing" }),
@@ -1183,11 +1176,6 @@ fn compile_checks_reference_paths_in_conditions_map_and_reduce_items() {
     };
 
     let outcomes = [
-        (
-            "condition",
-            compile(condition),
-            "plan.nodes[0].when.reference.$ref",
-        ),
         ("map items", compile(map), "plan.nodes[0].operation.items"),
         (
             "reduce items",
@@ -1206,6 +1194,235 @@ fn compile_checks_reference_paths_in_conditions_map_and_reduce_items() {
             "unexpected issue for {location}"
         );
     }
+}
+
+/// Builds the accepted three-node shape: one conditional effectful leaf nothing reads.
+fn conditional_request() -> CompileExecutionRequest {
+    let mut request = valid_request();
+    let reference = request.authorization.capability_refs[0].clone();
+    let notify = ExecutionNode {
+        id: "notify".to_string(),
+        requirement_ids: vec!["req_one".to_string()],
+        depends_on: vec!["lookup".to_string()],
+        when: Some(ExecutionCondition::Equals {
+            reference: ExecutionReference {
+                path: "$.input.order_id".to_string(),
+            },
+            value: json!("ord-1"),
+        }),
+        input: json!({}),
+        output_schema: json!({ "type": "object" }),
+        operation: ExecutionOperation::Capability { reference },
+        compensation: None,
+        retry: retry(1),
+        budget: None,
+    };
+    request.plan.nodes.insert(1, notify);
+    request.plan.nodes[2].depends_on.push("notify".to_string());
+    request
+}
+
+#[test]
+fn compile_accepts_a_conditional_branch_whose_output_nothing_reads() {
+    // Pins: a conditional node is legal as an effectful leaf — depended on for ordering,
+    // never read — so authors can express a branch without any downstream null handling.
+    let outcome = compile(conditional_request());
+
+    assert!(outcome.compiled.is_some(), "{:?}", outcome.report.issues);
+    assert!(outcome.report.issues.is_empty());
+}
+
+#[test]
+fn compile_rejects_every_way_a_skipped_branch_could_be_read_or_required() {
+    // Pins: each plan whose meaning depends on a conditional node having run. A skipped
+    // branch has a null output and counts as failed everywhere completion is measured, so
+    // accepting any of these would trade the old silent double-execution for a silent
+    // partial run.
+    let mut read_output = conditional_request();
+    read_output.plan.nodes[2].operation = ExecutionOperation::Output {
+        value: json!({ "escalation": { "$ref": "$.nodes.notify.output" } }),
+    };
+
+    let mut required_node = conditional_request();
+    required_node.goal.completion_checks.push(CompletionCheck {
+        id: "notify_required".to_string(),
+        description: "the branch ran".to_string(),
+        requirement_ids: vec!["req_one".to_string()],
+        constraint_ids: vec![],
+        kind: CompletionCheckKind::RequiredNodes {
+            node_ids: vec!["notify".to_string()],
+        },
+    });
+
+    let mut conditional_output = conditional_request();
+    conditional_output.plan.nodes[2].when = Some(ExecutionCondition::Exists {
+        reference: ExecutionReference {
+            path: "$.input.order_id".to_string(),
+        },
+    });
+
+    let mut only_conditional = conditional_request();
+    only_conditional
+        .goal
+        .requirements
+        .push(ExecutionRequirement {
+            id: "req_branch".to_string(),
+            description: "Notify only when the order matches".to_string(),
+        });
+    only_conditional.goal.completion_checks[0]
+        .requirement_ids
+        .push("req_branch".to_string());
+    only_conditional.plan.nodes[1].requirement_ids = vec!["req_branch".to_string()];
+
+    let mut hidden_reference = conditional_request();
+    hidden_reference.plan.nodes[1].when = Some(ExecutionCondition::Exists {
+        reference: ExecutionReference {
+            path: "$.nodes.output.output".to_string(),
+        },
+    });
+
+    // Path and message are asserted, not just the code: a rejection has to name the exact
+    // value an author must change, and the required-node rejection has to name the completion
+    // check that made the node required. A service-e2e scenario asserts the same strings
+    // against a live planning context.
+    let cases = [
+        (
+            "read a skipped output",
+            read_output,
+            "conditional_output_read",
+            "plan.nodes[2].operation.value.escalation",
+            "cannot be read",
+        ),
+        (
+            "require a skippable node",
+            required_node,
+            "conditional_required_node",
+            "plan.nodes[1].when",
+            "notify_required",
+        ),
+        (
+            "make the terminal output conditional",
+            conditional_output,
+            "conditional_output_node",
+            "plan.nodes[2].when",
+            "terminal output node",
+        ),
+        (
+            "serve a requirement only conditionally",
+            only_conditional,
+            "requirement_only_conditional",
+            "plan.nodes.notify.requirement_ids",
+            "req_branch",
+        ),
+        (
+            "read an undeclared dependency",
+            hidden_reference,
+            "condition_reference_not_visible",
+            "plan.nodes[1].when.reference.$ref",
+            "declared dependency output",
+        ),
+    ];
+    for (case, request, expected_code, expected_path, expected_message) in cases {
+        let outcome = compile(request);
+        assert!(
+            outcome.compiled.is_none(),
+            "compiled a plan that would {case}"
+        );
+        let issue = outcome
+            .report
+            .issues
+            .iter()
+            .find(|issue| issue.code == expected_code)
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected {expected_code} for `{case}`, got {:?}",
+                    outcome.report.issues
+                )
+            });
+        assert_eq!(issue.path, expected_path, "wrong path for `{case}`");
+        assert!(
+            issue.message.contains(expected_message),
+            "message for `{case}` must name {expected_message}: {}",
+            issue.message
+        );
+    }
+}
+
+#[test]
+fn amendment_enforces_conditional_scope_and_cannot_relitigate_a_taken_skip() {
+    // Pins: `when` cannot arrive through the amendment path either, and a branch whose skip
+    // is already committed is immutable — the decision was durable when it was taken.
+    let request = conditional_request();
+    let compiled = compile(request.clone())
+        .compiled
+        .expect("compile conditional amendment fixture");
+    let mut readable = compiled.plan.definition.nodes[2].clone();
+    readable.id = "replacement_output".to_string();
+    readable.operation = ExecutionOperation::Output {
+        value: json!({ "escalation": { "$ref": "$.nodes.notify.output" } }),
+    };
+
+    let smuggled = validate_amendment(ValidateAmendmentRequest {
+        goal: compiled.goal.clone(),
+        active_plan: compiled.plan.clone(),
+        amendment: PlanAmendment {
+            base_plan_revision: 4,
+            reason: "Read the conditional branch output".to_string(),
+            evidence: json!({}),
+            operations: vec![PlanAmendmentOperation::ReplacePendingNode {
+                node_id: "output".to_string(),
+                node: readable,
+            }],
+        },
+        projection: amendment_projection(ExecutionProjection {
+            plan_revision: 4,
+            node_statuses: BTreeMap::new(),
+            tasks: vec![],
+        }),
+        catalog: request.catalog.clone(),
+        authorization: request.authorization.clone(),
+        remaining_budget: generous_budget(),
+        config: ExecutionConfig::default(),
+        now: now(),
+    });
+    assert!(smuggled.plan.is_none());
+    assert!(
+        smuggled
+            .report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "conditional_output_read"),
+        "{:?}",
+        smuggled.report.issues
+    );
+
+    let taken = validate_amendment(ValidateAmendmentRequest {
+        goal: compiled.goal,
+        active_plan: compiled.plan,
+        amendment: PlanAmendment {
+            base_plan_revision: 4,
+            reason: "Undo a branch that was already skipped".to_string(),
+            evidence: json!({}),
+            operations: vec![PlanAmendmentOperation::RemovePendingNode {
+                node_id: "notify".to_string(),
+            }],
+        },
+        projection: amendment_projection(ExecutionProjection {
+            plan_revision: 4,
+            node_statuses: BTreeMap::from([("notify".to_string(), ExecutionNodeStatus::Skipped)]),
+            tasks: vec![],
+        }),
+        catalog: request.catalog,
+        authorization: request.authorization,
+        remaining_budget: generous_budget(),
+        config: ExecutionConfig::default(),
+        now: now(),
+    });
+    assert!(
+        taken.plan.is_none(),
+        "a committed skip must not be amendable: {:?}",
+        taken.report.issues
+    );
 }
 
 #[test]
@@ -1258,11 +1475,6 @@ fn compile_accepts_declared_nested_reference_paths() {
             }
         },
         "allOf": [{ "$ref": "#/$defs/LookupOutput" }]
-    });
-    request.plan.nodes[1].when = Some(ExecutionCondition::Exists {
-        reference: ExecutionReference {
-            path: "$.nodes.lookup.output.result.order.id".to_string(),
-        },
     });
     request.plan.nodes[1].output_schema = json!({ "type": "string" });
     request.plan.nodes[1].operation = ExecutionOperation::Output {

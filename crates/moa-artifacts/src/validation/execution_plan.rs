@@ -234,6 +234,36 @@ fn validate_wait_policy(
     }
 }
 
+/// Validates the plan-level expiry policy for runtime `NeedsInput` outcomes.
+///
+/// This one policy settles whichever logical task returned `NeedsInput`, so a
+/// declared `continue_with` output has no single node `output_schema` to be checked
+/// against. It is rejected here rather than deferred to run materialization, where
+/// the schema check is a non-retryable failure.
+pub(super) fn validate_input_wait_policy(
+    root: &str,
+    policy: &ExecutionWaitPolicy,
+    allow_absolute_temporal_targets: bool,
+    report: &mut ValidationReport,
+) {
+    validate_temporal_target(
+        &format!("{root}.expiry"),
+        &policy.expiry,
+        allow_absolute_temporal_targets,
+        report,
+    );
+    if matches!(
+        policy.on_expiry,
+        ExecutionWaitExpiryAction::ContinueWith { .. }
+    ) {
+        report.push_error(
+            format!("{root}.on_expiry"),
+            "input wait expiry must fail the waiting task; continue_with cannot be validated \
+             against the output schema of the node that requested input",
+        );
+    }
+}
+
 pub(super) fn validate_temporal_target(
     root: &str,
     target: &ExecutionTemporalTarget,
@@ -249,5 +279,82 @@ pub(super) fn validate_temporal_target(
             report.push_error(root, "temporal delay_seconds must be at least one");
         }
         ExecutionTemporalTarget::At { .. } | ExecutionTemporalTarget::After { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::execution_plan::{
+        ExecutionCancelPolicy, ExecutionNode, ExecutionOperation, ExecutionPlanDefinition,
+        ExecutionTemporalTarget, ExecutionWaitExpiryAction, ExecutionWaitPolicy, RetryPolicy,
+    };
+    use crate::validation::validate_execution_plan_definition;
+
+    // Pins: `input_wait_policy.on_expiry` is the one wait policy with no owning node,
+    // so a `continue_with` output has nothing to validate against. Before this check
+    // it compiled cleanly and the schema violation surfaced at run materialization as
+    // a non-retryable infrastructure error against whichever task happened to ask for
+    // input. Both directions are asserted so the rejection is provably about
+    // `continue_with` and not about the surrounding fixture.
+    #[test]
+    fn input_wait_policy_rejects_continue_with_but_accepts_a_failing_action() {
+        let continued = plan(ExecutionWaitExpiryAction::ContinueWith {
+            output: json!({ "approved": true }),
+        });
+
+        let report = validate_execution_plan_definition(&continued);
+
+        assert!(
+            report.errors.iter().any(|error| {
+                error.path == "execution_plan.input_wait_policy.on_expiry"
+                    && error.message.contains("must fail the waiting task")
+            }),
+            "continue_with must be refused for the plan-level input wait policy: {report:?}"
+        );
+
+        for action in [
+            ExecutionWaitExpiryAction::FailTask,
+            ExecutionWaitExpiryAction::FailTask,
+        ] {
+            let report = validate_execution_plan_definition(&plan(action));
+            assert!(
+                report.errors.is_empty(),
+                "a failing input wait expiry must still validate: {report:?}"
+            );
+        }
+    }
+
+    fn plan(on_expiry: ExecutionWaitExpiryAction) -> ExecutionPlanDefinition {
+        ExecutionPlanDefinition {
+            cancel_policy: ExecutionCancelPolicy::RetainEffects,
+            input_wait_policy: ExecutionWaitPolicy {
+                expiry: ExecutionTemporalTarget::After {
+                    delay_seconds: 3_600,
+                },
+                on_expiry,
+            },
+            input_schema: json!({ "type": "object" }),
+            output_schema: json!({ "type": "object" }),
+            nodes: vec![ExecutionNode {
+                id: "output".to_string(),
+                requirement_ids: vec!["req_output".to_string()],
+                depends_on: Vec::new(),
+                when: None,
+                input: json!({}),
+                output_schema: json!({ "type": "object" }),
+                operation: ExecutionOperation::Output {
+                    value: json!({ "$ref": "$.input" }),
+                },
+                compensation: None,
+                retry: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 0,
+                    max_backoff_ms: 0,
+                },
+                budget: None,
+            }],
+        }
     }
 }

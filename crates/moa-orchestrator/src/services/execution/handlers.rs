@@ -928,7 +928,7 @@ async fn kick_control_dispatcher(
     kick_execution_dispatcher(ctx, run_uid, generation, action).await
 }
 
-async fn kick_execution_dispatcher(
+pub(crate) async fn kick_execution_dispatcher(
     ctx: &Context<'_>,
     run_uid: uuid::Uuid,
     durable_fence: u64,
@@ -1144,7 +1144,7 @@ pub(super) async fn external_wait_mutation(
     Ok(mutation_from_task_write(write))
 }
 
-pub(super) async fn apply_amendment_inner(
+pub(crate) async fn apply_amendment_inner(
     pool: sqlx::PgPool,
     config: ExecutionConfig,
     request: ExecutionAmendmentRequest,

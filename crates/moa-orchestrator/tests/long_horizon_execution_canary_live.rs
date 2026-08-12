@@ -18,6 +18,9 @@ async fn deployed_long_horizon_invariants_hold_for_24_hours_live() -> Result<()>
     // Pins: an explicitly selected external deployment is sampled for a full
     // 24 hours; an instantaneous healthy sample cannot satisfy this canary.
     if !canary_selected("24h")? {
+        eprintln!(
+            "SKIPPED long-horizon canary 24h: MOA_LONG_HORIZON_CANARY_WINDOW selects the other window"
+        );
         return Ok(());
     }
     run_canary(Duration::from_secs(24 * 60 * 60)).await
@@ -29,6 +32,9 @@ async fn deployed_long_horizon_invariants_hold_for_seven_days_live() -> Result<(
     // Pins: the seven-day deployment soak continuously rejects overdue runs,
     // parked compute ownership, and still-live attempt invocations.
     if !canary_selected("7d")? {
+        eprintln!(
+            "SKIPPED long-horizon canary 7d: MOA_LONG_HORIZON_CANARY_WINDOW selects the other window"
+        );
         return Ok(());
     }
     run_canary(Duration::from_secs(7 * 24 * 60 * 60)).await
@@ -36,7 +42,14 @@ async fn deployed_long_horizon_invariants_hold_for_seven_days_live() -> Result<(
 
 fn canary_selected(expected: &str) -> Result<bool> {
     if std::env::var("MOA_RUN_LONG_HORIZON_CANARY").as_deref() != Ok("1") {
-        return Ok(false);
+        // Both cases are `#[ignore]`d, so reaching this point means the binary was
+        // explicitly selected with `--run-ignored`. Returning `Ok(false)` here used to
+        // report a green 24h/7d soak that sampled nothing, making an unauthorized sweep
+        // indistinguishable from a real deployment canary in CI logs.
+        bail!(
+            "long-horizon canary was explicitly selected without MOA_RUN_LONG_HORIZON_CANARY=1; \
+             refusing to report a passing soak that sampled nothing"
+        );
     }
     let selected = std::env::var("MOA_LONG_HORIZON_CANARY_WINDOW").context(
         "MOA_RUN_LONG_HORIZON_CANARY=1 requires MOA_LONG_HORIZON_CANARY_WINDOW=24h or 7d",

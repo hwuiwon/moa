@@ -13,7 +13,9 @@ use moa_execution::{
             TaskAttemptFence, TaskAttemptReleaseClaimOutcome, TaskAttemptSettlementOutcome,
             TaskAttemptStartOutcome,
         },
+        terminal::{PendingTerminalAdvanceOutcome, PendingTerminalAdvanceStage},
     },
+    state::{ExecutionLimitStop, ExecutionTerminalEvidence},
 };
 
 use super::support::*;
@@ -114,6 +116,7 @@ async fn failed_and_unknown_outcome_tasks_cancel_transitive_unmaterialized_depen
                         reduce_cursor: None,
                         source_exhausted: true,
                         terminal_output: None,
+                        condition_skipped: false,
                         tasks: vec![source],
                     },
                 )
@@ -280,6 +283,7 @@ async fn completion_projection_pages_twenty_five_hundred_tasks_and_nodes_db() ->
                     reduce_cursor: None,
                     source_exhausted,
                     terminal_output: None,
+                    condition_skipped: false,
                     tasks: page.to_vec(),
                 },
             )
@@ -489,6 +493,7 @@ async fn replan_stop_completion_pages_rebind_exact_wake_without_duplicate_verifi
                 reduce_cursor: None,
                 source_exhausted: true,
                 terminal_output: None,
+                condition_skipped: false,
                 tasks,
             },
         )
@@ -661,5 +666,153 @@ async fn replan_stop_completion_pages_rebind_exact_wake_without_duplicate_verifi
     .fetch_one(&pool)
     .await?;
     assert_eq!(verifier_count, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn every_terminal_cause_cohort_survives_finalization_and_reload_db() -> TestResult {
+    // Pins: the limit-stopped-completion, budget limit-stop, deadline limit-stop, and
+    // internal-failure terminal causes each finalize a run through the bounded terminal drain and
+    // decode back into the identical closed cause and normalized reason on reload. Only four of
+    // the eight causes reach a persisted run anywhere else, so a column, encoding, or
+    // strict-decode regression on the other cohorts is otherwise silent.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let repository = ExecutionRepository::new(test_db.store().pool().clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let config = ExecutionConfig::default();
+
+    let cohorts = [
+        (
+            "limit-stopped-completion",
+            ExecutionRunStatus::Failed,
+            ExecutionTerminalReason::BudgetExceeded,
+            ExecutionTerminalCause::Completion {
+                limit_stop: Some(ExecutionLimitStop::BudgetExceeded),
+            },
+        ),
+        (
+            "budget-limit-stop",
+            ExecutionRunStatus::Failed,
+            ExecutionTerminalReason::BudgetExceeded,
+            ExecutionTerminalCause::LimitStop {
+                reason: ExecutionLimitStop::BudgetExceeded,
+            },
+        ),
+        (
+            "internal-failure",
+            ExecutionRunStatus::Failed,
+            ExecutionTerminalReason::InternalFailure,
+            ExecutionTerminalCause::InternalFailure,
+        ),
+    ];
+    for (key, status, reason, cause) in cohorts {
+        let run = create_run(
+            &repository,
+            scope,
+            new_run(
+                tenant_id,
+                None,
+                &format!("terminal-cause-{key}-{}", Uuid::now_v7()),
+                ExecutionRunStatus::Queued,
+                budget(4),
+            ),
+        )
+        .await?;
+        let PendingTerminalAdvanceOutcome::Applied(commit) = repository
+            .fence_completion_terminal_and_enqueue_settlement(
+                &config,
+                scope,
+                run.run_uid,
+                run.controller_generation,
+                run.wake_epoch,
+                PendingExecutionTerminal {
+                    status,
+                    reason,
+                    terminal_evidence: ExecutionTerminalEvidence {
+                        cause: cause.clone(),
+                        satisfied_requirement_count: 0,
+                        requirement_count: 0,
+                    },
+                    completion_check_results: Vec::new(),
+                    terminal_gaps: vec![format!("{key} gap")],
+                    output: None,
+                    cancellation_reason: None,
+                },
+                moa_test_support::fixtures::pg_now(),
+                1,
+            )
+            .await?
+        else {
+            panic!("a task-free {key} terminal must finalize on its first bounded page");
+        };
+        assert_eq!(
+            commit.stage,
+            PendingTerminalAdvanceStage::Finalized,
+            "{key} must finalize rather than defer"
+        );
+        let reloaded = repository
+            .load_run(scope, run.run_uid)
+            .await?
+            .expect("finalized run stays visible");
+        assert_eq!(reloaded.status, status, "{key} status");
+        assert_eq!(reloaded.terminal_reason, Some(reason), "{key} reason");
+        assert_eq!(
+            reloaded
+                .terminal_evidence
+                .as_ref()
+                .map(|evidence| &evidence.cause),
+            Some(&cause),
+            "{key} cause must decode back verbatim"
+        );
+        assert!(!reloaded.manual_repair_required, "{key} needs no repair");
+        assert!(reloaded.pending_terminal.is_none(), "{key} intent consumed");
+    }
+
+    // The deadline cohort has a real producer, so drive that instead of asserting a hand-built
+    // intent: an already-elapsed approved deadline must fence LimitStop { DeadlineExceeded }.
+    let mut elapsed = new_run(
+        tenant_id,
+        None,
+        &format!("terminal-cause-deadline-{}", Uuid::now_v7()),
+        ExecutionRunStatus::Queued,
+        budget(4),
+    );
+    elapsed.approved_budget.deadline_at = Some(pg_deadline(Duration::seconds(-30)));
+    let run = create_run(&repository, scope, elapsed).await?;
+    let PendingTerminalAdvanceOutcome::Applied(commit) = repository
+        .fence_deadline_and_enqueue_settlement(
+            &config,
+            scope,
+            run.run_uid,
+            run.controller_generation,
+            run.wake_epoch,
+            moa_test_support::fixtures::pg_now(),
+            1,
+        )
+        .await?
+    else {
+        panic!("an elapsed approved deadline must fence and finalize its own terminal");
+    };
+    assert_eq!(commit.stage, PendingTerminalAdvanceStage::Finalized);
+    let reloaded = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("deadline-terminal run stays visible");
+    assert_eq!(reloaded.status, ExecutionRunStatus::Failed);
+    assert_eq!(
+        reloaded.terminal_reason,
+        Some(ExecutionTerminalReason::DeadlineExceeded)
+    );
+    assert_eq!(
+        reloaded
+            .terminal_evidence
+            .as_ref()
+            .map(|evidence| &evidence.cause),
+        Some(&ExecutionTerminalCause::LimitStop {
+            reason: ExecutionLimitStop::DeadlineExceeded,
+        }),
+        "the deadline fence must record the limit stop itself, not only the normalized reason"
+    );
     Ok(())
 }

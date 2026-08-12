@@ -292,7 +292,7 @@ pub(crate) async fn set_run_status_path(
     for status in path {
         let terminal_cause = match *status {
             "completed" | "partial" => Some(json!({"kind":"completion","limit_stop":null})),
-            "blocked" => Some(json!({"kind":"scheduler_no_progress"})),
+            "blocked" => Some(json!({"kind":"completion","limit_stop":null})),
             "unsupported" => Some(json!({"kind":"task_failure","class":"unsupported"})),
             "failed" => Some(json!({"kind":"internal_failure"})),
             "cancelled" => Some(json!({"kind":"cancellation"})),
@@ -302,7 +302,7 @@ pub(crate) async fn set_run_status_path(
         let terminal_reason = match *status {
             "completed" => Some("completed"),
             "partial" => Some("goal_incomplete"),
-            "blocked" => Some("no_progress"),
+            "blocked" => Some("blocked"),
             "unsupported" => Some("unsupported_plan"),
             "failed" => Some("internal_failure"),
             "cancelled" => Some("cancelled"),

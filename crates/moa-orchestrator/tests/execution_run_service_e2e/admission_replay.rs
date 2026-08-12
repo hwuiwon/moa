@@ -358,7 +358,7 @@ fn template_skill_source() -> String {
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                     delay_seconds: 86_400,
                 },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
             input_schema: io_schema.clone(),
             output_schema: io_schema.clone(),

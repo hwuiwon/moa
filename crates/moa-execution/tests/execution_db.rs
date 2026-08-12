@@ -12,6 +12,10 @@ mod compensation_attempts_db;
 mod compensation_db;
 #[path = "execution_db/completion_projection_db.rs"]
 mod completion_projection_db;
+#[path = "execution_db/conditional_execution_db.rs"]
+mod conditional_execution_db;
+#[path = "execution_db/controller_wake_recovery_db.rs"]
+mod controller_wake_recovery_db;
 #[path = "execution_db/execution_capacity_db.rs"]
 mod execution_capacity_db;
 #[path = "execution_db/incremental_scheduler_db.rs"]
@@ -30,3 +34,5 @@ mod scope_and_lifecycle_db;
 mod support;
 #[path = "execution_db/trigger_outbox_db.rs"]
 mod trigger_outbox_db;
+#[path = "execution_db/wait_entry_deadline_db.rs"]
+mod wait_entry_deadline_db;

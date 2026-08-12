@@ -391,7 +391,7 @@ one-off plan. Nonzero `After { delay_seconds }` is resolved from the instant the
 task enters the wait. Reusable templates reject `At` and use `After`, so earlier
 dependency duration cannot make a template timer stale. Entering any wait
 persists `due_at`, releases attempt and hand capacity, and schedules an immutable
-trigger; expiry follows `FailTask`, `FailRun`, or `ContinueWith { output }`.
+trigger; expiry follows `FailTask`, `FailTask`, or `ContinueWith { output }`.
 
 Before dispatch, the repository atomically reserves worst-case microusd,
 tokens, tasks, tool calls, retrieved bytes, deadline allowance, and tenant/fleet

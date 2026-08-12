@@ -1992,7 +1992,7 @@ fn recompile_as_agent(
             expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                 delay_seconds: 86_400,
             },
-            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
         },
         input_schema: json!({"type": "object", "additionalProperties": false}),
         output_schema: output_schema.clone(),
@@ -2063,7 +2063,7 @@ fn recompile_as_external_wait(
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                     delay_seconds: 86_400,
                 },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
         },
         ExternalWaitKind::Signal => ExecutionOperation::WaitSignal {
@@ -2072,7 +2072,7 @@ fn recompile_as_external_wait(
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                     delay_seconds: 86_400,
                 },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
         },
     };
@@ -2082,7 +2082,7 @@ fn recompile_as_external_wait(
             expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                 delay_seconds: 86_400,
             },
-            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
         },
         input_schema: json!({"type": "object", "additionalProperties": false}),
         output_schema: output_schema.clone(),
@@ -2304,7 +2304,7 @@ fn lifecycle_plan_with_output_schema(
             expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                 delay_seconds: 86_400,
             },
-            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
         },
         input_schema: json!({"type": "object", "additionalProperties": false}),
         output_schema: output_schema.clone(),

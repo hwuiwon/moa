@@ -202,6 +202,7 @@ pub fn compile(request: CompileExecutionRequest) -> CompileExecutionOutcome {
     validate_goal_plan_links(&request.goal, &request.plan, &mut report);
     validate_plan_activation_bound(&request.plan, &request.config, &mut report);
     validate_completion_activation_bounds(&request.goal, &request.config, &mut report);
+    validate_condition_scope(&request.goal, &request.plan, &mut report);
     validate_catalog(&request.catalog, &mut report);
     validate_authorization(&request.authorization, &mut report);
     validate_schemas(&request.goal, &request.plan, &mut report);
@@ -346,6 +347,7 @@ pub fn validate_amendment(request: ValidateAmendmentRequest) -> AmendmentValidat
 
     append_artifact_reports(&request.goal, &definition, &mut report);
     validate_goal_plan_links(&request.goal, &definition, &mut report);
+    validate_condition_scope(&request.goal, &definition, &mut report);
     validate_plan_activation_bound(&definition, &request.config, &mut report);
     validate_completion_activation_bounds(&request.goal, &request.config, &mut report);
     validate_schemas(&request.goal, &definition, &mut report);
@@ -444,6 +446,247 @@ fn append_execution_config_validation(
     }
 }
 
+/// Confines conditional nodes to the exact semantics the runtime implements.
+///
+/// A false condition commits `node_status = 'skipped'` with a JSON `null` aggregate
+/// output. Version one therefore treats a conditional node as an *effectful leaf*:
+/// other nodes may depend on it for ordering, but nothing may read its output, and
+/// nothing may make the run's success contingent on it having run. Every rule below
+/// rejects a plan whose meaning would otherwise depend on a value or an outcome that
+/// a skipped branch cannot produce:
+///
+/// - a condition may read only run input or a *declared dependency's* output, so the
+///   value it tests is guaranteed to exist by the time the node is activated;
+/// - no `$ref` may read a conditional node's output, because the skipped value is
+///   `null` and neither `resolve_reference` nor a capability input schema accepts it;
+/// - a conditional node may not be the plan's `Output` operation, whose value is the
+///   run's deliverable;
+/// - a conditional node may not appear in a `RequiredNodes` completion check, which
+///   counts a skipped node as failed and would turn a legitimately false branch into
+///   a partial run; and
+/// - a requirement served *only* by conditional nodes is rejected, because all
+///   branches evaluating false would leave it with no eligible node at all.
+fn validate_condition_scope(
+    goal: &ExecutionGoalContract,
+    plan: &ExecutionPlanDefinition,
+    report: &mut ExecutionValidationReport,
+) {
+    let conditional_ids = plan
+        .nodes
+        .iter()
+        .filter(|node| node.when.is_some())
+        .map(|node| node.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if conditional_ids.is_empty() {
+        return;
+    }
+
+    for (index, node) in plan.nodes.iter().enumerate() {
+        let root = format!("plan.nodes[{index}]");
+        if let Some(condition) = &node.when {
+            let reference = match condition {
+                moa_artifacts::execution_plan::ExecutionCondition::Exists { reference }
+                | moa_artifacts::execution_plan::ExecutionCondition::Equals { reference, .. } => {
+                    reference
+                }
+            };
+            validate_condition_reference_visibility(
+                &format!("{root}.when.reference.$ref"),
+                &reference.path,
+                node,
+                report,
+            );
+            if matches!(node.operation, ExecutionOperation::Output { .. }) {
+                report.error(
+                    "conditional_output_node",
+                    format!("{root}.when"),
+                    "the terminal output node must not be conditional",
+                );
+            }
+            for check in &goal.completion_checks {
+                let CompletionCheckKind::RequiredNodes { node_ids } = &check.kind else {
+                    continue;
+                };
+                if node_ids.contains(&node.id) {
+                    report.error(
+                        "conditional_required_node",
+                        format!("{root}.when"),
+                        format!(
+                            "completion check `{}` requires node `{}`, which a false condition \
+                             would skip and the check would count as failed",
+                            check.id, node.id
+                        ),
+                    );
+                }
+            }
+            for coverage in goal
+                .coverage
+                .iter()
+                .filter(|coverage| coverage.map_node_id == node.id)
+            {
+                report.error(
+                    "conditional_coverage_node",
+                    format!("{root}.when"),
+                    format!(
+                        "coverage requirement `{}` measures node `{}`, which a false condition \
+                         would skip and the coverage would count as unmet",
+                        coverage.id, node.id
+                    ),
+                );
+            }
+        }
+        validate_no_conditional_reference(
+            &format!("{root}.input"),
+            &node.input,
+            &conditional_ids,
+            report,
+        );
+        match &node.operation {
+            ExecutionOperation::Map { items, .. } | ExecutionOperation::Reduce { items, .. } => {
+                validate_no_conditional_reference(
+                    &format!("{root}.operation.items"),
+                    items,
+                    &conditional_ids,
+                    report,
+                );
+            }
+            ExecutionOperation::Output { value } => validate_no_conditional_reference(
+                &format!("{root}.operation.value"),
+                value,
+                &conditional_ids,
+                report,
+            ),
+            ExecutionOperation::WaitUntil { result, .. } => validate_no_conditional_reference(
+                &format!("{root}.operation.result"),
+                result,
+                &conditional_ids,
+                report,
+            ),
+            ExecutionOperation::Capability { .. }
+            | ExecutionOperation::Agent { .. }
+            | ExecutionOperation::Review { .. }
+            | ExecutionOperation::WaitSignal { .. } => {}
+        }
+    }
+
+    for (index, coverage) in goal.coverage.iter().enumerate() {
+        validate_no_conditional_reference(
+            &format!("goal.coverage[{index}].expected_items"),
+            &coverage.expected_items,
+            &conditional_ids,
+            report,
+        );
+    }
+
+    let mut unconditional_requirements = BTreeSet::new();
+    let mut conditional_requirements = BTreeMap::new();
+    for node in &plan.nodes {
+        for requirement_id in &node.requirement_ids {
+            if node.when.is_some() {
+                conditional_requirements
+                    .entry(requirement_id.as_str())
+                    .or_insert(node.id.as_str());
+            } else {
+                unconditional_requirements.insert(requirement_id.as_str());
+            }
+        }
+    }
+    for (requirement_id, node_id) in conditional_requirements {
+        if !unconditional_requirements.contains(requirement_id) {
+            report.error(
+                "requirement_only_conditional",
+                format!("plan.nodes.{node_id}.requirement_ids"),
+                format!(
+                    "every node serving requirement `{requirement_id}` is conditional, so all \
+                     branches evaluating false would leave it with no eligible node"
+                ),
+            );
+        }
+    }
+}
+
+/// Rejects a condition that reads anything other than run input or a declared dependency.
+fn validate_condition_reference_visibility(
+    path: &str,
+    reference: &str,
+    node: &ExecutionNode,
+    report: &mut ExecutionValidationReport,
+) {
+    let Some(node_id) = condition_reference_node(reference) else {
+        return;
+    };
+    if node_id == node.id {
+        report.error(
+            "condition_reference_not_visible",
+            path,
+            "a node condition cannot reference its own output",
+        );
+    } else if !node.depends_on.iter().any(|id| id == node_id) {
+        report.error(
+            "condition_reference_not_visible",
+            path,
+            "a node condition may only read run input or a declared dependency output",
+        );
+    }
+}
+
+fn condition_reference_node(reference: &str) -> Option<&str> {
+    reference
+        .strip_prefix("$.nodes.")
+        .and_then(|rest| rest.split_once(".output"))
+        .map(|(node_id, _)| node_id)
+}
+
+/// Rejects any `$ref` whose source node declares a condition.
+fn validate_no_conditional_reference(
+    path: &str,
+    value: &Value,
+    conditional_ids: &BTreeSet<&str>,
+    report: &mut ExecutionValidationReport,
+) {
+    match value {
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                validate_no_conditional_reference(
+                    &format!("{path}[{index}]"),
+                    value,
+                    conditional_ids,
+                    report,
+                );
+            }
+        }
+        Value::Object(object) => {
+            if object.len() == 1
+                && let Some(reference) = object.get("$ref").and_then(Value::as_str)
+            {
+                if condition_reference_node(reference)
+                    .is_some_and(|node_id| conditional_ids.contains(node_id))
+                {
+                    report.error(
+                        "conditional_output_read",
+                        path,
+                        "a conditional node's output cannot be read; it is null when the \
+                         condition is false",
+                    );
+                }
+                return;
+            }
+            if object.keys().any(|key| key.starts_with('$')) {
+                return;
+            }
+            for (key, value) in object {
+                validate_no_conditional_reference(
+                    &format!("{path}.{key}"),
+                    value,
+                    conditional_ids,
+                    report,
+                );
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
 fn validate_temporal_contract(
     plan: &ExecutionPlanDefinition,
     deadline_at: Option<DateTime<Utc>>,
@@ -486,7 +729,7 @@ fn validate_temporal_contract(
         );
     }
 
-    validate_wait_policy(
+    validate_input_wait_policy(
         &plan.input_wait_policy,
         "plan.input_wait_policy",
         now,
@@ -559,6 +802,34 @@ fn validate_wait_policy(
     );
 }
 
+/// Validates the plan-level expiry policy for runtime `NeedsInput` outcomes.
+///
+/// Unlike a `Review` or `WaitSignal` policy, this one policy settles whichever
+/// logical task returned `NeedsInput`, so no single declared output can be checked
+/// against a specific node's `output_schema` at compile time. `ContinueWith` is
+/// therefore rejected outright rather than deferred to the materialization
+/// transaction, where the schema check is a non-retryable failure.
+fn validate_input_wait_policy(
+    policy: &moa_artifacts::execution_plan::ExecutionWaitPolicy,
+    path: &str,
+    now: DateTime<Utc>,
+    deadline_at: DateTime<Utc>,
+    report: &mut ExecutionValidationReport,
+) {
+    validate_wait_policy(policy, path, now, deadline_at, report);
+    if matches!(
+        policy.on_expiry,
+        ExecutionWaitExpiryAction::ContinueWith { .. }
+    ) {
+        report.error(
+            "unsupported_input_wait_expiry",
+            format!("{path}.on_expiry"),
+            "input wait expiry must fail the waiting task; continue_with cannot be validated \
+             against the output schema of the node that requested input",
+        );
+    }
+}
+
 fn validate_temporal_target(
     target: &ExecutionTemporalTarget,
     path: &str,
@@ -583,6 +854,13 @@ fn validate_temporal_target(
                 );
             }
         }
+        // A relative delay is resolved against the clock at wait entry, which is
+        // never earlier than compile time, so the remaining horizon at wait entry is
+        // never larger than it is here. `delay < remaining` is therefore a necessary
+        // condition, and rejecting a delay that fails it rejects only delays that can
+        // never be legal. It is not a sufficient one: a delay accepted here can still
+        // be illegal once the wait is actually entered, and only wait entry can fence
+        // that. See `interpreter::resolve_temporal_target`.
         ExecutionTemporalTarget::After { delay_seconds } => {
             let remaining_seconds = deadline_at
                 .signed_duration_since(now)

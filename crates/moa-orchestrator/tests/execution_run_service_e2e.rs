@@ -136,7 +136,7 @@ async fn output_only_run_is_durable_detached_and_reaches_terminal_state() -> Res
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                     delay_seconds: 86_400,
                 },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
             input_schema: json!({"type": "object", "additionalProperties": false}),
             output_schema: json!({
@@ -355,7 +355,7 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                     delay_seconds: 86_400,
                 },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),

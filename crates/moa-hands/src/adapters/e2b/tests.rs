@@ -7,10 +7,11 @@ use moa_core::{
     error::MoaError,
     traits::{HandProvider, SandboxStorageProvider},
     types::{
-        hands::{EgressPolicy, HandHandle, SandboxTier},
+        hands::{EgressPolicy, HandHandle, HandStatus, SandboxTier},
         identifiers::{HandProvisioningOperationId, WorkspaceCheckpointId, WorkspaceOperationId},
         sandbox_workspace::{
-            WorkspaceCheckpointPublishRequest, WorkspaceOperationKind, WorkspaceRevisionRef,
+            WorkspaceCheckpointPublishRequest, WorkspaceOperationKind, WorkspaceOperationOutcome,
+            WorkspacePostCommitState, WorkspaceReconcileRequest, WorkspaceRevisionRef,
             WorkspaceStorageOperation,
         },
     },
@@ -361,12 +362,8 @@ async fn provisions_executes_and_destroys_sandbox() {
         .unwrap();
     assert_eq!(output.process_stdout(), Some("hello\n"));
 
-    // Pins: E2B pause/resume retain process memory and cannot be selected by
-    // the durable filesystem path.
-    assert!(matches!(
-        provider.pause(&handle).await,
-        Err(MoaError::Unsupported(_))
-    ));
+    // Pins: E2B resume restores process memory and cannot be selected by the
+    // durable filesystem path.
     assert!(matches!(
         provider.resume(&handle).await,
         Err(MoaError::Unsupported(_))
@@ -576,6 +573,91 @@ async fn exports_reserved_data_root_through_canonical_archive_and_wipes_temp() {
         .destroy(&handle)
         .await
         .expect("destroy fixture sandbox");
+}
+
+// Pins: reconciling an ambiguous non-yield commit proves the published bytes
+// without destroying compute the caller is still executing on, and reports the
+// same retained disposition the local and Daytona adapters report.
+#[tokio::test]
+async fn e2b_commit_reconciliation_retains_the_hand_it_reconciles() {
+    let mut fixture = FixtureE2BApi::start().await;
+    let store = Arc::new(
+        crate::core::sandbox_workspace::checkpoint::store::CheckpointObjectStore::new(
+            Arc::new(object_store::memory::InMemory::new()),
+            Arc::new(moa_crypto::LocalKmsProvider::new()),
+            "e2b-reconcile-retention",
+            crate::core::sandbox_workspace::checkpoint::archive::ArchiveLimits::default(),
+            crate::core::sandbox_workspace::checkpoint::store::ObservedCheckpointBucketVersioning::Unversioned,
+        )
+        .expect("offline checkpoint store should construct"),
+    );
+    let provider = E2BHandProvider::new(Arc::new(
+        crate::core::provider_credentials::TestProviderCredentialSource::new(
+            CloudHandProviderKind::E2b,
+            fixture.api_url(),
+            None,
+            Some("example.e2b.test".to_string()),
+            Some("base".to_string()),
+            "test-key",
+        ),
+    ))
+    .with_sandbox_base_url(fixture.api_url())
+    .with_checkpoint_store(store);
+    let mut spec = crate::core::profile::test_support::hand_spec(
+        SandboxTier::MicroVM,
+        e2b_test_profile(EgressPolicy::DenyAll),
+    );
+    spec.workspace.current_revision = None;
+    let binding = spec.workspace.clone();
+    let handle = provider.provision(spec).await.expect("provision E2B hand");
+    let _ = fixture.next_discovery_request().await;
+
+    let operation = WorkspaceStorageOperation {
+        operation_id: WorkspaceOperationId::new(),
+        kind: WorkspaceOperationKind::Commit,
+        binding,
+        deadline: chrono::Utc::now() + chrono::Duration::minutes(1),
+        request_hash: "b".repeat(64),
+    };
+    let published = provider
+        .publish_workspace_checkpoint(WorkspaceCheckpointPublishRequest {
+            operation: operation.clone(),
+            hand: handle.clone(),
+            parent_revision: None,
+            release_compute: false,
+        })
+        .await
+        .expect("publish a non-yield commit checkpoint");
+    let storage = published
+        .storage
+        .expect("a confirmed commit publishes portable checkpoint storage");
+
+    let reconciled = provider
+        .reconcile_workspace_operation(
+            WorkspaceReconcileRequest::new(operation, Some(handle.clone()), Some(storage))
+                .expect("exact-resource reconciliation request validates"),
+        )
+        .await
+        .expect("reconcile the ambiguous commit against published bytes");
+
+    assert_eq!(reconciled.outcome, WorkspaceOperationOutcome::Confirmed);
+    assert_eq!(
+        reconciled.post_commit_state,
+        Some(WorkspacePostCommitState::AttachmentRetained),
+        "reconciliation must never report a compute release it was not asked for"
+    );
+    assert_eq!(
+        provider
+            .status(&handle)
+            .await
+            .expect("inspect reconciled hand"),
+        HandStatus::Running,
+        "reconciling a commit must leave the caller's compute alive"
+    );
+    provider
+        .destroy(&handle)
+        .await
+        .expect("destroy fixture hand");
 }
 
 fn e2b_operation_temp_dirs() -> BTreeSet<PathBuf> {

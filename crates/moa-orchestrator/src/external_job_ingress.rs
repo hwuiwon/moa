@@ -1035,6 +1035,7 @@ mod tests {
             not_before_at: Utc::now(),
             payload: serde_json::json!({}),
             delivery_attempts: 0,
+            repair_epoch: 0,
             claim_owner: None,
             claimed_at: None,
             claim_expires_at: None,

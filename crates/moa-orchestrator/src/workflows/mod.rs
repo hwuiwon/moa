@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use restate_sdk::prelude::*;
 
 pub mod artifact_release_evaluation;
+pub(crate) mod attempt_slice;
 pub(crate) mod child_invocation;
 pub mod consolidate;
 pub(crate) mod errors;

@@ -591,27 +591,6 @@ async fn wait_for_destroyed(
     }
 }
 
-async fn wait_for_status(
-    provider: &DaytonaHandProvider,
-    handle: &HandHandle,
-    expected: &[HandStatus],
-    timeout: Duration,
-) -> Result<HandStatus> {
-    let started = Instant::now();
-    loop {
-        if started.elapsed() > timeout {
-            return Err(MoaError::ProviderError(format!(
-                "timed out waiting for Daytona status {expected:?}"
-            )));
-        }
-        let status = provider.status(handle).await?;
-        if expected.contains(&status) {
-            return Ok(status);
-        }
-        sleep(Duration::from_secs(2)).await;
-    }
-}
-
 async fn destroy_and_wait(provider: &DaytonaHandProvider, handle: &HandHandle) -> Result<()> {
     provider.destroy(handle).await?;
     wait_for_destroyed(provider, handle, Duration::from_secs(30)).await
@@ -765,23 +744,6 @@ async fn daytona_provider_round_trip() {
             "search output missing path: {}",
             search.to_text()
         );
-
-        provider.pause(&handle).await?;
-        let _ = wait_for_status(
-            &provider,
-            &handle,
-            &[HandStatus::Stopped, HandStatus::Paused],
-            Duration::from_secs(60),
-        )
-        .await?;
-        let resumed_read = provider
-            .execute(
-                &handle,
-                "file_read",
-                &json!({ "path": file_path }).to_string(),
-            )
-            .await?;
-        assert_eq!(resumed_read.to_text(), marker);
 
         let unsupported_tool = provider
             .execute(
@@ -1365,35 +1327,6 @@ async fn daytona_router_reuses_and_isolates() {
         let read = secured_2.safe_output;
         assert_eq!(same_hand_id.as_deref(), Some(handle_one_id.as_str()));
         assert_eq!(read.to_text(), content_one);
-
-        provider.pause(&handle_one).await?;
-        let _ = wait_for_status(
-            &provider,
-            &handle_one,
-            &[HandStatus::Stopped, HandStatus::Paused],
-            Duration::from_secs(60),
-        )
-        .await?;
-        let secured_3 = router
-            .execute_authorized(moa_hands::AuthorizedToolCall {
-                session: &session_one,
-                caller_identity: &identity(),
-                workspace_scope: Some(&router_workspace_scope(&session_one)),
-                invocation: &ToolInvocation {
-                    id: None,
-                    name: "file_read".to_string(),
-                    input: json!({ "path": file_one }),
-                },
-                tool_call_id: ToolCallId::new(),
-                active_canary: None,
-                catalog: None,
-                scope: moa_hands::ToolCallScope::unbounded(),
-            })
-            .await?;
-        let resumed_hand_id = secured_3.hand_id.clone();
-        let resumed_read = secured_3.safe_output;
-        assert_eq!(resumed_hand_id.as_deref(), Some(handle_one_id.as_str()));
-        assert_eq!(resumed_read.to_text(), content_one);
 
         let secured_4 = router
             .execute_authorized(moa_hands::AuthorizedToolCall {

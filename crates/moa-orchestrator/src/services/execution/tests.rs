@@ -265,7 +265,7 @@ fn skill_revision(name: &str, revision_uid: u128) -> StoredArtifactRevision {
                                 delay_seconds: 86_400,
                             },
                             on_expiry:
-                                moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                                moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
                         },
                         input_schema: json!({"type": "object"}),
                         output_schema: json!({"type": "object"}),
@@ -638,7 +638,7 @@ fn accepted_turn_requires_skill_template_provenance_from_planning_snapshot() {
                     expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                         delay_seconds: 86_400,
                     },
-                    on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                    on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
                 },
                 input_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
@@ -719,7 +719,7 @@ fn pinned_execution_template(
                     expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
                         delay_seconds: 86_400,
                     },
-                    on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                    on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
                 },
                 input_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),

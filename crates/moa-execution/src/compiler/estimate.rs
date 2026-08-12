@@ -2,6 +2,14 @@
 
 use super::*;
 
+/// Sums the worst case over *every* node, including nodes that declare a condition.
+///
+/// A branchy plan therefore reserves the union of its branches even though at most one
+/// of them can run. That over-reservation is deliberate: the estimate is what the owning
+/// user approves and what the budget ledger fences, and it must be an upper bound that
+/// holds before any condition has been evaluated. Narrowing it to the taken branch would
+/// require knowing the run input at approval time and would let a run exceed the amount
+/// its user actually saw.
 pub(super) fn estimate_plan(
     goal: &ExecutionGoalContract,
     plan: &ExecutionPlanDefinition,

@@ -344,10 +344,6 @@ mod tests {
             Ok(moa_core::types::hands::HandStatus::Running)
         }
 
-        async fn pause(&self, _handle: &moa_core::types::hands::HandHandle) -> Result<()> {
-            Ok(())
-        }
-
         async fn resume(&self, _handle: &moa_core::types::hands::HandHandle) -> Result<()> {
             Ok(())
         }

@@ -506,10 +506,6 @@ impl SandboxStorageProvider for E2BHandProvider {
             let present = published.is_some();
             match operation.kind {
                 WorkspaceOperationKind::Commit | WorkspaceOperationKind::Checkpoint if present => {
-                    if let Some(hand) = request.hand() {
-                        self.kill_exact_workspace_hand(hand, &operation.binding)
-                            .await?;
-                    }
                     let published = published.ok_or_else(|| {
                         MoaError::StorageError(
                             "confirmed E2B checkpoint reconciliation lost its manifest".to_string(),
@@ -531,7 +527,11 @@ impl SandboxStorageProvider for E2BHandProvider {
                         confirmed_disposition: Some(WorkspaceConfirmedDisposition::ResourcePresent),
                         storage: Some(storage.clone()),
                         checkpoint_publication: Some(checkpoint_publication),
-                        post_commit_state: Some(WorkspacePostCommitState::ComputeDestroyed),
+                        // Reconciliation only proves the bytes; it never releases
+                        // compute. The caller may still be using this hand, and a
+                        // release-commit finishes its destroy as a separate exact
+                        // step after the durable publication CAS succeeds.
+                        post_commit_state: Some(WorkspacePostCommitState::AttachmentRetained),
                     });
                 }
                 WorkspaceOperationKind::Delete if !present => {

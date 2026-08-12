@@ -165,8 +165,6 @@ AS $$
     SELECT CASE candidate ->> 'kind'
         WHEN 'fail_task' THEN
             candidate = '{"kind":"fail_task"}'::JSONB
-        WHEN 'fail_run' THEN
-            candidate = '{"kind":"fail_run"}'::JSONB
         WHEN 'continue_with' THEN
             moa.execution_json_object_has_exact_keys(candidate, ARRAY['kind', 'output'])
         ELSE FALSE
@@ -310,6 +308,13 @@ ALTER TABLE moa.execution_run
     ADD COLUMN last_progress_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     ADD COLUMN pause_requested_at TIMESTAMPTZ,
     ADD COLUMN paused_at TIMESTAMPTZ,
+    -- Consecutive crashed activations since the last acknowledged wake. This is
+    -- deliberately not generation-scoped: the reset rides the existing healthy
+    -- wake acknowledgement, so failures can carry across a generation bump, but
+    -- one healthy activation clears it and a run that cannot complete even one
+    -- is genuinely not progressing.
+    ADD COLUMN activation_failure_count BIGINT NOT NULL DEFAULT 0
+        CHECK (activation_failure_count >= 0),
     ADD COLUMN ready_task_count BIGINT NOT NULL DEFAULT 0
         CHECK (ready_task_count >= 0),
     ADD COLUMN active_task_count BIGINT NOT NULL DEFAULT 0
@@ -430,10 +435,83 @@ ALTER TABLE moa.execution_run
         'completed', 'partial', 'blocked', 'unsupported', 'failed', 'cancelled'
     ));
 
+-- Retire the two terminal-vocabulary values this architecture supersedes.
+--
+-- `scheduler_no_progress` was produced only by the deleted whole-plan scheduler's
+-- `ScheduleDecision::NoProgress`. The incremental controller cannot reach the state it
+-- named: `cancel_unmaterialized_dependents_in_tx` terminalizes the whole transitive
+-- dependent closure in the same transaction as the node failure and raises on a partial
+-- cascade, and any residual stall is settled by the always-armed run deadline as
+-- `deadline_exceeded`, which is the more actionable terminal.
+--
+-- `dependency_failed` is a task-level failure class, but a dependency failure is now a
+-- node-level cancellation: the cascade asserts every dependent it cancels carries zero
+-- tasks, so there is no task to classify. Producing it would require synthesizing failed
+-- rows for work that never ran, which would displace the real root-cause class that
+-- `load_earliest_typed_task_failure` surfaces on the run terminal.
+--
+-- This patches the live function rather than editing V27 in place: V55 already rewrites
+-- this body through `pg_get_functiondef` + `replace`, so an in-place V27 edit would reach
+-- a fresh database and never reach one that already ran V27. Each removal is guarded on
+-- its exact predecessor text so a drifted baseline fails loudly instead of silently
+-- leaving an accepted value behind. `execution_run_terminal_evidence` needs no companion
+-- change: V55 already replaced that constraint with one that delegates entirely to this
+-- function and never repeats the class list.
+DO $execution_long_horizon_terminal_reason$
+DECLARE
+    definition TEXT;
+    -- Each anchor starts at the branch indent and ends with its own newline, so the
+    -- removal takes the whole branch and leaves the surrounding lines intact.
+    old_no_progress_validation TEXT := $old$        WHEN 'scheduler_no_progress' THEN
+            terminal_cause = '{"kind":"scheduler_no_progress"}'::JSONB
+$old$;
+    old_no_progress_reason TEXT := $old$        WHEN 'scheduler_no_progress' THEN
+            RETURN CASE status_value
+                WHEN 'unsupported' THEN 'unsupported_plan'
+                WHEN 'partial' THEN 'no_progress'
+                WHEN 'blocked' THEN 'no_progress'
+                WHEN 'failed' THEN 'no_progress'
+                ELSE NULL
+            END;
+$old$;
+    old_failure_classes TEXT :=
+        $old$                'retryable','dependency_failed','invalid_input','invalid_output',$old$;
+    new_failure_classes TEXT :=
+        $new$                'retryable','invalid_input','invalid_output',$new$;
+BEGIN
+    SELECT pg_get_functiondef(
+        'moa.execution_terminal_reason_for(text,jsonb,text)'::REGPROCEDURE
+    ) INTO definition;
+    IF position(old_no_progress_validation IN definition) = 0
+       OR position(old_no_progress_reason IN definition) = 0
+       OR position(old_failure_classes IN definition) = 0 THEN
+        RAISE EXCEPTION
+            'execution terminal reason function drifted before V59'
+            USING ERRCODE = '55000';
+    END IF;
+    definition := replace(definition, old_no_progress_validation, '');
+    definition := replace(definition, old_no_progress_reason, '');
+    definition := replace(definition, old_failure_classes, new_failure_classes);
+    EXECUTE definition;
+END
+$execution_long_horizon_terminal_reason$;
+
 DROP INDEX moa.execution_run_nonterminal_idx;
 CREATE INDEX execution_run_nonterminal_idx
     ON moa.execution_run (status, updated_at, run_uid)
     WHERE status IN (
+        'awaiting_confirmation', 'queued', 'running', 'waiting_input',
+        'waiting_review', 'waiting_signal', 'waiting_timer', 'waiting_external',
+        'waiting_replan', 'pause_requested', 'pausing', 'paused', 'compensating'
+    );
+
+-- The exact-deadline invariant guard scans for overdue nonterminal runs each
+-- reconcile. It shares this predicate with execution_run_nonterminal_idx, but
+-- that index leads on status and so cannot answer a budget_deadline_at range;
+-- leading on the deadline keeps the guard an index-only scan.
+CREATE INDEX execution_run_overdue_deadline_idx
+    ON moa.execution_run (budget_deadline_at, run_uid)
+    WHERE budget_deadline_at IS NOT NULL AND status IN (
         'awaiting_confirmation', 'queued', 'running', 'waiting_input',
         'waiting_review', 'waiting_signal', 'waiting_timer', 'waiting_external',
         'waiting_replan', 'pause_requested', 'pausing', 'paused', 'compensating'
@@ -644,13 +722,22 @@ CREATE INDEX execution_task_ready_idx
     ON moa.execution_task (tenant_id, run_uid, ready_at, node_id, item_key, task_id)
     WHERE status = 'ready';
 
-CREATE INDEX execution_task_active_attempt_watchdog_idx
-    ON moa.execution_task (attempt_deadline_at, tenant_id, run_uid, task_id)
-    WHERE status = 'running' AND attempt_state = 'running';
+-- Oldest live attempt, for the stuck-attempt guard. A deadline-keyed index over
+-- the same rows was deliberately dropped as unused: nothing orders or filters on
+-- attempt_deadline_at, and a btree leading on it could not answer this ordering
+-- anyway. This one is backed by a measured index-only scan.
+CREATE INDEX execution_task_active_attempt_started_idx
+    ON moa.execution_task (attempt_started_at, task_id)
+    WHERE status = 'running' AND attempt_state = 'running'
+      AND attempt_started_at IS NOT NULL;
 
-CREATE INDEX execution_task_cancelling_reconciliation_idx
-    ON moa.execution_task (last_progress_at, tenant_id, run_uid, task_id)
-    WHERE attempt_state = 'cancelling';
+-- Fleet admission scans the ready queue per tenant, not per run: the fair-tenant
+-- probe tests one tenant's due ready work and the per-item pick orders that
+-- tenant's queue by ready_at. Leading on run_uid forces those to sort the whole
+-- tenant queue once per admitted item, so give them their own ordered window.
+CREATE INDEX execution_task_tenant_ready_order_idx
+    ON moa.execution_task (tenant_id, ready_at, task_id)
+    WHERE status = 'ready' AND ready_at IS NOT NULL;
 
 CREATE INDEX execution_task_terminal_retention_idx
     ON moa.execution_task (tenant_id, completed_at, run_uid, task_id)
@@ -711,17 +798,13 @@ SET attempt_generation = generation,
     END,
     last_progress_at = updated_at;
 
-CREATE INDEX execution_compensation_active_watchdog_idx
-    ON moa.execution_compensation (
-        attempt_deadline_at, tenant_id, run_uid, compensation_id
-    )
-    WHERE status = 'running' AND attempt_state = 'running';
-
-CREATE INDEX execution_compensation_cancelling_reconciliation_idx
-    ON moa.execution_compensation (
-        last_progress_at, tenant_id, run_uid, compensation_id
-    )
-    WHERE attempt_state = 'cancelling';
+-- Rollback twin of execution_task_active_attempt_started_idx: a compensation
+-- attempt holds the same active-compute reservation, so the stuck-attempt guard
+-- takes an ordered minimum from each table and reduces the two rows.
+CREATE INDEX execution_compensation_active_attempt_started_idx
+    ON moa.execution_compensation (attempt_started_at, compensation_id)
+    WHERE status = 'running' AND attempt_state = 'running'
+      AND attempt_started_at IS NOT NULL;
 
 CREATE INDEX execution_compensation_terminal_retention_idx
     ON moa.execution_compensation (tenant_id, completed_at, run_uid, compensation_id)
@@ -1376,8 +1459,11 @@ CREATE TABLE moa.execution_trigger (
         'external_reconcile', 'external_start_recovery', 'schedule_occurrence',
         'compensation_watchdog'
     )),
+    -- Triggers are never claimed and never dead-letter. Claiming, retry accounting, and
+    -- dead-lettering live entirely on moa.execution_dispatch_outbox, and a trigger
+    -- delivery always requires durable retry, so a trigger row only ever settles.
     state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN (
-        'pending', 'dispatching', 'delivered', 'superseded', 'cancelled', 'dead_letter'
+        'pending', 'delivered', 'superseded', 'cancelled'
     )),
     controller_generation BIGINT CHECK (controller_generation >= 1),
     attempt_generation BIGINT CHECK (attempt_generation >= 1),
@@ -1387,11 +1473,9 @@ CREATE TABLE moa.execution_trigger (
     occurrence_sequence BIGINT CHECK (occurrence_sequence >= 1),
     due_at TIMESTAMPTZ NOT NULL,
     payload JSONB NOT NULL DEFAULT '{}'::JSONB CHECK (jsonb_typeof(payload) = 'object'),
-    claim_owner TEXT,
-    claimed_at TIMESTAMPTZ,
-    claim_expires_at TIMESTAMPTZ,
-    delivery_attempts INTEGER NOT NULL DEFAULT 0 CHECK (delivery_attempts >= 0),
     delivered_at TIMESTAMPTZ,
+    -- Operator-facing only: rearm_external_start_recovery records why a start-recovery
+    -- trigger keeps rearming. Nothing in Rust reads it back.
     last_error TEXT CHECK (last_error IS NULL OR octet_length(last_error) <= 4096),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1487,14 +1571,6 @@ CREATE TABLE moa.execution_trigger (
             AND occurrence_sequence IS NULL
         )
     ),
-    CONSTRAINT execution_trigger_claim_pair_check CHECK (
-        (claim_owner IS NULL AND claimed_at IS NULL AND claim_expires_at IS NULL)
-        OR (
-            claim_owner IS NOT NULL AND btrim(claim_owner) <> ''
-            AND claimed_at IS NOT NULL AND claim_expires_at IS NOT NULL
-            AND claim_expires_at > claimed_at
-        )
-    ),
     CONSTRAINT execution_trigger_delivery_pair_check CHECK (
         (state = 'delivered') = (delivered_at IS NOT NULL)
     ),
@@ -1524,7 +1600,7 @@ CREATE UNIQUE INDEX execution_trigger_current_run_generation_uidx
         COALESCE(compensation_generation, 0),
         COALESCE(compensation_attempt_generation, 0)
     )
-    WHERE state IN ('pending', 'dispatching') AND run_uid IS NOT NULL;
+    WHERE state = 'pending' AND run_uid IS NOT NULL;
 
 CREATE UNIQUE INDEX execution_trigger_schedule_occurrence_uidx
     ON moa.execution_trigger (
@@ -1536,17 +1612,9 @@ CREATE INDEX execution_trigger_due_idx
     ON moa.execution_trigger (due_at, tenant_id, trigger_uid)
     WHERE state = 'pending';
 
-CREATE INDEX execution_trigger_claim_expiry_idx
-    ON moa.execution_trigger (claim_expires_at, due_at, trigger_uid)
-    WHERE state = 'dispatching';
-
-CREATE INDEX execution_trigger_dead_letter_idx
-    ON moa.execution_trigger (created_at, tenant_id, trigger_uid)
-    WHERE state = 'dead_letter';
-
 CREATE INDEX execution_trigger_run_wake_idx
     ON moa.execution_trigger (run_uid, due_at, trigger_uid)
-    WHERE run_uid IS NOT NULL AND state IN ('pending', 'dispatching');
+    WHERE run_uid IS NOT NULL AND state = 'pending';
 
 CREATE OR REPLACE FUNCTION moa.execution_attempt_cancel_payload_is_valid(
     candidate JSONB,
@@ -1634,6 +1702,13 @@ CREATE TABLE moa.execution_dispatch_outbox (
         CHECK (compensation_attempt_generation >= 1),
     not_before_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     payload JSONB NOT NULL DEFAULT '{}'::JSONB CHECK (jsonb_typeof(payload) = 'object'),
+    -- Restate persists a completed invocation's response and replays it for any
+    -- later request carrying the same idempotency key. A reconciler repair that
+    -- returned a row to `pending` under its original `dispatch_uid` would attach
+    -- to that memoized completion instead of re-executing the target. This
+    -- counter gives each repair a distinct delivery identity to fold into the
+    -- key; it advances only on repair, so ordinary redelivery stays idempotent.
+    repair_epoch INTEGER NOT NULL DEFAULT 0 CHECK (repair_epoch >= 0),
     claim_owner TEXT,
     claimed_at TIMESTAMPTZ,
     claim_expires_at TIMESTAMPTZ,
@@ -1972,7 +2047,6 @@ CREATE TABLE moa.execution_tenant_dispatch_state (
     tenant_id UUID PRIMARY KEY,
     weight NUMERIC(20, 6) NOT NULL DEFAULT 1 CHECK (weight > 0),
     virtual_finish NUMERIC(30, 6) NOT NULL DEFAULT 0 CHECK (virtual_finish >= 0),
-    deficit NUMERIC(30, 6) NOT NULL DEFAULT 0,
     last_dispatched_at TIMESTAMPTZ,
     version BIGINT NOT NULL DEFAULT 1 CHECK (version >= 1),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -2347,9 +2421,12 @@ BEGIN
     END IF;
 
     transition_allowed := CASE OLD.status
+        -- 'failed' without an attempt: a relative wait can resolve at wait entry
+        -- to a due time at or past the run deadline, which fails the task on its
+        -- own node rather than entering a wait that could never settle.
         WHEN 'pending' THEN NEW.status IN (
             'ready', 'reserved', 'waiting_review', 'waiting_signal',
-            'waiting_timer', 'skipped', 'cancelled'
+            'waiting_timer', 'failed', 'skipped', 'cancelled'
         )
         WHEN 'ready' THEN NEW.status IN ('dispatching', 'reserved', 'cancelled')
         WHEN 'reserved' THEN NEW.status IN ('dispatching', 'running', 'cancelled')
@@ -2421,7 +2498,15 @@ BEGIN
     IF NEW.ready_task_count < 0 OR NEW.active_task_count < 0 THEN
         RAISE EXCEPTION 'execution run task counters cannot be negative';
     END IF;
-    IF OLD.status = 'pausing' AND NEW.active_task_count = 0 THEN
+    -- Draining the last active attempt completes a pause. Attempt settlement only
+    -- adjusts counters, so the promotion has to happen here. It must never rewrite
+    -- a status the writer chose: a terminal write that also zeroes the counter
+    -- (deadline, budget, terminal fence) would otherwise be swallowed into
+    -- 'paused', and the run could then never leave it, because 'paused' admits
+    -- only 'queued' and 'cancelled'.
+    IF OLD.status = 'pausing'
+       AND NEW.status = OLD.status
+       AND NEW.active_task_count = 0 THEN
         NEW.status := 'paused';
         NEW.activation_state := 'paused';
         NEW.paused_at := COALESCE(NEW.paused_at, now());

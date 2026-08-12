@@ -65,6 +65,7 @@ async fn ready_run(
                     reduce_cursor: None,
                     source_exhausted: true,
                     terminal_output: None,
+                    condition_skipped: false,
                     tasks,
                 },
             )

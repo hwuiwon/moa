@@ -2,6 +2,11 @@ name: integration tests
 
 on:
   pull_request:
+  schedule:
+    # Nightly slot reserved for the accelerated long-horizon execution suite.
+    # Every other job in this file is explicitly excluded from it, so adding
+    # this trigger does not turn the pull-request jobs into nightly jobs.
+    - cron: "41 3 * * *"
   workflow_dispatch:
 
 permissions:
@@ -9,6 +14,7 @@ permissions:
 
 jobs:
   restate-recovery-matrix:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -86,6 +92,7 @@ jobs:
           if-no-files-found: ignore
 
   restate-fixture-smoke:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # The dedicated scripted fixture builds moa-orchestrator-bin inside the
     # test, which the old always-bailing invocation never paid for.
@@ -187,6 +194,7 @@ jobs:
         run: docker compose down -v
 
   behavior-lab-scorecards:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # Deterministic and unbilled by construction: every evaluator in the initial
     # product registry reads typed terminal evidence and calls no provider. The
@@ -269,6 +277,7 @@ jobs:
         run: docker compose down -v
 
   clickhouse-analytics:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # The named trigger for the ClickHouse analytics arm. That backend is wired
     # from `[clickhouse]` config presence and covered in the db lanes against a
@@ -341,3 +350,83 @@ jobs:
       - name: Stop compose stack
         if: always()
         run: docker compose --profile clickhouse down -v
+
+  long-horizon-execution:
+    # The named trigger for the accelerated long-horizon execution suite. Its 21
+    # cases are the only coverage of pause/resume, external-job callback dedup,
+    # deadline and wait exactness, old-deployment drain, and disaster recovery,
+    # and they are `#[ignore]`d behind a profile that no Makefile target or CI
+    # job selected -- the same decay mode `.config/nextest.toml` documents for
+    # the Behavior Lab lanes. Nightly rather than per-pull-request because each
+    # case serially owns a disposable Restate/Postgres/Valkey stack.
+    #
+    # Deterministic and unbilled: the lane strips provider credentials and
+    # external-stack discovery, so it cannot reach a paid provider or silently
+    # become an ambient-stack test.
+    if: github.event.schedule == '41 3 * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      MOA_FIXTURE_RUST_LOG: info
+      RUST_BACKTRACE: "1"
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      # Identical selection to `make test-long-horizon` and to
+      # `scripts/run-clean-e2e.sh --long-horizon`: same profile, same features,
+      # same run-ignored/no-tests contract.
+      - name: Run accelerated long-horizon execution suite
+        run: make test-long-horizon
+
+      - name: Publish long-horizon JUnit report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: long-horizon-execution-junit
+          path: target/nextest/long-horizon-execution/junit.xml
+          if-no-files-found: warn
+
+      - name: Capture Docker fixture diagnostics
+        if: failure()
+        run: |
+          diagnostics="${RUNNER_TEMP}/long-horizon-docker.log"
+          {
+            echo "== docker ps -a =="
+            docker ps -a --no-trunc
+            while IFS= read -r container_id; do
+              [ -n "${container_id}" ] || continue
+              echo
+              echo "== docker inspect ${container_id} =="
+              docker inspect --format \
+                'name={{.Name}} image={{.Config.Image}} status={{.State.Status}} exit={{.State.ExitCode}} error={{json .State.Error}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                "${container_id}"
+              echo
+              echo "== docker logs ${container_id} =="
+              docker logs "${container_id}"
+            done < <(docker ps -aq)
+          } 2>&1 | tee "${diagnostics}" || true
+
+      - name: Upload Docker fixture diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: long-horizon-docker-diagnostics
+          path: ${{ runner.temp }}/long-horizon-docker.log
+          if-no-files-found: ignore

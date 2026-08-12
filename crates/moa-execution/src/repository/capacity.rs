@@ -16,7 +16,12 @@ use super::{
     trigger::{ExecutionTriggerKind, NewExecutionTrigger, create_trigger_with_dispatch_in_conn},
 };
 
-const MAX_ADMISSION_BATCH: u32 = 1_000;
+/// Upper bound on one admission transaction's item count.
+///
+/// Admission holds `FOR UPDATE` on the single fleet `active_tasks` bucket row for the whole batch,
+/// and every multi-dimension execution transaction prelocks that same row. The cap keeps that
+/// fleet-wide lock hold proportional to one dispatch window; the dispatcher loops for more.
+const MAX_ADMISSION_BATCH: u32 = 64;
 const FAIRNESS_QUANTUM: i64 = 1_000_000;
 const CAPACITY_RESERVATION_NAMESPACE: Uuid =
     Uuid::from_u128(0x5b72_581c_d6f1_5a0b_9097_a267_eb1c_18d4);
@@ -87,6 +92,15 @@ pub enum ExecutionCapacityOwner {
     Trigger { trigger_uid: Uuid },
     /// Provider-owned external job capacity.
     ExternalJob { external_job_uid: Uuid },
+    /// Active-task capacity owned by one exact compensation attempt generation.
+    Compensation {
+        /// Registered compensation the attempt rolls back.
+        compensation_id: Uuid,
+        /// Logical compensation generation that owns the attempt.
+        compensation_generation: u64,
+        /// Bounded attempt generation inside that compensation generation.
+        compensation_attempt_generation: u64,
+    },
 }
 
 /// Generic capacity request shared by run, trigger, and external-job transactions.
@@ -162,6 +176,40 @@ pub(super) fn parked_run_capacity_request(
         dimension: ExecutionCapacityDimension::ParkedRuns,
         owner: ExecutionCapacityOwner::Run,
         expires_at: None,
+    }
+}
+
+/// Builds the exact active-task receipt owned by one compensation attempt generation.
+///
+/// The reservation identity is derived from the immutable owner fence, so a replayed admission
+/// resolves to the same receipt instead of racing
+/// `execution_capacity_reservation_compensation_owner_uidx`.
+#[must_use]
+pub(super) fn compensation_attempt_capacity_request(
+    tenant_id: TenantId,
+    run_uid: Uuid,
+    controller_generation: u64,
+    compensation_id: Uuid,
+    compensation_generation: u64,
+    compensation_attempt_generation: u64,
+    expires_at: Option<DateTime<Utc>>,
+) -> ExecutionCapacityRequest {
+    let owner_name = format!(
+        "active_tasks:{run_uid}:{controller_generation}:{compensation_id}:\
+         {compensation_generation}:{compensation_attempt_generation}"
+    );
+    ExecutionCapacityRequest {
+        reservation_uid: Uuid::new_v5(&CAPACITY_RESERVATION_NAMESPACE, owner_name.as_bytes()),
+        tenant_id,
+        run_uid: Some(run_uid),
+        controller_generation: Some(controller_generation),
+        dimension: ExecutionCapacityDimension::ActiveTasks,
+        owner: ExecutionCapacityOwner::Compensation {
+            compensation_id,
+            compensation_generation,
+            compensation_attempt_generation,
+        },
+        expires_at,
     }
 }
 
@@ -554,7 +602,8 @@ pub(super) async fn reserve_capacity_in_tx(
     .await?;
     let existing = sqlx::query(
         "SELECT tenant_id, run_uid, controller_generation, resource_dimension, state, \
-                trigger_uid, external_job_uid \
+                trigger_uid, external_job_uid, compensation_id, compensation_generation, \
+                compensation_attempt_generation \
          FROM moa.execution_capacity_reservation WHERE reservation_uid = $1 FOR UPDATE",
     )
     .bind(request.reservation_uid)
@@ -583,7 +632,15 @@ pub(super) async fn reserve_capacity_in_tx(
             && existing
                 .try_get::<Option<Uuid>, _>("external_job_uid")
                 .map_err(row_error)?
-                == owner_external_job_uid(request.owner);
+                == owner_external_job_uid(request.owner)
+            && existing
+                .try_get::<Option<Uuid>, _>("compensation_id")
+                .map_err(row_error)?
+                == owner_compensation_uid(request.owner)
+            && optional_u64(&existing, "compensation_generation")?
+                == owner_compensation_generation(request.owner)
+            && optional_u64(&existing, "compensation_attempt_generation")?
+                == owner_compensation_attempt_generation(request.owner);
         if !matches {
             return Err(Error::InvalidRepositoryData {
                 message: "capacity reservation UID is bound to different immutable coordinates"
@@ -606,14 +663,26 @@ pub(super) async fn reserve_capacity_in_tx(
     sqlx::query(
         "INSERT INTO moa.execution_capacity_reservation (\
              reservation_uid, tenant_id, run_uid, trigger_uid, external_job_uid, \
+             compensation_id, compensation_generation, compensation_attempt_generation, \
              controller_generation, resource_dimension, quantity, expires_at\
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8)",
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11)",
     )
     .bind(request.reservation_uid)
     .bind(request.tenant_id.0)
     .bind(request.run_uid)
     .bind(owner_trigger_uid(request.owner))
     .bind(owner_external_job_uid(request.owner))
+    .bind(owner_compensation_uid(request.owner))
+    .bind(
+        owner_compensation_generation(request.owner)
+            .map(|generation| to_i64(generation, "capacity compensation generation"))
+            .transpose()?,
+    )
+    .bind(
+        owner_compensation_attempt_generation(request.owner)
+            .map(|generation| to_i64(generation, "capacity compensation attempt generation"))
+            .transpose()?,
+    )
     .bind(
         request
             .controller_generation
@@ -811,7 +880,8 @@ pub(super) async fn release_capacity_in_tx(
     lock_existing_capacity_bucket(conn, "tenant", Some(request.tenant_id.0), dimension).await?;
     let row = sqlx::query(
         "SELECT tenant_id, run_uid, controller_generation, resource_dimension, state, \
-                trigger_uid, external_job_uid \
+                trigger_uid, external_job_uid, compensation_id, compensation_generation, \
+                compensation_attempt_generation \
          FROM moa.execution_capacity_reservation WHERE reservation_uid = $1 FOR UPDATE",
     )
     .bind(request.reservation_uid)
@@ -838,7 +908,15 @@ pub(super) async fn release_capacity_in_tx(
         && row
             .try_get::<Option<Uuid>, _>("external_job_uid")
             .map_err(row_error)?
-            == owner_external_job_uid(request.owner);
+            == owner_external_job_uid(request.owner)
+        && row
+            .try_get::<Option<Uuid>, _>("compensation_id")
+            .map_err(row_error)?
+            == owner_compensation_uid(request.owner)
+        && optional_u64(&row, "compensation_generation")?
+            == owner_compensation_generation(request.owner)
+        && optional_u64(&row, "compensation_attempt_generation")?
+            == owner_compensation_attempt_generation(request.owner);
     if !matches {
         return Ok(CapacityReleaseOutcome::Stale);
     }
@@ -1058,7 +1136,8 @@ async fn reactivate_active_run_capacity_in_tx(
     Ok(CapacityReserveOutcome::Reserved)
 }
 
-async fn capacity_bucket_has_room(
+/// Reports whether one locked capacity bucket can admit a further unit.
+pub(super) async fn capacity_bucket_has_room(
     conn: &mut PgConnection,
     scope_kind: &str,
     tenant_id: Option<Uuid>,
@@ -1165,6 +1244,9 @@ fn validate_generic_capacity_request(request: &ExecutionCapacityRequest) -> Resu
         ) | (
             ExecutionCapacityDimension::ExternalJobs,
             ExecutionCapacityOwner::ExternalJob { .. }
+        ) | (
+            ExecutionCapacityDimension::ActiveTasks,
+            ExecutionCapacityOwner::Compensation { .. }
         )
     );
     let run_fence_valid = match (
@@ -1180,6 +1262,15 @@ fn validate_generic_capacity_request(request: &ExecutionCapacityRequest) -> Resu
         ExecutionCapacityOwner::Run => true,
         ExecutionCapacityOwner::Trigger { trigger_uid } => !trigger_uid.is_nil(),
         ExecutionCapacityOwner::ExternalJob { external_job_uid } => !external_job_uid.is_nil(),
+        ExecutionCapacityOwner::Compensation {
+            compensation_id,
+            compensation_generation,
+            compensation_attempt_generation,
+        } => {
+            !compensation_id.is_nil()
+                && compensation_generation > 0
+                && compensation_attempt_generation > 0
+        }
     };
     if !valid || !run_fence_valid || !owner_identity_valid || request.reservation_uid.is_nil() {
         return Err(Error::InvalidRepositoryInput {
@@ -1192,14 +1283,53 @@ fn validate_generic_capacity_request(request: &ExecutionCapacityRequest) -> Resu
 const fn owner_trigger_uid(owner: ExecutionCapacityOwner) -> Option<Uuid> {
     match owner {
         ExecutionCapacityOwner::Trigger { trigger_uid } => Some(trigger_uid),
-        ExecutionCapacityOwner::Run | ExecutionCapacityOwner::ExternalJob { .. } => None,
+        ExecutionCapacityOwner::Run
+        | ExecutionCapacityOwner::ExternalJob { .. }
+        | ExecutionCapacityOwner::Compensation { .. } => None,
     }
 }
 
 const fn owner_external_job_uid(owner: ExecutionCapacityOwner) -> Option<Uuid> {
     match owner {
         ExecutionCapacityOwner::ExternalJob { external_job_uid } => Some(external_job_uid),
-        ExecutionCapacityOwner::Run | ExecutionCapacityOwner::Trigger { .. } => None,
+        ExecutionCapacityOwner::Run
+        | ExecutionCapacityOwner::Trigger { .. }
+        | ExecutionCapacityOwner::Compensation { .. } => None,
+    }
+}
+
+const fn owner_compensation_uid(owner: ExecutionCapacityOwner) -> Option<Uuid> {
+    match owner {
+        ExecutionCapacityOwner::Compensation {
+            compensation_id, ..
+        } => Some(compensation_id),
+        ExecutionCapacityOwner::Run
+        | ExecutionCapacityOwner::Trigger { .. }
+        | ExecutionCapacityOwner::ExternalJob { .. } => None,
+    }
+}
+
+const fn owner_compensation_generation(owner: ExecutionCapacityOwner) -> Option<u64> {
+    match owner {
+        ExecutionCapacityOwner::Compensation {
+            compensation_generation,
+            ..
+        } => Some(compensation_generation),
+        ExecutionCapacityOwner::Run
+        | ExecutionCapacityOwner::Trigger { .. }
+        | ExecutionCapacityOwner::ExternalJob { .. } => None,
+    }
+}
+
+const fn owner_compensation_attempt_generation(owner: ExecutionCapacityOwner) -> Option<u64> {
+    match owner {
+        ExecutionCapacityOwner::Compensation {
+            compensation_attempt_generation,
+            ..
+        } => Some(compensation_attempt_generation),
+        ExecutionCapacityOwner::Run
+        | ExecutionCapacityOwner::Trigger { .. }
+        | ExecutionCapacityOwner::ExternalJob { .. } => None,
     }
 }
 
@@ -1418,7 +1548,11 @@ async fn increment_capacity(
     Ok(())
 }
 
-async fn advance_tenant_fairness(
+/// Charges one admitted attempt against the tenant's weighted-fair virtual finish.
+///
+/// Forward and compensation admission both call this, so a tenant's rollback work consumes the
+/// same weighted-fair credit as its forward work instead of jumping the queue for free.
+pub(super) async fn advance_tenant_fairness(
     conn: &mut ScopedConn<'_>,
     tenant_id: Uuid,
     now: DateTime<Utc>,
@@ -1435,7 +1569,6 @@ async fn advance_tenant_fairness(
          UPDATE moa.execution_tenant_dispatch_state AS state \
          SET virtual_finish = GREATEST(state.virtual_finish, active_floor.value) \
                                   + ($2::NUMERIC / state.weight), \
-             deficit = state.deficit + state.weight - 1, \
              last_dispatched_at = $3, version = state.version + 1, updated_at = NOW() \
          FROM active_floor WHERE state.tenant_id = $1",
     )

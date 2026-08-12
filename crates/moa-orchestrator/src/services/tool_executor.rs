@@ -25,6 +25,7 @@ use moa_core::{
         ExecutionCompensationScopeId, ExecutionRunScopeId, ExecutionTaskScopeId, SessionId,
         TenantId, ToolCallId,
     },
+    types::sandbox_workspace::ExecutionHandContinuationDisposition,
     types::sandbox_workspace::ExecutionHandReleaseOwner,
     types::sandbox_workspace::ExecutionHandReleaseReceipt,
     types::sandbox_workspace::SandboxWorkspaceScope,
@@ -67,9 +68,9 @@ use moa_execution::wire::{
     ExecutionToolDispatchRejection,
 };
 use moa_hands::{
-    DeferredWorkspaceToolOutput, ExecutionHandReleaseRequest, JournaledWorkspaceCommit,
-    PendingConnectorToolOutput, SessionHandReleasePageOutcome, ToolCallScope, ToolCatalogPin,
-    ToolCatalogSnapshot, ToolExecution, ToolRouter,
+    DeferredWorkspaceToolOutput, ExecutionHandReleaseRequest, ExecutionHandRetentionRequest,
+    JournaledWorkspaceCommit, PendingConnectorToolOutput, SessionHandReleasePageOutcome,
+    ToolCallScope, ToolCatalogPin, ToolCatalogSnapshot, ToolExecution, ToolRouter,
 };
 use moa_security::{
     OutputClassification, ToolInputCanaryScreening, classify_tool_output,
@@ -80,6 +81,7 @@ use moa_wire::tools::{ToolDescriptor, tool_descriptor};
 use restate_sdk::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::services::execution_dispatcher::{DispatchExecutionsRequest, ExecutionDispatcherClient};
 use crate::services::sandbox_workspaces::SandboxWorkspaceManagement;
@@ -549,6 +551,11 @@ pub trait ToolExecutor {
         request: Json<CheckpointAndReleaseExecutionHandsRequest>,
     ) -> Result<Json<ExecutionHandReleaseReceipt>, HandlerError>;
 
+    /// Publishes one continuation checkpoint and keeps its sandbox for the next slice.
+    async fn checkpoint_execution_hands_retaining_compute(
+        request: Json<CheckpointExecutionHandsRetainingComputeRequest>,
+    ) -> Result<Json<ExecutionHandContinuationDisposition>, HandlerError>;
+
     /// Releases the generation-independent hand scope owned by one compensation.
     async fn release_execution_compensation_hands(
         request: Json<ReleaseExecutionCompensationHandsRequest>,
@@ -678,6 +685,28 @@ pub struct CheckpointAndReleaseExecutionHandsRequest {
     pub attempt_generation: u64,
     /// Fresh absolute bound for checkpoint, provider destroy, and receipt verification.
     pub release_deadline_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Exact bounded execution sandbox to checkpoint and keep across a continuation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointExecutionHandsRetainingComputeRequest {
+    /// Verified tenant that owns the execution run and lease.
+    pub tenant_id: TenantId,
+    /// Authoritative parent session loaded from the run.
+    pub session_id: SessionId,
+    /// Owning execution run.
+    pub run_uid: uuid::Uuid,
+    /// Task whose durable workspace scope owns the retained sandbox.
+    pub task_id: ExecutionTaskScopeId,
+    /// Logical task generation the retained compute belongs to.
+    pub logical_generation: u64,
+    /// Exact active-attempt generation publishing this continuation checkpoint.
+    pub attempt_generation: u64,
+    /// Fresh absolute bound for checkpoint publication.
+    pub publish_deadline_at: chrono::DateTime<chrono::Utc>,
+    /// Absolute instant after which the reaper may destroy the retained sandbox.
+    pub retention_deadline_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Request to release one settled compensation's scoped hands.
@@ -2507,6 +2536,71 @@ impl ToolExecutor for ToolExecutorImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal bounded-attempt continuation; the authoritative Session is loaded and its
+    // exact tenant/run/task generation is fenced again by the durable workspace repository.
+    async fn checkpoint_execution_hands_retaining_compute(
+        &self,
+        ctx: Context<'_>,
+        request: Json<CheckpointExecutionHandsRetainingComputeRequest>,
+    ) -> Result<Json<ExecutionHandContinuationDisposition>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span(
+            "ToolExecutor",
+            "checkpoint_execution_hands_retaining_compute",
+        );
+        let request = request.into_inner();
+        let session_store = self.session_access.sessions.clone();
+        let session_id = request.session_id;
+        let session = ctx
+            .run(|| async move {
+                session_store
+                    .get_session(session_id)
+                    .await
+                    .map(Json::from)
+                    .map_err(moa_error_to_handler_error)
+            })
+            .name(format!("load_task_continuation_session:{session_id}"))
+            .await?
+            .into_inner();
+        if session.tenant_id != request.tenant_id {
+            return Err(
+                TerminalError::new("execution continuation session tenant mismatch").into(),
+            );
+        }
+        let router = self.router.clone();
+        let run_id = ExecutionRunScopeId(request.run_uid);
+        let task_id = request.task_id;
+        let logical_generation = request.logical_generation;
+        let attempt_generation = request.attempt_generation;
+        let publish_deadline_at = request.publish_deadline_at;
+        let retention_deadline_at = request.retention_deadline_at;
+        Ok(ctx
+            .run(|| async move {
+                router
+                    .checkpoint_execution_hand_retaining_compute(ExecutionHandRetentionRequest {
+                        session: &session,
+                        run_id,
+                        task_id,
+                        logical_generation,
+                        attempt_generation,
+                        retention_deadline_at,
+                        scope: ToolCallScope::unbounded().with_budget(
+                            moa_core::types::resource::ResourceBudget::until(publish_deadline_at),
+                        ),
+                    })
+                    .await
+                    .map(Json::from)
+                    .map_err(moa_error_to_handler_error)
+            })
+            .name(format!(
+                "checkpoint_retaining_execution_hand:{}:{}:{}",
+                request.run_uid, request.task_id, request.attempt_generation
+            ))
+            .retry_policy(RunRetryPolicy::new().max_attempts(1))
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
     // SAFETY: internal terminal-task teardown reclaims only the typed run/task hand scope and returns no caller-owned data.
     async fn release_execution_task_hands(
         &self,
@@ -2516,12 +2610,7 @@ impl ToolExecutor for ToolExecutorImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ToolExecutor", "release_execution_task_hands");
         let request = request.into_inner();
-        let scope = execution_task_hand_scope(ExecutionTaskOrigin {
-            run_uid: request.run_uid,
-            task_uid: request.task_id.as_uuid(),
-            generation: 1,
-            attempt_generation: 1,
-        });
+        let scope = execution_task_hand_scope(request.run_uid, request.task_id.as_uuid());
         if !self
             .router
             .reclaim_hands(request.tenant_id, &request.session_id, Some(scope.as_str()))
@@ -2542,12 +2631,8 @@ impl ToolExecutor for ToolExecutorImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ToolExecutor", "release_execution_compensation_hands");
         let request = request.into_inner();
-        let scope = execution_compensation_hand_scope(ExecutionCompensationOrigin {
-            run_uid: request.run_uid,
-            compensation_id: request.compensation_id.as_uuid(),
-            generation: 1,
-            attempt_generation: 1,
-        });
+        let scope =
+            execution_compensation_hand_scope(request.run_uid, request.compensation_id.as_uuid());
         if !self
             .router
             .reclaim_hands(request.tenant_id, &request.session_id, Some(scope.as_str()))
@@ -2656,23 +2741,30 @@ pub fn tool_run_name(
 }
 
 /// Builds the isolated hand scope shared by generations of one execution task.
-pub fn execution_task_hand_scope(origin: ExecutionTaskOrigin) -> String {
-    format!("execution:{}:{}", origin.run_uid, origin.task_uid)
+///
+/// Takes the two identifiers it actually uses rather than a full origin, so
+/// callers that only know the run and task cannot invent generation values.
+pub fn execution_task_hand_scope(run_uid: Uuid, task_uid: Uuid) -> String {
+    format!("execution:{run_uid}:{task_uid}")
 }
 
 /// Builds the isolated hand scope shared by generations of one compensation.
-pub fn execution_compensation_hand_scope(origin: ExecutionCompensationOrigin) -> String {
-    format!(
-        "execution_compensation:{}:{}",
-        origin.run_uid, origin.compensation_id
-    )
+///
+/// Takes the two identifiers it actually uses rather than a full origin, so
+/// callers that only know the run and compensation cannot invent generations.
+pub fn execution_compensation_hand_scope(run_uid: Uuid, compensation_id: Uuid) -> String {
+    format!("execution_compensation:{run_uid}:{compensation_id}")
 }
 
 /// Builds the isolated hand scope for one typed execution operation.
 pub fn execution_hand_scope(origin: ExecutionToolCallOrigin) -> String {
     match origin {
-        ExecutionToolCallOrigin::Task(origin) => execution_task_hand_scope(origin),
-        ExecutionToolCallOrigin::Compensation(origin) => execution_compensation_hand_scope(origin),
+        ExecutionToolCallOrigin::Task(origin) => {
+            execution_task_hand_scope(origin.run_uid, origin.task_uid)
+        }
+        ExecutionToolCallOrigin::Compensation(origin) => {
+            execution_compensation_hand_scope(origin.run_uid, origin.compensation_id)
+        }
     }
 }
 
@@ -3976,10 +4068,6 @@ mod tests {
             Ok(HandStatus::Running)
         }
 
-        async fn pause(&self, _handle: &HandHandle) -> moa_core::error::Result<()> {
-            Ok(())
-        }
-
         async fn resume(&self, _handle: &HandHandle) -> moa_core::error::Result<()> {
             Ok(())
         }
@@ -4222,13 +4310,16 @@ mod tests {
             ..first
         };
 
-        assert_eq!(
-            execution_task_hand_scope(first),
-            execution_task_hand_scope(next_generation)
-        );
+        // Generations of one task share a scope by construction now that
+        // `execution_task_hand_scope` takes only the run and task identifiers,
+        // so the surviving assertion is the one with content: siblings differ.
         assert_ne!(
-            execution_task_hand_scope(first),
-            execution_task_hand_scope(sibling)
+            execution_task_hand_scope(first.run_uid, first.task_uid),
+            execution_task_hand_scope(sibling.run_uid, sibling.task_uid)
+        );
+        assert_eq!(
+            execution_hand_scope(ExecutionToolCallOrigin::Task(first)),
+            execution_hand_scope(ExecutionToolCallOrigin::Task(next_generation))
         );
         assert_eq!(
             execution_workspace_scope(ExecutionToolCallOrigin::Task(first)),
@@ -4328,9 +4419,9 @@ mod tests {
             execution_hand_scope(first_origin),
             execution_hand_scope(next_origin)
         );
-        assert_eq!(
-            execution_compensation_hand_scope(first),
-            execution_compensation_hand_scope(next)
+        assert_ne!(
+            execution_compensation_hand_scope(first.run_uid, first.compensation_id),
+            execution_compensation_hand_scope(first.run_uid, Uuid::from_u128(31))
         );
         let first_name = execution_tool_run_name(&definition, &request, first_origin);
         let next_name = execution_tool_run_name(&definition, &request, next_origin);

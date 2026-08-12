@@ -1515,26 +1515,19 @@ impl HandProvider for LocalHandProvider {
         }
     }
 
-    async fn pause(&self, handle: &HandHandle) -> Result<()> {
-        match handle {
-            HandHandle::Docker { container_id } => {
-                let output = Command::new("docker")
-                    .args(["pause", container_id])
-                    .output()
-                    .await?;
-                if !output.status.success() {
-                    return Err(MoaError::ProviderError(format!(
-                        "failed to pause docker sandbox: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    )));
-                }
-                Ok(())
-            }
-            HandHandle::Local { .. } => Ok(()),
-            _ => Err(MoaError::Unsupported(
-                "non-local hand handle passed to LocalHandProvider".to_string(),
-            )),
-        }
+    /// Refuses compute suspension: neither local backend can actually release compute.
+    ///
+    /// `docker pause` is a cgroup freeze — it stops CPU scheduling but keeps the
+    /// container's memory and disk allocated, so it releases nothing on any
+    /// billing model. `docker stop` would release them, but containers are
+    /// created with `--rm`, which makes a stop a destroy. A local sandbox
+    /// directory has no compute to release at all.
+    async fn suspend(&self, _handle: &HandHandle) -> Result<()> {
+        Err(MoaError::Unsupported(
+            "local sandboxes cannot release compute: `docker pause` is a cgroup freeze that keeps \
+             memory and disk allocated, and `--rm` containers are removed by `docker stop`"
+                .to_string(),
+        ))
     }
 
     async fn resume(&self, handle: &HandHandle) -> Result<()> {

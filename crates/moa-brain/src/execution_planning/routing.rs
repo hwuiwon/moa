@@ -37,7 +37,7 @@ const EXECUTION_ROUTER_MAX_MISSING_INPUT_BYTES: usize = 256;
 /// Maximum installed-skill names serialized into the classifier prompt as a
 /// coverage hint. Bounds the per-turn user message regardless of tenant size.
 pub const EXECUTION_ROUTER_MAX_SKILL_NAMES: usize = 24;
-const EXECUTION_ROUTER_PROMPT: &str = include_str!("../prompts/execution_router.txt");
+const EXECUTION_ROUTER_PROMPT: &str = include_str!("../prompts/execution_router.md");
 const ROUTER_STAGE_METADATA_KEY: &str = "moa.pipeline.stage";
 const OPENAI_REASONING_EFFORT_METADATA_KEY: &str = "_moa.openai.reasoning_effort";
 

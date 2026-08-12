@@ -11,7 +11,7 @@ use moa_execution::{
     budget::BudgetLedger,
     materialize_node_page,
     repository::{
-        ExecutionRepository, ExecutionScope, RunControllerClaimOutcome,
+        ExecutionRepository, ExecutionRunRecord, ExecutionScope, RunControllerClaimOutcome,
         RunControllerCompletionOutcome, RunControllerCompletionRequest, RunDeadlineArmOutcome,
         completion::{CompletionAdvanceOutcome, CompletionAdvanceRequest},
         outbox::{ExecutionDispatchKind, ExecutionDispatchRecord},
@@ -19,15 +19,72 @@ use moa_execution::{
             ExecutionReduceMaterializationCursor, MapAggregatePageOutcome, MapAggregatePageRequest,
             ReadyMaterializationOutcome, ReadyMaterializationRequest, ReduceRoundInputPageRequest,
         },
+        run::{ResumedControllerRecoveryOutcome, ResumedControllerRecoveryRequest},
         terminal::{
             FinalizationOutcome, PendingTerminalAdvanceOutcome, PendingTerminalAdvanceStage,
             RunTriggerDrainOutcome, RunTriggerDrainRequest,
         },
     },
-    state::{ExecutionProjection, ExecutionTaskStatus},
+    state::{
+        ExecutionProjection, ExecutionRunStatus, ExecutionTaskStatus, ExecutionTerminalCause,
+        ExecutionTerminalEvidence, ExecutionTerminalReason, PendingExecutionTerminal,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// Records that a declared node condition evaluated false and its branch was skipped.
+///
+/// A skipped branch produces no logical task, no attempt, and no output, so the only
+/// other evidence that the plan branched at all is the absence of rows. "Why did this
+/// branch not run" has to stay answerable after the fact — that is the whole reason a
+/// declared condition is preferable to an agent turn making the same choice silently.
+/// The node id is carried only on the span event; the counter keeps plan-defined ids
+/// out of metric labels.
+fn record_condition_skip(
+    run: &moa_execution::repository::ExecutionRunRecord,
+    node_id: &str,
+    plan_node: &moa_artifacts::execution_plan::ExecutionNode,
+) {
+    use moa_artifacts::execution_plan::{ExecutionCondition, ExecutionOperation};
+
+    let operation = match plan_node.operation {
+        ExecutionOperation::Capability { .. } => "capability",
+        ExecutionOperation::Agent { .. } => "agent",
+        ExecutionOperation::Map { .. } => "map",
+        ExecutionOperation::Reduce { .. } => "reduce",
+        ExecutionOperation::Review { .. } => "review",
+        ExecutionOperation::WaitSignal { .. } => "wait_signal",
+        ExecutionOperation::WaitUntil { .. } => "wait_until",
+        ExecutionOperation::Output { .. } => "output",
+    };
+    let condition = match plan_node.when {
+        Some(ExecutionCondition::Exists { .. }) => "exists",
+        Some(ExecutionCondition::Equals { .. }) => "equals",
+        None => "none",
+    };
+    tracing::info!(
+        run_uid = %run.run_uid,
+        node_id,
+        operation,
+        condition,
+        outcome = "false",
+        "execution node condition evaluated false; branch skipped"
+    );
+    metrics::counter!(
+        "moa_execution_node_condition_skipped_total",
+        "operation" => operation,
+        "condition" => condition,
+    )
+    .increment(1);
+}
+
+/// Consecutive crashed controller activations tolerated before a run is failed for repair.
+///
+/// A resumed claim always means the prior activation of the exact same wake never acknowledged it.
+/// Transient crashes clear on the next attempt, so a run that consumes this whole budget is failing
+/// deterministically and can only be repaired by hand.
+const MAXIMUM_RESUMED_ACTIVATION_RECOVERIES: u64 = 5;
 
 /// Journaled database commit and the bounded side effects selected by it.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -39,19 +96,22 @@ pub(super) struct ControllerAdvanceCommit {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ActivationLimits {
-    remaining_steps: usize,
-    remaining_tasks: usize,
+pub(super) struct ActivationLimits {
+    pub(super) remaining_steps: usize,
+    pub(super) remaining_tasks: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ActivationPreflight {
+pub(super) enum ActivationPreflight {
     PendingTerminal,
     DueDeadline,
     Ordinary,
 }
 
-fn completion_scan_steps(scanned_tasks: u32, scanned_nodes: u32) -> moa_execution::Result<usize> {
+pub(super) fn completion_scan_steps(
+    scanned_tasks: u32,
+    scanned_nodes: u32,
+) -> moa_execution::Result<usize> {
     usize::try_from(scanned_tasks)
         .ok()
         .and_then(|tasks| {
@@ -64,7 +124,9 @@ fn completion_scan_steps(scanned_tasks: u32, scanned_nodes: u32) -> moa_executio
         })
 }
 
-fn terminal_trigger_page_limit(remaining_steps: usize) -> moa_execution::Result<Option<u32>> {
+pub(super) fn terminal_trigger_page_limit(
+    remaining_steps: usize,
+) -> moa_execution::Result<Option<u32>> {
     if remaining_steps == 0 {
         return Ok(None);
     }
@@ -75,7 +137,7 @@ fn terminal_trigger_page_limit(remaining_steps: usize) -> moa_execution::Result<
         })
 }
 
-fn pending_terminal_step_count(
+pub(super) fn pending_terminal_step_count(
     settled_task_count: u64,
     drained_trigger_count: u32,
     cancellation_dispatch_count: usize,
@@ -95,7 +157,7 @@ fn pending_terminal_step_count(
         })
 }
 
-fn map_aggregate_requires_continuation(
+pub(super) fn map_aggregate_requires_continuation(
     outcome: &MapAggregatePageOutcome,
 ) -> moa_execution::Result<bool> {
     match outcome {
@@ -112,7 +174,7 @@ fn map_aggregate_requires_continuation(
     }
 }
 
-fn validate_resumed_recovery_commit(
+pub(super) fn validate_resumed_recovery_commit(
     prior_wake_epoch: u64,
     current_wake_epoch: u64,
     continuation_enqueued: bool,
@@ -130,7 +192,7 @@ fn validate_resumed_recovery_commit(
     Ok(())
 }
 
-fn validate_trigger_drain_continuation(
+pub(super) fn validate_trigger_drain_continuation(
     prior_wake_epoch: u64,
     current_wake_epoch: u64,
     drained_trigger_count: u32,
@@ -151,7 +213,7 @@ fn validate_trigger_drain_continuation(
 }
 
 fn validate_replan_stop_continuation(
-    run: &moa_execution::repository::ExecutionRunRecord,
+    run: &ExecutionRunRecord,
     continuation: &ExecutionDispatchRecord,
     continuation_wake_epoch: u64,
 ) -> moa_execution::Result<()> {
@@ -163,7 +225,7 @@ fn validate_replan_stop_continuation(
     validate_replan_stop_continuation_fields(run.wake_epoch, continuation_wake_epoch, exact_owner)
 }
 
-fn validate_replan_stop_continuation_fields(
+pub(super) fn validate_replan_stop_continuation_fields(
     prior_wake_epoch: u64,
     continuation_wake_epoch: u64,
     exact_owner: bool,
@@ -177,7 +239,7 @@ fn validate_replan_stop_continuation_fields(
     Ok(())
 }
 
-fn activation_preflight(
+pub(super) fn activation_preflight(
     has_pending_terminal: bool,
     deadline_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
@@ -192,7 +254,10 @@ fn activation_preflight(
 }
 
 impl ActivationLimits {
-    fn new(maximum_steps: usize, dispatch_batch_size: usize) -> moa_execution::Result<Self> {
+    pub(super) fn new(
+        maximum_steps: usize,
+        dispatch_batch_size: usize,
+    ) -> moa_execution::Result<Self> {
         if maximum_steps == 0 || dispatch_batch_size == 0 {
             return Err(moa_execution::Error::InvalidRepositoryInput {
                 message: "controller activation bounds must both be greater than zero".to_string(),
@@ -204,7 +269,7 @@ impl ActivationLimits {
         })
     }
 
-    fn inspect_nodes(&mut self, count: usize) -> usize {
+    pub(super) fn inspect_nodes(&mut self, count: usize) -> usize {
         let inspected = self.remaining_steps.min(count);
         self.remaining_steps -= inspected;
         inspected
@@ -219,7 +284,7 @@ impl ActivationLimits {
         Ok(())
     }
 
-    fn task_page_limit(&self) -> moa_execution::Result<u32> {
+    pub(super) fn task_page_limit(&self) -> moa_execution::Result<u32> {
         u32::try_from(self.remaining_tasks.min(1_000)).map_err(|_| {
             moa_execution::Error::ArithmeticOverflow {
                 context: "controller task page limit".to_string(),
@@ -227,7 +292,7 @@ impl ActivationLimits {
         })
     }
 
-    fn record_tasks(&mut self, count: usize) -> moa_execution::Result<()> {
+    pub(super) fn record_tasks(&mut self, count: usize) -> moa_execution::Result<()> {
         self.remaining_tasks = self.remaining_tasks.checked_sub(count).ok_or_else(|| {
             moa_execution::Error::InvalidRepositoryData {
                 message: "controller materialized beyond its dispatch bound".to_string(),
@@ -657,6 +722,7 @@ pub(super) async fn advance(
                 source_exhausted,
                 reduce_cursor,
                 terminal_output,
+                condition_skipped,
                 ..
             } = materialize_node_page(
                 &schedule,
@@ -685,6 +751,7 @@ pub(super) async fn advance(
                         }),
                         source_exhausted,
                         terminal_output,
+                        condition_skipped,
                         tasks,
                     },
                 )
@@ -692,6 +759,9 @@ pub(super) async fn advance(
             {
                 ReadyMaterializationOutcome::Applied { tasks, .. }
                 | ReadyMaterializationOutcome::Replayed { tasks, .. } => {
+                    if condition_skipped {
+                        record_condition_skip(&run, &node.node_id, plan_node);
+                    }
                     if tasks.len() != task_count {
                         return Err(moa_execution::Error::InvalidRepositoryData {
                             message: "ready materialization returned a different task page"
@@ -1066,75 +1136,173 @@ async fn resume_with_bounded_continuation(
     scope: ExecutionScope,
     config: &moa_config::ExecutionConfig,
     request: &ExecutionRunAdvanceRequest,
-    run: &moa_execution::repository::ExecutionRunRecord,
+    run: &ExecutionRunRecord,
 ) -> moa_execution::Result<ControllerAdvanceCommit> {
-    let completion = repository
-        .complete_controller_wake(
+    let recovery = repository
+        .recover_resumed_controller_wake(
             scope,
             config,
             run.run_uid,
-            RunControllerCompletionRequest {
+            ResumedControllerRecoveryRequest {
                 controller_generation: request.controller_generation,
                 wake_epoch: request.wake_epoch,
                 checkpoint: settlement::continuation_checkpoint(run),
-                continuation_payload: Some(json!({
+                continuation_payload: json!({
                     "cause": "resumed_activation_recovery",
                     "prior_dispatch_uid": request.dispatch_uid,
-                })),
+                }),
                 continuation_not_before_at: Utc::now(),
+                maximum_consecutive_failures: MAXIMUM_RESUMED_ACTIVATION_RECOVERIES,
             },
         )
         .await?;
-    match completion {
-        RunControllerCompletionOutcome::Applied { run, continuation } => {
-            let continuation_enqueued = continuation.is_some();
-            validate_resumed_recovery_commit(
-                request.wake_epoch,
-                run.wake_epoch,
-                continuation_enqueued,
-            )?;
+    match recovery {
+        ResumedControllerRecoveryOutcome::Recovered {
+            run: recovered,
+            consecutive_failures,
+            ..
+        } => {
+            validate_resumed_recovery_commit(request.wake_epoch, recovered.wake_epoch, true)?;
+            tracing::warn!(
+                run_uid = %run.run_uid,
+                controller_generation = recovered.controller_generation,
+                wake_epoch = recovered.wake_epoch,
+                consecutive_failures,
+                "recovered a crashed controller activation with one replacement wake"
+            );
             Ok(ControllerAdvanceCommit {
                 response: ExecutionRunAdvanceResponse {
                     outcome: ExecutionRunAdvanceOutcome::Advanced,
-                    controller_generation: run.controller_generation,
-                    wake_epoch: run.wake_epoch,
+                    controller_generation: recovered.controller_generation,
+                    wake_epoch: recovered.wake_epoch,
                     activation_steps: 0,
                     materialized_tasks: 0,
-                    continuation_enqueued,
+                    continuation_enqueued: true,
                 },
                 publish_progress: true,
                 terminal_delivery: None,
             })
         }
-        RunControllerCompletionOutcome::Replayed(run) => {
-            Ok(noop_commit(ExecutionRunAdvanceOutcome::Replayed, &run))
+        ResumedControllerRecoveryOutcome::BudgetExhausted {
+            consecutive_failures,
+        } => {
+            fail_unrecoverable_activation(repository, scope, config, run, consecutive_failures)
+                .await
         }
-        RunControllerCompletionOutcome::CapacitySaturated { dimension } => {
-            Err(moa_execution::Error::CapacitySaturated {
-                dimension: dimension.as_str(),
-            })
+        ResumedControllerRecoveryOutcome::Replayed(replayed) => {
+            Ok(noop_commit(ExecutionRunAdvanceOutcome::Replayed, &replayed))
         }
-        RunControllerCompletionOutcome::StaleGeneration { current_generation } => {
+        ResumedControllerRecoveryOutcome::StaleGeneration { current_generation } => {
             Ok(stale_commit(current_generation, run.wake_epoch))
         }
-        RunControllerCompletionOutcome::StaleWake {
+        ResumedControllerRecoveryOutcome::StaleWake {
             current_wake_epoch, ..
         } => Ok(stale_commit(run.controller_generation, current_wake_epoch)),
-        RunControllerCompletionOutcome::NotFound => {
+        ResumedControllerRecoveryOutcome::NotFound => {
             Err(moa_execution::Error::InvalidRepositoryData {
                 message: "execution run disappeared during resumed activation recovery".to_string(),
             })
         }
-        RunControllerCompletionOutcome::InvalidState => {
+        ResumedControllerRecoveryOutcome::InvalidState => {
             Ok(stale_commit(run.controller_generation, run.wake_epoch))
         }
     }
 }
 
+/// Fails a run whose activation has crashed past its bounded recovery budget.
+///
+/// The claimed wake is still unacknowledged here, so the terminal intent and its first bounded
+/// settlement page commit against it in one Postgres transaction. Only after that transition
+/// succeeds does the caller observe the product failure, which the pending-terminal drain then
+/// carries to a real terminal status and Session delivery.
+async fn fail_unrecoverable_activation(
+    repository: &ExecutionRepository,
+    scope: ExecutionScope,
+    config: &moa_config::ExecutionConfig,
+    run: &ExecutionRunRecord,
+    consecutive_failures: u64,
+) -> moa_execution::Result<ControllerAdvanceCommit> {
+    let now = Utc::now();
+    let limits =
+        ActivationLimits::new(config.maximum_activation_steps, config.dispatch_batch_size)?;
+    let page_limit = u32::try_from(
+        limits
+            .remaining_steps
+            .min(limits.remaining_tasks)
+            .min(1_000),
+    )
+    .map_err(|_| moa_execution::Error::ArithmeticOverflow {
+        context: "controller unrecoverable-activation page limit".to_string(),
+    })?;
+    tracing::error!(
+        run_uid = %run.run_uid,
+        controller_generation = run.controller_generation,
+        wake_epoch = run.wake_epoch,
+        consecutive_failures,
+        "controller activation exhausted its recovery budget; failing the run for manual repair"
+    );
+    let outcome = if run.pending_terminal.is_some() {
+        // A terminal intent already owns this run; drive its bounded drain on the claimed wake
+        // rather than fencing a second, conflicting intent that could never be installed.
+        repository
+            .advance_pending_terminal_settlement(
+                config,
+                scope,
+                run.run_uid,
+                run.controller_generation,
+                run.wake_epoch,
+                now,
+                page_limit,
+            )
+            .await?
+    } else {
+        repository
+            .fence_completion_terminal_and_enqueue_settlement(
+                config,
+                scope,
+                run.run_uid,
+                run.controller_generation,
+                run.wake_epoch,
+                unrecoverable_activation_terminal(run, consecutive_failures)?,
+                now,
+                page_limit,
+            )
+            .await?
+    };
+    pending_terminal_commit(repository, scope, run, outcome).await
+}
+
+/// Builds the terminal intent for a run whose controller can no longer advance it.
+fn unrecoverable_activation_terminal(
+    run: &ExecutionRunRecord,
+    consecutive_failures: u64,
+) -> moa_execution::Result<PendingExecutionTerminal> {
+    let requirement_count = u64::try_from(run.goal.requirements.len()).map_err(|_| {
+        moa_execution::Error::ArithmeticOverflow {
+            context: "controller unrecoverable-activation requirement count".to_string(),
+        }
+    })?;
+    Ok(PendingExecutionTerminal {
+        status: ExecutionRunStatus::Failed,
+        reason: ExecutionTerminalReason::InternalFailure,
+        terminal_evidence: ExecutionTerminalEvidence {
+            cause: ExecutionTerminalCause::InternalFailure,
+            satisfied_requirement_count: 0,
+            requirement_count,
+        },
+        completion_check_results: Vec::new(),
+        terminal_gaps: vec![format!(
+            "controller activation failed {consecutive_failures} consecutive times and requires manual repair"
+        )],
+        output: run.output.clone(),
+        cancellation_reason: None,
+    })
+}
+
 async fn pending_terminal_commit(
     repository: &ExecutionRepository,
     scope: ExecutionScope,
-    claimed_run: &moa_execution::repository::ExecutionRunRecord,
+    claimed_run: &ExecutionRunRecord,
     outcome: PendingTerminalAdvanceOutcome,
 ) -> moa_execution::Result<ControllerAdvanceCommit> {
     let (commit, response_outcome) = match outcome {
@@ -1193,7 +1361,7 @@ async fn pending_terminal_commit(
 async fn terminal_commit(
     repository: &ExecutionRepository,
     scope: ExecutionScope,
-    run: &moa_execution::repository::ExecutionRunRecord,
+    run: &ExecutionRunRecord,
 ) -> moa_execution::Result<ControllerAdvanceCommit> {
     let terminal_delivery = repository
         .load_bounded_terminal_delivery(scope, run.run_uid)
@@ -1217,7 +1385,7 @@ async fn terminal_commit(
 
 fn noop_commit(
     outcome: ExecutionRunAdvanceOutcome,
-    run: &moa_execution::repository::ExecutionRunRecord,
+    run: &ExecutionRunRecord,
 ) -> ControllerAdvanceCommit {
     ControllerAdvanceCommit {
         response: ExecutionRunAdvanceResponse {
@@ -1233,7 +1401,7 @@ fn noop_commit(
     }
 }
 
-fn stale_commit(controller_generation: u64, wake_epoch: u64) -> ControllerAdvanceCommit {
+pub(super) fn stale_commit(controller_generation: u64, wake_epoch: u64) -> ControllerAdvanceCommit {
     ControllerAdvanceCommit {
         response: ExecutionRunAdvanceResponse {
             outcome: ExecutionRunAdvanceOutcome::Stale,
@@ -1245,116 +1413,5 @@ fn stale_commit(controller_generation: u64, wake_epoch: u64) -> ControllerAdvanc
         },
         publish_progress: false,
         terminal_delivery: None,
-    }
-}
-
-#[cfg(test)]
-pub(super) fn stale_commit_for_test(
-    controller_generation: u64,
-    wake_epoch: u64,
-) -> ControllerAdvanceCommit {
-    stale_commit(controller_generation, wake_epoch)
-}
-
-#[cfg(test)]
-pub(super) fn consume_limits_for_test(
-    maximum_steps: usize,
-    dispatch_batch_size: usize,
-    node_counts: &[usize],
-    task_counts: &[usize],
-) -> moa_execution::Result<(usize, usize, usize, usize)> {
-    let mut limits = ActivationLimits::new(maximum_steps, dispatch_batch_size)?;
-    let mut inspected = 0usize;
-    let mut tasks = 0usize;
-    for count in node_counts {
-        inspected += limits.inspect_nodes(*count);
-    }
-    for count in task_counts {
-        let accepted = limits.remaining_tasks.min(*count);
-        limits.record_tasks(accepted)?;
-        tasks += accepted;
-    }
-    Ok((
-        inspected,
-        tasks,
-        limits.remaining_steps,
-        limits.remaining_tasks,
-    ))
-}
-
-#[cfg(test)]
-pub(super) fn completion_scan_steps_for_test(
-    scanned_tasks: u32,
-    scanned_nodes: u32,
-) -> moa_execution::Result<usize> {
-    completion_scan_steps(scanned_tasks, scanned_nodes)
-}
-
-#[cfg(test)]
-pub(super) fn validate_resumed_recovery_for_test(
-    prior_wake_epoch: u64,
-    current_wake_epoch: u64,
-    continuation_enqueued: bool,
-) -> moa_execution::Result<()> {
-    validate_resumed_recovery_commit(prior_wake_epoch, current_wake_epoch, continuation_enqueued)
-}
-
-#[cfg(test)]
-pub(super) fn validate_trigger_drain_for_test(
-    prior_wake_epoch: u64,
-    current_wake_epoch: u64,
-    drained_trigger_count: u32,
-) -> moa_execution::Result<()> {
-    validate_trigger_drain_continuation(prior_wake_epoch, current_wake_epoch, drained_trigger_count)
-}
-
-#[cfg(test)]
-pub(super) fn terminal_trigger_page_limit_for_test(
-    remaining_steps: usize,
-) -> moa_execution::Result<Option<u32>> {
-    terminal_trigger_page_limit(remaining_steps)
-}
-
-#[cfg(test)]
-pub(super) fn pending_terminal_step_count_for_test(
-    settled_task_count: u64,
-    drained_trigger_count: u32,
-    cancellation_dispatch_count: usize,
-    compensation_admitted: bool,
-) -> moa_execution::Result<usize> {
-    pending_terminal_step_count(
-        settled_task_count,
-        drained_trigger_count,
-        cancellation_dispatch_count,
-        compensation_admitted,
-    )
-}
-
-#[cfg(test)]
-pub(super) fn map_aggregate_requires_continuation_for_test(
-    outcome: &MapAggregatePageOutcome,
-) -> moa_execution::Result<bool> {
-    map_aggregate_requires_continuation(outcome)
-}
-
-#[cfg(test)]
-pub(super) fn validate_replan_stop_continuation_for_test(
-    prior_wake_epoch: u64,
-    continuation_wake_epoch: u64,
-    exact_owner: bool,
-) -> moa_execution::Result<()> {
-    validate_replan_stop_continuation_fields(prior_wake_epoch, continuation_wake_epoch, exact_owner)
-}
-
-#[cfg(test)]
-pub(super) fn activation_preflight_for_test(
-    has_pending_terminal: bool,
-    deadline_at: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
-) -> &'static str {
-    match activation_preflight(has_pending_terminal, deadline_at, now) {
-        ActivationPreflight::PendingTerminal => "pending_terminal",
-        ActivationPreflight::DueDeadline => "due_deadline",
-        ActivationPreflight::Ordinary => "ordinary",
     }
 }

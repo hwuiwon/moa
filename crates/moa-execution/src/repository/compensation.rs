@@ -3,8 +3,10 @@
 use super::*;
 use super::{
     capacity::{
-        ExecutionCapacityDimension, prelock_capacity_dimensions_in_tx,
-        release_owned_run_capacity_in_tx,
+        CapacityReleaseOutcome, CapacityReserveOutcome, ExecutionCapacityDimension,
+        advance_tenant_fairness, capacity_bucket_has_room, compensation_attempt_capacity_request,
+        prelock_capacity_dimensions_in_tx, prelock_existing_capacity_dimensions_in_tx,
+        release_capacity_in_tx, release_owned_run_capacity_in_tx, reserve_capacity_in_tx,
     },
     external_job::{
         ExecutionExternalJobCancellationRequestOutcome, ExecutionExternalJobIntentReleaseOutcome,
@@ -29,7 +31,7 @@ use super::{
     },
     trigger::{
         ExecutionTriggerKind, ExecutionTriggerWrite, NewExecutionTrigger,
-        create_trigger_with_dispatch_in_conn,
+        create_trigger_with_dispatch_in_conn, release_trigger_capacity_in_conn, trigger_from_row,
     },
 };
 use crate::{
@@ -593,10 +595,15 @@ impl ExecutionRepository {
             conn.commit().await.map_err(storage_error)?;
             return Ok(PendingTerminalAdvanceOutcome::Conflict);
         };
-        let expected_stop_reason = match &pending.terminal_evidence.cause {
-            ExecutionTerminalCause::ReplanStop { reason } => reason.as_str(),
-            _ => unreachable!("validated replan-stop terminal cause"),
+        let ExecutionTerminalCause::ReplanStop {
+            reason: expected_stop_reason,
+        } = &pending.terminal_evidence.cause
+        else {
+            return Err(Error::InvalidRepositoryData {
+                message: "replan-stop fence lost its validated terminal cause".to_string(),
+            });
         };
+        let expected_stop_reason = expected_stop_reason.as_str();
         let intent_exact = intent.try_get::<Uuid, _>("tenant_id").map_err(row_error)?
             == run.tenant_id.0
             && required_u64(&intent, "controller_generation")? == controller_generation
@@ -754,11 +761,11 @@ impl ExecutionRepository {
             return Ok(CompensationAttemptAdmissionOutcome::NotFound);
         };
         let visible_run = run_from_row(&run_row)?;
-        lock_compensation_capacity(
-            &mut conn,
+        prelock_capacity_dimensions_in_tx(
+            conn.as_mut(),
+            config,
             visible_run.tenant_id,
-            config.max_fleet_active_tasks,
-            config.max_tenant_active_tasks,
+            &[ExecutionCapacityDimension::ActiveTasks],
         )
         .await?;
         let Some(run_row) = sqlx::query(LOAD_RUN_FOR_UPDATE_SQL)
@@ -852,18 +859,17 @@ impl ExecutionRepository {
         }
         let attempt_generation = required_u64(&row, "attempt_generation")?;
         let dispatch_uid = Uuid::now_v7();
-        let reservation_uid = Uuid::now_v7();
         let watchdog_uid = Uuid::now_v7();
-        insert_compensation_capacity_reservation(
+        let reservation_uid = reserve_compensation_attempt_capacity(
             &mut conn,
-            reservation_uid,
+            config,
             &run,
             &registration,
             attempt_generation,
             deadline,
+            now,
         )
         .await?;
-        increment_compensation_capacity(&mut conn, run.tenant_id).await?;
         let watchdog = create_trigger_with_dispatch_in_conn(
             conn.as_mut(),
             config,
@@ -1132,7 +1138,12 @@ impl ExecutionRepository {
             conn.commit().await.map_err(storage_error)?;
             return Ok(CompensationAttemptWriteOutcome::NotFound);
         };
-        lock_capacity_for_release(&mut conn, tenant_id).await?;
+        prelock_existing_capacity_dimensions_in_tx(
+            conn.as_mut(),
+            tenant_id,
+            &[ExecutionCapacityDimension::ActiveTasks],
+        )
+        .await?;
         let Some(run_row) = sqlx::query(LOAD_RUN_FOR_UPDATE_SQL)
             .bind(request.run_uid)
             .fetch_optional(conn.as_mut())
@@ -1180,7 +1191,7 @@ impl ExecutionRepository {
         }
         release_unbound_compensation_external_intent_in_conn(&mut conn, &run, &current).await?;
         let resource_fence = compensation_cancel_resource_fence(request);
-        release_compensation_capacity(&mut conn, &run, resource_fence).await?;
+        release_compensation_attempt_capacity(&mut conn, &run, resource_fence).await?;
         supersede_compensation_triggers(&mut conn, resource_fence, None).await?;
         let updated = sqlx::query(
             "UPDATE moa.execution_compensation SET attempt_state='idle', \
@@ -1253,7 +1264,12 @@ impl ExecutionRepository {
             conn.commit().await.map_err(storage_error)?;
             return Ok(CompensationAttemptWriteOutcome::NotFound);
         };
-        lock_capacity_for_release(&mut conn, tenant_id).await?;
+        prelock_existing_capacity_dimensions_in_tx(
+            conn.as_mut(),
+            tenant_id,
+            &[ExecutionCapacityDimension::ActiveTasks],
+        )
+        .await?;
         let Some(run_row) = sqlx::query(LOAD_RUN_FOR_UPDATE_SQL)
             .bind(request.run_uid)
             .fetch_optional(conn.as_mut())
@@ -1305,7 +1321,7 @@ impl ExecutionRepository {
             return Ok(CompensationAttemptWriteOutcome::Conflict);
         }
         let resource_fence = compensation_cancel_resource_fence(request);
-        release_compensation_capacity(&mut conn, &run, resource_fence).await?;
+        release_compensation_attempt_capacity(&mut conn, &run, resource_fence).await?;
         supersede_compensation_triggers(&mut conn, resource_fence, None).await?;
         let updated = sqlx::query(
             "UPDATE moa.execution_compensation SET attempt_state='idle', \
@@ -1377,7 +1393,12 @@ impl ExecutionRepository {
             conn.commit().await.map_err(storage_error)?;
             return Ok(CompensationAttemptWriteOutcome::NotFound);
         };
-        lock_capacity_for_release(&mut conn, tenant_id).await?;
+        prelock_existing_capacity_dimensions_in_tx(
+            conn.as_mut(),
+            tenant_id,
+            &[ExecutionCapacityDimension::ActiveTasks],
+        )
+        .await?;
         let Some((run, row)) = load_fenced_compensation_for_cancel(&mut conn, request).await?
         else {
             conn.commit().await.map_err(storage_error)?;
@@ -1426,7 +1447,7 @@ impl ExecutionRepository {
         }
         release_unbound_compensation_external_intent_in_conn(&mut conn, &run, &current).await?;
         let resource_fence = compensation_cancel_resource_fence(request);
-        release_compensation_capacity(&mut conn, &run, resource_fence).await?;
+        release_compensation_attempt_capacity(&mut conn, &run, resource_fence).await?;
         supersede_compensation_triggers(&mut conn, resource_fence, None).await?;
         persisted.review_audit.push(CompensationReviewAuditEntry {
             review_uid,
@@ -1513,7 +1534,12 @@ impl ExecutionRepository {
             conn.commit().await.map_err(storage_error)?;
             return Ok(CompensationAttemptExternalOutcome::NotFound);
         };
-        lock_capacity_for_release(&mut conn, tenant_id).await?;
+        prelock_existing_capacity_dimensions_in_tx(
+            conn.as_mut(),
+            tenant_id,
+            &[ExecutionCapacityDimension::ActiveTasks],
+        )
+        .await?;
         let Some((run, row)) = load_fenced_compensation_for_cancel(&mut conn, request).await?
         else {
             conn.commit().await.map_err(storage_error)?;
@@ -1571,7 +1597,7 @@ impl ExecutionRepository {
             return Ok(CompensationAttemptExternalOutcome::Stale);
         }
         let resource_fence = compensation_cancel_resource_fence(request);
-        release_compensation_capacity(&mut conn, &run, resource_fence).await?;
+        release_compensation_attempt_capacity(&mut conn, &run, resource_fence).await?;
         supersede_compensation_triggers(&mut conn, resource_fence, None).await?;
         let row = sqlx::query(
             "UPDATE moa.execution_compensation SET attempt_state='waiting_external', \
@@ -1834,7 +1860,12 @@ impl ExecutionRepository {
             conn.commit().await.map_err(storage_error)?;
             return Ok(CompensationAttemptWriteOutcome::NotFound);
         };
-        lock_capacity_for_release(&mut conn, tenant_id).await?;
+        prelock_existing_capacity_dimensions_in_tx(
+            conn.as_mut(),
+            tenant_id,
+            &[ExecutionCapacityDimension::ActiveTasks],
+        )
+        .await?;
         let loaded = if let Some(request) = cancellation_request {
             load_fenced_compensation_for_cancel(&mut conn, request).await?
         } else {
@@ -1907,7 +1938,7 @@ impl ExecutionRepository {
         let resource_fence = cancellation_request
             .map(compensation_cancel_resource_fence)
             .unwrap_or(fence);
-        release_compensation_capacity(&mut conn, &run, resource_fence).await?;
+        release_compensation_attempt_capacity(&mut conn, &run, resource_fence).await?;
         supersede_compensation_triggers(&mut conn, resource_fence, None).await?;
         let updated = sqlx::query(
             "UPDATE moa.execution_compensation SET status=$6, attempt_state=$7, attempt=$8, \
@@ -2239,195 +2270,78 @@ fn checked_retry_at(config: &ExecutionConfig, now: DateTime<Utc>) -> Result<Date
         })
 }
 
-async fn lock_compensation_capacity(
-    conn: &mut ScopedConn<'_>,
-    tenant_id: TenantId,
-    fleet_limit: u32,
-    tenant_limit: u32,
-) -> Result<()> {
-    for (scope_kind, owner, limit) in [
-        ("fleet", None, fleet_limit),
-        ("tenant", Some(tenant_id.0), tenant_limit),
-    ] {
-        sqlx::query(
-            "INSERT INTO moa.execution_capacity_bucket (capacity_bucket_uid, scope_kind, \
-             tenant_id, resource_dimension, limit_value) VALUES ($1, $2, $3, \
-             'active_tasks', $4) ON CONFLICT DO NOTHING",
-        )
-        .bind(Uuid::now_v7())
-        .bind(scope_kind)
-        .bind(owner)
-        .bind(i64::from(limit))
-        .execute(conn.as_mut())
-        .await
-        .map_err(sqlx_error)?;
-        sqlx::query(
-            "UPDATE moa.execution_capacity_bucket SET limit_value=$4, version=version+1, \
-             updated_at=NOW() WHERE scope_kind=$1 AND tenant_id IS NOT DISTINCT FROM $2 \
-             AND resource_dimension=$3 RETURNING capacity_bucket_uid",
-        )
-        .bind(scope_kind)
-        .bind(owner)
-        .bind("active_tasks")
-        .bind(i64::from(limit))
-        .fetch_one(conn.as_mut())
-        .await
-        .map_err(sqlx_error)?;
-    }
-    Ok(())
-}
-
-async fn lock_capacity_for_release(conn: &mut ScopedConn<'_>, tenant_id: TenantId) -> Result<()> {
-    for (scope_kind, owner) in [("fleet", None), ("tenant", Some(tenant_id.0))] {
-        sqlx::query(
-            "SELECT capacity_bucket_uid FROM moa.execution_capacity_bucket \
-             WHERE scope_kind=$1 AND tenant_id IS NOT DISTINCT FROM $2 \
-             AND resource_dimension='active_tasks' FOR UPDATE",
-        )
-        .bind(scope_kind)
-        .bind(owner)
-        .fetch_one(conn.as_mut())
-        .await
-        .map_err(sqlx_error)?;
-    }
-    Ok(())
-}
-
+/// Reports whether the locked `active_tasks` buckets can admit one compensation attempt.
 async fn compensation_capacity_available(
     conn: &mut ScopedConn<'_>,
     tenant_id: TenantId,
 ) -> Result<bool> {
-    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
-        "SELECT scope_kind, limit_value, reserved_quantity \
-         FROM moa.execution_capacity_bucket WHERE resource_dimension='active_tasks' \
-         AND ((scope_kind='fleet' AND tenant_id IS NULL) \
-              OR (scope_kind='tenant' AND tenant_id=$1))",
-    )
-    .bind(tenant_id.0)
-    .fetch_all(conn.as_mut())
-    .await
-    .map_err(sqlx_error)?;
-    Ok(rows.len() == 2 && rows.iter().all(|(_, limit, reserved)| reserved < limit))
+    let dimension = ExecutionCapacityDimension::ActiveTasks.as_str();
+    let fleet = capacity_bucket_has_room(conn.as_mut(), "fleet", None, dimension).await?;
+    let tenant =
+        capacity_bucket_has_room(conn.as_mut(), "tenant", Some(tenant_id.0), dimension).await?;
+    Ok(fleet && tenant)
 }
 
-async fn increment_compensation_capacity(
+/// Reserves the exact active-task receipt for one compensation attempt and charges fairness.
+///
+/// Compensation shares the `active_tasks` dimension with forward attempts, so it also shares the
+/// weighted-fair accounting: an admitted rollback advances the tenant's virtual finish exactly
+/// like a forward dispatch instead of consuming fleet capacity outside the scheduler.
+async fn reserve_compensation_attempt_capacity(
     conn: &mut ScopedConn<'_>,
-    tenant_id: TenantId,
-) -> Result<()> {
-    for (scope_kind, owner) in [("fleet", None), ("tenant", Some(tenant_id.0))] {
-        let updated = sqlx::query(
-            "UPDATE moa.execution_capacity_bucket SET reserved_quantity=reserved_quantity+1, \
-             version=version+1, updated_at=NOW() WHERE scope_kind=$1 \
-             AND tenant_id IS NOT DISTINCT FROM $2 AND resource_dimension='active_tasks' \
-             AND reserved_quantity < limit_value",
-        )
-        .bind(scope_kind)
-        .bind(owner)
-        .execute(conn.as_mut())
-        .await
-        .map_err(sqlx_error)?;
-        if updated.rows_affected() != 1 {
-            return Err(Error::InvalidRepositoryData {
-                message: format!("locked {scope_kind} compensation capacity was over-admitted"),
-            });
-        }
-    }
-    Ok(())
-}
-
-async fn insert_compensation_capacity_reservation(
-    conn: &mut ScopedConn<'_>,
-    reservation_uid: Uuid,
+    config: &ExecutionConfig,
     run: &ExecutionRunRecord,
     registration: &CompensationRegistrationProjection,
     attempt_generation: u64,
     deadline: DateTime<Utc>,
-) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO moa.execution_capacity_reservation (reservation_uid, tenant_id, run_uid, \
-         compensation_id, controller_generation, compensation_generation, \
-         compensation_attempt_generation, resource_dimension, quantity, expires_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'active_tasks',1,$8)",
-    )
-    .bind(reservation_uid)
-    .bind(run.tenant_id.0)
-    .bind(run.run_uid)
-    .bind(registration.compensation_id.as_uuid())
-    .bind(to_i64(run.controller_generation, "controller generation")?)
-    .bind(to_i64(registration.generation, "compensation generation")?)
-    .bind(to_i64(
+    now: DateTime<Utc>,
+) -> Result<Uuid> {
+    let request = compensation_attempt_capacity_request(
+        run.tenant_id,
+        run.run_uid,
+        run.controller_generation,
+        registration.compensation_id.as_uuid(),
+        registration.generation,
         attempt_generation,
-        "compensation attempt generation",
-    )?)
-    .bind(deadline)
-    .execute(conn.as_mut())
-    .await
-    .map_err(sqlx_error)?;
-    Ok(())
+        Some(deadline),
+    );
+    match reserve_capacity_in_tx(conn.as_mut(), config, request).await? {
+        CapacityReserveOutcome::Reserved | CapacityReserveOutcome::Replayed => {}
+        CapacityReserveOutcome::Saturated => {
+            return Err(Error::InvalidRepositoryData {
+                message: "locked active-task capacity rejected an admitted compensation attempt"
+                    .to_string(),
+            });
+        }
+    }
+    advance_tenant_fairness(conn, run.tenant_id.0, now).await?;
+    Ok(request.reservation_uid)
 }
 
-async fn release_compensation_capacity(
+/// Releases the exact active-task receipt owned by one settled compensation attempt.
+async fn release_compensation_attempt_capacity(
     conn: &mut ScopedConn<'_>,
     run: &ExecutionRunRecord,
     fence: CompensationAttemptFence,
 ) -> Result<()> {
-    let reservation_uid: Option<Uuid> = sqlx::query_scalar(
-        "SELECT reservation_uid FROM moa.execution_capacity_reservation \
-         WHERE tenant_id=$1 AND run_uid=$2 AND compensation_id=$3 \
-         AND controller_generation=$4 AND compensation_generation=$5 \
-         AND compensation_attempt_generation=$6 AND resource_dimension='active_tasks' \
-         AND state IN ('reserved','reconciling') FOR UPDATE",
-    )
-    .bind(run.tenant_id.0)
-    .bind(fence.run_uid)
-    .bind(fence.compensation_id.as_uuid())
-    .bind(to_i64(
+    let request = compensation_attempt_capacity_request(
+        run.tenant_id,
+        fence.run_uid,
         fence.controller_generation,
-        "controller generation",
-    )?)
-    .bind(to_i64(
+        fence.compensation_id.as_uuid(),
         fence.compensation_generation,
-        "compensation generation",
-    )?)
-    .bind(to_i64(
         fence.attempt_generation,
-        "compensation attempt generation",
-    )?)
-    .fetch_optional(conn.as_mut())
-    .await
-    .map_err(sqlx_error)?;
-    let Some(reservation_uid) = reservation_uid else {
-        return Err(Error::InvalidRepositoryData {
-            message: "active compensation slice lost its capacity reservation".to_string(),
-        });
-    };
-    for (scope_kind, owner) in [("fleet", None), ("tenant", Some(run.tenant_id.0))] {
-        let updated = sqlx::query(
-            "UPDATE moa.execution_capacity_bucket SET reserved_quantity=reserved_quantity-1, \
-             version=version+1, updated_at=NOW() WHERE scope_kind=$1 \
-             AND tenant_id IS NOT DISTINCT FROM $2 AND resource_dimension='active_tasks' \
-             AND reserved_quantity >= 1",
-        )
-        .bind(scope_kind)
-        .bind(owner)
-        .execute(conn.as_mut())
-        .await
-        .map_err(sqlx_error)?;
-        if updated.rows_affected() != 1 {
-            return Err(Error::InvalidRepositoryData {
-                message: format!("{scope_kind} active compensation capacity underflow"),
-            });
+        None,
+    );
+    match release_capacity_in_tx(conn.as_mut(), request).await? {
+        // A replayed settlement legitimately observes its own already-released receipt.
+        CapacityReleaseOutcome::Released | CapacityReleaseOutcome::AlreadyReleased => Ok(()),
+        CapacityReleaseOutcome::NotFound | CapacityReleaseOutcome::Stale => {
+            Err(Error::InvalidRepositoryData {
+                message: "active compensation slice lost its capacity reservation".to_string(),
+            })
         }
     }
-    sqlx::query(
-        "UPDATE moa.execution_capacity_reservation SET state='released', released_at=NOW(), \
-         updated_at=NOW() WHERE reservation_uid=$1",
-    )
-    .bind(reservation_uid)
-    .execute(conn.as_mut())
-    .await
-    .map_err(sqlx_error)?;
-    Ok(())
 }
 
 fn compensation_dispatch(
@@ -2518,7 +2432,7 @@ async fn load_existing_compensation_admission(
         "SELECT trigger_uid, due_at, payload FROM moa.execution_trigger \
          WHERE run_uid=$1 AND compensation_id=$2 AND trigger_kind='compensation_watchdog' \
          AND controller_generation=$3 AND compensation_generation=$4 \
-         AND compensation_attempt_generation=$5 AND state IN ('pending','dispatching')",
+         AND compensation_attempt_generation=$5 AND state = 'pending'",
     )
     .bind(run.run_uid)
     .bind(registration.compensation_id.as_uuid())
@@ -2596,8 +2510,14 @@ async fn drive_pending_terminal_compensation_in_conn(
     .fetch_one(conn.as_mut())
     .await
     .map_err(sqlx_error)?;
+    // `manual_repair_required` is deliberately NOT rejected here. Settling a compensation
+    // attempt with a non-retryable failure sets that flag on the run, so rejecting it made
+    // the very next controller activation return a terminal repository error and the run
+    // sat in `compensating` forever instead of terminalizing `Failed`/`CompensationFailed`.
+    // The flag means "stop driving automatically and hand this to an operator", which is a
+    // `ManualRepair` outcome, not an invalid state — see the check below the registration
+    // load, which needs the row to report which compensation is stuck.
     if run.status != ExecutionRunStatus::Compensating
-        || run.manual_repair_required
         || run.pending_terminal.is_none()
         || nonterminal_forward_exists
     {
@@ -2619,10 +2539,12 @@ async fn drive_pending_terminal_compensation_in_conn(
     };
     let registration = compensation_from_row(&row)?;
     let attempt_state = compensation_attempt_state_from_row(&row)?;
-    if matches!(
-        registration.status,
-        CompensationStatus::Failed | CompensationStatus::UnknownOutcome
-    ) {
+    if run.manual_repair_required
+        || matches!(
+            registration.status,
+            CompensationStatus::Failed | CompensationStatus::UnknownOutcome
+        )
+    {
         return Ok(PendingCompensationDrive::ManualRepair(registration));
     }
     if attempt_state == CompensationAttemptState::Dispatching {
@@ -2717,18 +2639,17 @@ async fn drive_pending_terminal_compensation_in_conn(
     let deadline = checked_attempt_deadline(config, now)?;
     let attempt_generation = required_u64(&row, "attempt_generation")?;
     let dispatch_uid = Uuid::now_v7();
-    let reservation_uid = Uuid::now_v7();
     let watchdog_uid = Uuid::now_v7();
-    insert_compensation_capacity_reservation(
+    let reservation_uid = reserve_compensation_attempt_capacity(
         conn,
-        reservation_uid,
+        config,
         run,
         &registration,
         attempt_generation,
         deadline,
+        now,
     )
     .await?;
-    increment_compensation_capacity(conn, run.tenant_id).await?;
     let watchdog = create_trigger_with_dispatch_in_conn(
         conn.as_mut(),
         config,
@@ -2942,7 +2863,7 @@ async fn compensation_attempt_resources_match(
            AND trigger.compensation_generation=$6 \
            AND trigger.compensation_attempt_generation=$7 \
            AND trigger.trigger_kind='compensation_watchdog' \
-           AND trigger.state IN ('pending','dispatching'))",
+           AND trigger.state = 'pending')",
     )
     .bind(request.capacity_reservation_uid)
     .bind(request.tenant_id.0)
@@ -2985,7 +2906,7 @@ async fn canonical_active_compensation_release_request(
           AND trigger.compensation_generation=reservation.compensation_generation \
           AND trigger.compensation_attempt_generation=reservation.compensation_attempt_generation \
           AND trigger.trigger_kind='compensation_watchdog' \
-          AND trigger.state IN ('pending','dispatching') \
+          AND trigger.state = 'pending' \
          WHERE reservation.tenant_id=$1 AND reservation.run_uid=$2 \
           AND reservation.compensation_id=$3 AND reservation.controller_generation=$4 \
           AND reservation.compensation_generation=$5 \
@@ -3445,7 +3366,7 @@ pub(super) async fn begin_compensation_external_not_started_release_in_conn(
           AND trigger.compensation_generation=reservation.compensation_generation \
           AND trigger.compensation_attempt_generation=reservation.compensation_attempt_generation \
           AND trigger.trigger_kind='compensation_watchdog' \
-          AND trigger.state IN ('pending','dispatching') \
+          AND trigger.state = 'pending' \
          WHERE reservation.tenant_id=$1 AND reservation.run_uid=$2 \
           AND reservation.compensation_id=$3 AND reservation.controller_generation=$4 \
           AND reservation.compensation_generation=$5 \
@@ -3608,7 +3529,12 @@ pub(super) async fn settle_unstarted_compensation_attempt_in_conn(
     if tenant_id != request.tenant_id {
         return Ok(CompensationAttemptWriteOutcome::Conflict);
     }
-    lock_capacity_for_release(conn, tenant_id).await?;
+    prelock_existing_capacity_dimensions_in_tx(
+        conn.as_mut(),
+        tenant_id,
+        &[ExecutionCapacityDimension::ActiveTasks],
+    )
+    .await?;
     let run_row = sqlx::query(LOAD_RUN_FOR_UPDATE_SQL)
         .bind(request.run_uid)
         .fetch_one(conn.as_mut())
@@ -3641,7 +3567,7 @@ pub(super) async fn settle_unstarted_compensation_attempt_in_conn(
          AND EXISTS (SELECT 1 FROM moa.execution_trigger WHERE trigger_uid=$8 AND run_uid=$3 \
            AND compensation_id=$4 AND controller_generation=$5 AND compensation_generation=$6 \
            AND compensation_attempt_generation=$7 AND trigger_kind='compensation_watchdog' \
-           AND state IN ('pending','dispatching'))",
+           AND state = 'pending')",
     )
     .bind(request.capacity_reservation_uid)
     .bind(request.tenant_id.0)
@@ -3681,7 +3607,7 @@ pub(super) async fn settle_unstarted_compensation_attempt_in_conn(
         dispatch_uid: request.dispatch_uid,
     };
     release_unbound_compensation_external_intent_in_conn(conn, &run, &current).await?;
-    release_compensation_capacity(conn, &run, fence).await?;
+    release_compensation_attempt_capacity(conn, &run, fence).await?;
     supersede_compensation_triggers(conn, fence, None).await?;
     let updated = sqlx::query(
         "UPDATE moa.execution_compensation SET attempt_state='idle', \
@@ -3753,12 +3679,20 @@ async fn supersede_compensation_triggers(
     .execute(conn.as_mut())
     .await
     .map_err(sqlx_error)?;
-    sqlx::query(
-        "UPDATE moa.execution_trigger SET state='superseded', claim_owner=NULL, claimed_at=NULL, \
-         claim_expires_at=NULL, updated_at=NOW() WHERE run_uid=$1 AND compensation_id=$2 \
+    // `RETURNING *` rather than a bare UPDATE: every superseded trigger still owns a
+    // `scheduled_triggers` capacity receipt, and superseding the row does not release it.
+    // Leaking it wedges the run permanently — both terminal-drain branches probe for any
+    // held `active_tasks`/`scheduled_triggers`/`external_jobs` reservation and hard-error
+    // ("failed compensation retained non-lifetime capacity" / "completed compensation
+    // retained non-lifetime capacity"), so a compensating run could never finalize whether
+    // its undo failed OR succeeded. `trigger.rs::supersede_trigger_in_conn` releases on
+    // every arm; this bulk path must do the same.
+    let superseded = sqlx::query(
+        "UPDATE moa.execution_trigger SET state='superseded', updated_at=NOW() \
+         WHERE run_uid=$1 AND compensation_id=$2 \
          AND controller_generation=$3 AND compensation_generation=$4 \
          AND compensation_attempt_generation=$5 AND ($6::TEXT IS NULL OR trigger_kind <> $6) \
-         AND state IN ('pending','dispatching')",
+         AND state = 'pending' RETURNING *",
     )
     .bind(fence.run_uid)
     .bind(fence.compensation_id.as_uuid())
@@ -3775,9 +3709,13 @@ async fn supersede_compensation_triggers(
         "compensation attempt generation",
     )?)
     .bind(except)
-    .execute(conn.as_mut())
+    .fetch_all(conn.as_mut())
     .await
     .map_err(sqlx_error)?;
+    for row in &superseded {
+        let trigger = trigger_from_row(row)?;
+        release_trigger_capacity_in_conn(conn.as_mut(), &trigger).await?;
+    }
     Ok(())
 }
 
@@ -4524,7 +4462,7 @@ async fn advance_pending_terminal_page_in_conn(
     let should_compensate = has_registrations && !retain_cancelled_effects;
     let active_trigger_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM moa.execution_trigger WHERE run_uid=$1 \
-         AND state IN ('pending','dispatching'))",
+         AND state = 'pending')",
     )
     .bind(run.run_uid)
     .fetch_one(conn.as_mut())
@@ -4835,7 +4773,7 @@ async fn enqueue_pending_terminal_task_cancellation(
           AND trigger.controller_generation=reservation.controller_generation \
           AND trigger.attempt_generation=reservation.attempt_generation \
           AND trigger.trigger_kind='task_watchdog' \
-          AND trigger.state IN ('pending','dispatching') \
+          AND trigger.state = 'pending' \
          WHERE reservation.run_uid=$1 AND reservation.task_id=$2 \
           AND reservation.controller_generation=$3 AND reservation.attempt_generation=$4 \
           AND reservation.resource_dimension='active_tasks' \
@@ -4963,7 +4901,7 @@ async fn enqueue_pending_terminal_compensation_cancellation(
           AND trigger.compensation_generation=reservation.compensation_generation \
           AND trigger.compensation_attempt_generation=reservation.compensation_attempt_generation \
           AND trigger.trigger_kind='compensation_watchdog' \
-          AND trigger.state IN ('pending','dispatching') \
+          AND trigger.state = 'pending' \
          WHERE reservation.run_uid=$1 AND reservation.compensation_id=$2 \
           AND reservation.controller_generation=$3 AND reservation.compensation_generation=$4 \
           AND reservation.compensation_attempt_generation=$5 \
@@ -5205,9 +5143,9 @@ async fn supersede_storage_task_waits(
     task: &ExecutionTaskRecord,
 ) -> Result<()> {
     let trigger_uids = sqlx::query_scalar::<_, Uuid>(
-        "UPDATE moa.execution_trigger SET state='superseded', claimed_at=NULL, \
-             claimed_by=NULL, updated_at=NOW() WHERE run_uid=$1 AND task_id=$2 \
-             AND trigger_kind <> 'task_watchdog' AND state IN ('pending','dispatching') \
+        "UPDATE moa.execution_trigger SET state='superseded', updated_at=NOW() \
+             WHERE run_uid=$1 AND task_id=$2 \
+             AND trigger_kind <> 'task_watchdog' AND state = 'pending' \
              RETURNING trigger_uid",
     )
     .bind(task.run_uid)
@@ -5217,8 +5155,9 @@ async fn supersede_storage_task_waits(
     .map_err(sqlx_error)?;
     if !trigger_uids.is_empty() {
         sqlx::query(
-            "UPDATE moa.execution_dispatch_outbox SET state='superseded', claimed_at=NULL, \
-             claimed_by=NULL, updated_at=NOW() WHERE trigger_uid=ANY($1::UUID[]) \
+            "UPDATE moa.execution_dispatch_outbox SET state='superseded', claim_owner=NULL, \
+             claimed_at=NULL, claim_expires_at=NULL, updated_at=NOW() \
+             WHERE trigger_uid=ANY($1::UUID[]) \
              AND state IN ('pending','dispatching')",
         )
         .bind(&trigger_uids)

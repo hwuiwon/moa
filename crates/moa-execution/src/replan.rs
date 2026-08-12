@@ -99,7 +99,8 @@ pub enum ReplanStopReason {
 }
 
 /// Immediately knowable resource exhaustion that prevents another replan attempt.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReplanExhaustion {
     /// Typed terminal stop reason.
     pub reason: ReplanStopReason,

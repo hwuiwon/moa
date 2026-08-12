@@ -354,6 +354,8 @@ impl SandboxStorageProvider for LocalHandProvider {
                         manifest_digest: published.manifest_sha256,
                         logical_bytes: published.logical_bytes,
                     }),
+                    // Reconciliation only proves the bytes; it never releases
+                    // compute. See `SandboxStorageProvider::reconcile_workspace_operation`.
                     post_commit_state: Some(WorkspacePostCommitState::AttachmentRetained),
                 }),
                 (WorkspaceOperationKind::Delete, None) => Ok(WorkspaceStorageOperationResult {

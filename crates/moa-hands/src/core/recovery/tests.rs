@@ -169,10 +169,6 @@ impl HandProvider for MockHandProvider {
         Ok(HandStatus::Running)
     }
 
-    async fn pause(&self, _handle: &HandHandle) -> Result<()> {
-        Ok(())
-    }
-
     async fn resume(&self, _handle: &HandHandle) -> Result<()> {
         Ok(())
     }

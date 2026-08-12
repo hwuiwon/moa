@@ -38,6 +38,7 @@ use moa_orchestrator::{
             start_hand_lease_reaper, start_mcp_catalog_refresh, start_workspace_reaper,
         },
         kms::KmsRuntime,
+        restate_drain::{resolve_admin_url, spawn_restate_drain_observer},
         sandbox_workspace_rollout::validate_startup_state as validate_sandbox_workspace_rollout,
     },
 };
@@ -654,6 +655,21 @@ async fn run_maintenance(
         },
     );
     let shutdown = CancellationToken::new();
+    // Pure fleet observation, so an unresolvable or unreachable Restate admin
+    // API is logged rather than made fatal, and the observer is deliberately
+    // left out of the supervised `select!` below: losing drain telemetry must
+    // not take down the single replica that owns workspace reaping,
+    // authorization outbox delivery, and action-review timeouts.
+    let restate_drain_observer = match resolve_admin_url(&restate_ingress_url) {
+        Ok(admin_url) => Some(spawn_restate_drain_observer(admin_url, shutdown.clone())),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "could not resolve the Restate admin API; deployment drain telemetry is disabled"
+            );
+            None
+        }
+    };
     let mut execution_cron_reconciler = spawn_execution_cron_reconciler(
         restate_ingress_url,
         config.execution.trigger_reconciliation_cadence_seconds,
@@ -783,6 +799,11 @@ async fn run_maintenance(
         async move {
             let _ =
                 join_task_bounded("execution CronJob reconciler", execution_cron_reconciler).await;
+        },
+        async move {
+            if let Some(handle) = restate_drain_observer {
+                let _ = join_task_bounded("Restate deployment drain observer", handle).await;
+            }
         },
     );
 

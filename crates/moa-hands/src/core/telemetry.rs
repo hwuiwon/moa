@@ -18,10 +18,12 @@ use moa_observability::{
     SandboxWorkspaceInventoryDrift, SandboxWorkspaceLifecycleOperation,
     SandboxWorkspaceMetricResult, SandboxWorkspaceProviderKind, SandboxWorkspaceQuotaDecision,
     apply_trace_context_to_span, current_turn_root_span, record_sandbox_storage_resource_state,
-    record_sandbox_workspace_checkpoint, record_sandbox_workspace_inventory_drift,
-    record_sandbox_workspace_lifecycle, record_sandbox_workspace_quota_decision,
-    record_sandbox_workspace_quota_utilization, record_sandbox_workspace_reaper,
-    record_sandbox_workspace_state, record_tool_call,
+    record_sandbox_workspace_active_hands, record_sandbox_workspace_checkpoint,
+    record_sandbox_workspace_inventory_drift, record_sandbox_workspace_lifecycle,
+    record_sandbox_workspace_parked_tasks_with_active_hands,
+    record_sandbox_workspace_quota_decision, record_sandbox_workspace_quota_utilization,
+    record_sandbox_workspace_reaper, record_sandbox_workspace_release,
+    record_sandbox_workspace_restore, record_sandbox_workspace_state, record_tool_call,
 };
 use opentelemetry::trace::Status;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -97,6 +99,29 @@ pub fn record_workspace_quota_decision(
 /// Sets a fleet-wide capacity utilization ratio.
 pub fn record_workspace_quota_utilization(dimension: WorkspaceCapacityDimension, ratio: f64) {
     record_sandbox_workspace_quota_utilization(dimension, ratio);
+}
+
+/// Sets one provider's count of sandbox compute instances holding active capacity.
+pub fn record_workspace_active_hands(provider: &str, count: u64) {
+    record_sandbox_workspace_active_hands(sandbox_workspace_provider_kind(provider), count);
+}
+
+/// Sets the count of parked execution tasks that still own sandbox compute.
+///
+/// Guards the invariant that a parked run owns no sandbox. Emitted on every
+/// maintenance pass including the healthy zero, because the alert is `absent()`-guarded.
+pub fn record_workspace_parked_tasks_with_active_hands(count: u64) {
+    record_sandbox_workspace_parked_tasks_with_active_hands(count);
+}
+
+/// Records one portable-checkpoint restore into fresh sandbox compute.
+pub fn record_workspace_restore(provider: &str) {
+    record_sandbox_workspace_restore(sandbox_workspace_provider_kind(provider));
+}
+
+/// Records one checkpoint-and-release outcome at an execution yield boundary.
+pub fn record_workspace_release(provider: &str, result: SandboxWorkspaceMetricResult) {
+    record_sandbox_workspace_release(sandbox_workspace_provider_kind(provider), result);
 }
 
 /// Sets the complete supervised workspace-reaper health snapshot.

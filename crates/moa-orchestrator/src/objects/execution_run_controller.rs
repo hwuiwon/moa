@@ -126,6 +126,20 @@ impl ExecutionRunController for ExecutionRunControllerImpl {
             .into_inner();
 
         progress::deliver(&ctx, &self.repository, &request, &committed).await?;
+        // A run that parked without enqueueing more work may be waiting for a replacement plan
+        // that nothing else in the product will propose. Selecting that bounded slice is one
+        // indexed read and one durable send; the paid planner call happens in its own service.
+        if committed.terminal_delivery.is_none() && !committed.response.continuation_enqueued {
+            crate::services::execution_amendment_planner::dispatch_parked_replan_planning(
+                &ctx,
+                &self.repository,
+                request.tenant_id,
+                request.run_uid,
+                committed.response.controller_generation,
+                committed.response.wake_epoch,
+            )
+            .await?;
+        }
         Ok(Json::from(committed.response))
     }
 }

@@ -42,6 +42,9 @@ Options:
   --long-horizon
                Run the deterministic accelerated-week execution suite. Requires
                --live, but strips provider credentials and never spends budget.
+               `make test-long-horizon` runs the identical selection on its own,
+               and the nightly `long-horizon-execution` job in
+               .github/workflows/integration-tests.yml is what schedules it.
   --behavior-lab-live
                Also run the billed Behavior Lab trial-to-score smoke. Requires
                --live, MOA_RUN_LIVE_PROVIDER_TESTS=1, a provider credential, and

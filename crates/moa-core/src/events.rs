@@ -52,8 +52,6 @@ pub enum ExecutionProgressPhase {
     Pausing,
     /// The run is fully paused and consumes no active execution capacity.
     Paused,
-    /// A late callback or activation was fenced without advancing canonical state.
-    StaleWork,
 }
 
 /// Audience expected to resolve the run's current public blocker.
@@ -62,8 +60,6 @@ pub enum ExecutionProgressPhase {
 pub enum ExecutionBlockerAudience {
     /// The owning user must provide input.
     User,
-    /// Another authorized agent must provide input.
-    Agent,
     /// A tenant reviewer must decide.
     TenantReviewer,
     /// An external actor or callback must signal.

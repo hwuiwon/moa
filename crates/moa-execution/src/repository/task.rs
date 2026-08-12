@@ -2132,6 +2132,35 @@ impl ExecutionRepository {
             return Ok(TaskAttemptSettlementOutcome::NotFound);
         };
         let task = task_from_row(&task_row)?;
+        // A relative input-wait expiry resolves against wait entry, not compile time, so a delay
+        // that was legal when the plan compiled can land past the run deadline here. That is a
+        // product outcome for a long-horizon run, so the task fails terminally with a typed
+        // deadline failure instead of parking on a wait that can never settle in time.
+        let needs_input = matches!(outcome.result, ExecutionTaskResult::NeedsInput { .. });
+        let outcome = match run.approved_budget.deadline_at {
+            Some(run_deadline_at) if needs_input => {
+                match crate::interpreter::resolve_temporal_target_within_deadline(
+                    &run.active_plan.definition.input_wait_policy.expiry,
+                    settled_at,
+                    run_deadline_at,
+                )? {
+                    crate::interpreter::TemporalTargetResolution::Due(_) => outcome,
+                    crate::interpreter::TemporalTargetResolution::DeadlineExceeded {
+                        due_at,
+                        run_deadline_at,
+                    } => failed_task_outcome(
+                        moa_artifacts::execution_plan::ExecutionFailureClass::DeadlineExceeded,
+                        format!(
+                            "input wait on node `{}` entered at {settled_at} resolves at \
+                             {due_at}, at or after the run deadline {run_deadline_at}",
+                            task.node_id
+                        ),
+                        outcome.usage.clone(),
+                    ),
+                }
+            }
+            _ => outcome,
+        };
         if capacity == CapacityReleaseOutcome::AlreadyReleased {
             let replay = task_attempt_settlement_replayed(&task, &fence, &outcome);
             if replay {
@@ -4124,7 +4153,7 @@ async fn task_attempt_resources_match(
              SELECT 1 FROM moa.execution_trigger \
              WHERE trigger_uid = $7 AND tenant_id = $2 AND run_uid = $3 AND task_id = $4 \
                AND trigger_kind = 'task_watchdog' AND controller_generation = $5 \
-               AND attempt_generation = $6 AND state IN ('pending', 'dispatching') \
+               AND attempt_generation = $6 AND state = 'pending' \
          )",
     )
     .bind(fence.capacity_reservation_uid)
@@ -4589,7 +4618,7 @@ impl ExecutionRepository {
             let trigger_uids = sqlx::query_scalar::<_, Uuid>(
                 "SELECT trigger_uid FROM moa.execution_trigger \
                  WHERE run_uid=$1 AND task_id=$2 AND trigger_kind='wait_expiry' \
-                   AND state IN ('pending','dispatching') \
+                   AND state = 'pending' \
                  ORDER BY trigger_uid LIMIT 2 FOR UPDATE",
             )
             .bind(run_uid)
@@ -4981,7 +5010,7 @@ impl ExecutionRepository {
         let trigger_uids = sqlx::query_scalar::<_, Uuid>(
             "SELECT trigger_uid FROM moa.execution_trigger \
              WHERE run_uid=$1 AND task_id=$2 AND trigger_kind='wait_expiry' \
-               AND state IN ('pending','dispatching') \
+               AND state = 'pending' \
              ORDER BY trigger_uid LIMIT 2 FOR UPDATE",
         )
         .bind(run_uid)

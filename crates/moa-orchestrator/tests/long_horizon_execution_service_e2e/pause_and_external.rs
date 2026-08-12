@@ -948,7 +948,7 @@ async fn sandbox_hand_releases_during_signal_wait_and_reacquires_after_resume_se
                     signal_name: "resume-sandbox".to_string(),
                     wait_policy: ExecutionWaitPolicy {
                         expiry: after_logical_days(7),
-                        on_expiry: ExecutionWaitExpiryAction::FailRun,
+                        on_expiry: ExecutionWaitExpiryAction::FailTask,
                     },
                 },
                 json!({"type": "object"}),
@@ -1583,7 +1583,7 @@ async fn parked_signal_rejects_wrong_generation_and_replays_duplicate_after_valk
                     signal_name: "provider-complete".to_string(),
                     wait_policy: ExecutionWaitPolicy {
                         expiry: after_logical_days(5),
-                        on_expiry: ExecutionWaitExpiryAction::FailRun,
+                        on_expiry: ExecutionWaitExpiryAction::FailTask,
                     },
                 },
                 json!({"type": "object"}),

@@ -173,7 +173,7 @@ its operation enum has exactly eight variants:
 8. `Output { value }` resolves and validates the terminal output.
 
 Every wait expiry uses `ExecutionWaitPolicy { expiry, on_expiry }`, where
-`on_expiry` is `FailTask`, `FailRun`, or `ContinueWith { output }`.
+`on_expiry` is `FailTask`, `FailTask`, or `ContinueWith { output }`.
 `ExecutionTemporalTarget::At { at }` is an exact UTC instant and is allowed in
 one-off compiled plans. `After { delay_seconds }` is nonzero and resolves from
 the instant the task actually enters its wait, not from planning or run

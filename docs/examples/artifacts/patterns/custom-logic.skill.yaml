@@ -41,9 +41,10 @@ definition:
             kind: after
             delay_seconds: 86400
           on_expiry:
-            kind: fail_run
+            kind: fail_task
         input_schema:
           type: object
+          required: [priority]
           properties:
             priority:
               type: string
@@ -52,6 +53,10 @@ definition:
         output_schema:
           type: object
         nodes:
+          # Explicit routing: each branch declares the exact value it runs for, so a run
+          # takes one of them and the other is committed as `skipped`. The branches are
+          # effectful leaves — the terminal output reports the route that was chosen, not
+          # a branch's output, because a skipped branch produces none.
           - id: escalate
             requirement_ids: [req_route]
             depends_on: []
@@ -111,10 +116,8 @@ definition:
             operation:
               kind: output
               value:
-                escalation:
-                  $ref: $.nodes.escalate.output
-                standard_response:
-                  $ref: $.nodes.standard_response.output
+                routed_priority:
+                  $ref: $.input.priority
             compensation: null
             retry:
               max_attempts: 1

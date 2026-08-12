@@ -83,8 +83,13 @@ spec:
             description: "{{ $value }} unresolved {{ $labels.classification }} findings exist for {{ $labels.provider_kind }}. Findings are quarantined and must never be auto-deleted; prove ownership and absence before resolving them."
             runbook_url: https://github.com/hwuiwon/moa/blob/main/docs/19-data-operations.md#provider-inventory-drift
 
+        # `absent()` is load-bearing: this is the only automated guard on the
+        # invariant that a parked run owns no sandbox, and a bare `max(...) > 0`
+        # reads as healthy whenever nothing emits the series at all. The producer
+        # records the healthy zero on every fleet snapshot, so absence means the
+        # invariant is unobserved, not satisfied.
         - alert: MOASandboxParkedTaskRetainsActiveHand
-          expr: max(moa_sandbox_workspace_parked_tasks_with_active_hands) > 0
+          expr: absent(moa_sandbox_workspace_parked_tasks_with_active_hands) or max(moa_sandbox_workspace_parked_tasks_with_active_hands) > 0
           for: 1m
           labels:
             severity: critical

@@ -26,10 +26,11 @@ use uuid::Uuid;
 use crate::{
     services::llm_gateway::{LLMCompletionOwner, cancel_completion_owner},
     workflows::{
+        attempt_slice::durable_utc_now_shared,
         errors::execution_error_to_handler_error,
         execution_task_attempt::{
             ExecutionTaskAttemptImpl, task_attempt_fence,
-            yielding::{begin_release_shared, checkpoint_task_hands_shared, journal_now_shared},
+            yielding::{begin_release_shared, checkpoint_task_hands_shared},
         },
     },
 };
@@ -106,7 +107,7 @@ pub(super) async fn handle_task_attempt_watchdog(
             ExecutionAttemptWatchdogResponseOutcome::ReplayedOrStale,
         ));
     }
-    let now = journal_now_shared(ctx, "task_watchdog_observed_at").await?;
+    let now = durable_utc_now_shared(ctx, "task_watchdog_observed_at").await?;
     if deadline > now {
         return Ok(watchdog_result(
             ExecutionAttemptWatchdogResponseOutcome::RetryDelivery,
@@ -190,7 +191,7 @@ pub(super) async fn handle_task_attempt_watchdog(
             ExecutionAttemptWatchdogResponseOutcome::RetryDelivery,
         ));
     };
-    let receipt = checkpoint_task_hands_shared(workflow, ctx, &attempt_request, &started).await?;
+    let receipt = checkpoint_task_hands_shared(ctx, &attempt_request, &started).await?;
     let disposition = classify_stale_attempt(task_effect_idempotency(&started));
     let outcome = match disposition {
         StaleTaskAttemptDisposition::Retry => ExecutionTaskOutcome {

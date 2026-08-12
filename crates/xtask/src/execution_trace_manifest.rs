@@ -1072,6 +1072,13 @@ const SENDERS: &[SenderManifestEntry] = &[
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/execution_task_attempt/yielding.rs",
+        "continue_task_hands_workflow",
+        TRACE_HELPER,
+        "ToolExecutorClient",
+        "checkpoint_execution_hands_retaining_compute"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/execution_task_attempt/yielding.rs",
         "park_review",
         TRACE_HELPER,
         "ActionReviewsClient",

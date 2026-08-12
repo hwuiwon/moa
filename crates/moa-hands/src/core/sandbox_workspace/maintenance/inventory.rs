@@ -114,11 +114,8 @@ impl WorkspaceMaintenanceCoordinator {
                 .or_default() += 1;
             self.upsert_inventory_finding(&finding).await?;
         }
-        self.resolve_unseen_findings(
-            &observed_keys,
-            &HashSet::from([(account.id, account.generation)]),
-        )
-        .await?;
+        self.resolve_unseen_findings(&observed_keys, account.id, account.generation)
+            .await?;
         Ok((inventory.resources.len() as u64, counts))
     }
 
@@ -486,43 +483,42 @@ impl WorkspaceMaintenanceCoordinator {
         Ok(())
     }
 
+    /// Resolves every unresolved finding of one scanned account generation that
+    /// the completed scan did not observe again.
     async fn resolve_unseen_findings(
         &self,
         observed: &HashSet<InventoryFindingKey>,
-        observed_accounts: &HashSet<(ProviderAccountId, u64)>,
+        account_id: ProviderAccountId,
+        account_generation: u64,
     ) -> Result<()> {
+        let scanned_generation = i64::try_from(account_generation).map_err(|_| {
+            MoaError::StorageError("provider account generation overflows Postgres".to_string())
+        })?;
         let mut conn = maintenance_conn(&self.pool).await?;
         let rows = sqlx::query(
             r#"
-            SELECT provider_account_id, provider_account_generation,
-                   resource_fingerprint, finding_kind
+            SELECT resource_fingerprint, finding_kind
             FROM moa.sandbox_provider_inventory_findings
             WHERE quarantine_state <> 'resolved'
+              AND provider_account_id = $1
+              AND provider_account_generation = $2
             "#,
         )
+        .bind(account_id)
+        .bind(scanned_generation)
         .fetch_all(conn.as_mut())
         .await
         .map_err(map_sqlx)?;
         for row in rows {
             let key = InventoryFindingKey {
-                account_id: row.try_get("provider_account_id").map_err(map_sqlx)?,
-                account_generation: u64::try_from(
-                    row.try_get::<i64, _>("provider_account_generation")
-                        .map_err(map_sqlx)?,
-                )
-                .map_err(|_| {
-                    MoaError::StorageError(
-                        "inventory finding account generation is invalid".to_string(),
-                    )
-                })?,
+                account_id,
+                account_generation,
                 resource_fingerprint: row.try_get("resource_fingerprint").map_err(map_sqlx)?,
                 kind: InventoryFindingKind::from_label(
                     &row.try_get::<String, _>("finding_kind").map_err(map_sqlx)?,
                 )?,
             };
-            if !observed_accounts.contains(&(key.account_id, key.account_generation))
-                || observed.contains(&key)
-            {
+            if observed.contains(&key) {
                 continue;
             }
             let digest = format!(
@@ -548,10 +544,8 @@ impl WorkspaceMaintenanceCoordinator {
                   AND quarantine_state <> 'resolved'
                 "#,
             )
-            .bind(key.account_id)
-            .bind(i64::try_from(key.account_generation).map_err(|_| {
-                MoaError::StorageError("provider account generation overflows Postgres".to_string())
-            })?)
+            .bind(account_id)
+            .bind(scanned_generation)
             .bind(&key.resource_fingerprint)
             .bind(key.kind.as_str())
             .bind(digest)

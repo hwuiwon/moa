@@ -389,10 +389,6 @@ async fn e2b_provider_round_trip() {
         );
 
         assert!(matches!(
-            provider.pause(&handle).await,
-            Err(MoaError::Unsupported(_))
-        ));
-        assert!(matches!(
             provider.resume(&handle).await,
             Err(MoaError::Unsupported(_))
         ));

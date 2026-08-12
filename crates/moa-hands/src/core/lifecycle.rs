@@ -121,7 +121,8 @@ struct DurableHandProvisionContext<'a> {
     call_scope: ToolCallScope<'a>,
 }
 
-fn active_hand_capacity_request(
+/// Builds the exact fenced active-compute capacity identity for one lease.
+pub(in crate::core) fn active_hand_capacity_request(
     workspace_binding: &WorkspaceBinding,
     lease: &HandLease,
 ) -> Result<ActiveHandCapacityRequest> {
@@ -1065,10 +1066,39 @@ impl ToolRouter {
                         if !lease_expired(&lease) && lease_matches_policy(&lease, policy) =>
                     {
                         match self
-                            .resume_durable_lease(provider, &lease, &key, call_scope)
+                            .resume_durable_lease(
+                                provider,
+                                &lease,
+                                workspace_binding,
+                                &key,
+                                call_scope,
+                            )
                             .await
                         {
-                            Ok(handle) => {
+                            // A suspended sandbox has no reserved claim on the slot it
+                            // gave back. Losing that race is terminal for this lease
+                            // rather than something to retry in place: the stopped
+                            // sandbox is handed to the reaper, and admission is refused
+                            // now instead of spinning while the fleet stays full. Safe
+                            // because the continuation boundary published its checkpoint
+                            // before suspending, so a later slice restores the same head
+                            // into fresh compute.
+                            Ok(None) => {
+                                call_scope.admit()?;
+                                let _ = lease_store
+                                    .transition_status(
+                                        session.tenant_id,
+                                        &lease,
+                                        HandLeaseStatus::Stale,
+                                    )
+                                    .await?;
+                                return Err(MoaError::ValidationError(format!(
+                                    "suspended sandbox for session {} provider {provider} lost its \
+                                     active-hands capacity slot to a saturated fleet",
+                                    session.id
+                                )));
+                            }
+                            Ok(Some(handle)) => {
                                 call_scope.admit()?;
                                 if lease_store
                                     .renew_active(HandLeaseRenewRequest {
@@ -1265,6 +1295,11 @@ impl ToolRouter {
         {
             HandStatus::Running => {}
             HandStatus::Provisioning => return Ok(None),
+            // No capacity re-admission here, unlike the active-lease resume path.
+            // This branch recovers a lease still in `provisioning`, whose
+            // `ActiveHands` reservation was taken before the provider create and
+            // is therefore still charged. Only a continuation-boundary suspension
+            // gives that charge back, and it leaves the lease `active`.
             HandStatus::Paused | HandStatus::Stopped => {
                 call_scope.admit()?;
                 provider_impl.resume(&handle).await?;
@@ -1446,9 +1481,23 @@ impl ToolRouter {
                             && current.attachment == lease.attachment
                     });
                 if already_active {
-                    if let Some(capacity) = self.hands.workspace_capacity.as_ref() {
-                        let request = active_hand_capacity_request(workspace_binding, lease)?;
-                        let _ = capacity.commit_active_hand(&request).await?;
+                    // The activation replay may already have committed the exact
+                    // charge, but it must never proceed while that charge is still
+                    // pending: the durable release predicates only settle a
+                    // committed reservation, so a lost fence here would strand the
+                    // run with dead compute.
+                    if let Some(capacity) = self.hands.workspace_capacity.as_ref()
+                        && !capacity
+                            .ensure_active_hand_committed(&active_hand_capacity_request(
+                                workspace_binding,
+                                lease,
+                            )?)
+                            .await?
+                    {
+                        return Err(MoaError::StorageError(format!(
+                            "replayed hand activation lost its exact capacity fence for session {} provider {provider}",
+                            session.id
+                        )));
                     }
                     let active = ActiveHand {
                         handle: handle.clone(),
@@ -1649,13 +1698,21 @@ impl ToolRouter {
         }
     }
 
+    /// Reattaches one live durable lease, resuming it when the sandbox is stopped.
+    ///
+    /// Returns `Ok(None)` when a suspended sandbox could not re-win the
+    /// active-compute slot it gave back at its continuation boundary. That is a
+    /// distinct outcome from an error: the lease is not retryable in place and
+    /// the caller must terminalize it, but nothing is lost, because the boundary
+    /// published a portable checkpoint before suspending.
     async fn resume_durable_lease(
         &self,
         provider: &str,
         lease: &HandLease,
+        workspace_binding: &WorkspaceBinding,
         key: &HandProviderCacheKey,
         call_scope: ToolCallScope<'_>,
-    ) -> Result<HandHandle> {
+    ) -> Result<Option<HandHandle>> {
         let lease_handle = lease.handle.as_ref().ok_or_else(|| {
             MoaError::StorageError(format!(
                 "active hand lease for session {} provider {provider} is missing a handle",
@@ -1673,6 +1730,16 @@ impl ToolRouter {
         match status {
             HandStatus::Running | HandStatus::Provisioning => {}
             HandStatus::Paused | HandStatus::Stopped => {
+                // A continuation boundary that suspends a sandbox releases its
+                // `ActiveHands` charge so a runnable task can use the slot, which
+                // makes resuming a fresh admission decision rather than a free
+                // reattach. Compute must never restart before the slot is re-won.
+                if !self
+                    .readmit_suspended_hand(lease, workspace_binding)
+                    .await?
+                {
+                    return Ok(None);
+                }
                 call_scope.admit()?;
                 provider_impl.resume(&handle).await?;
             }
@@ -1690,7 +1757,26 @@ impl ToolRouter {
                 generation: Some(lease.generation),
             },
         );
-        Ok(handle)
+        Ok(Some(handle))
+    }
+
+    /// Re-wins the active-compute admission slot a suspended hand gave back.
+    ///
+    /// Reports `false` for a saturated fleet, which is an ordinary outcome and not
+    /// an error: the caller drops the warm sandbox and a later slice restores the
+    /// published checkpoint into fresh compute. That is also the honest semantics
+    /// — a full fleet does not give a warm slot back for free. Deployments with no
+    /// capacity repository charge nothing and always re-admit.
+    async fn readmit_suspended_hand(
+        &self,
+        lease: &HandLease,
+        workspace_binding: &WorkspaceBinding,
+    ) -> Result<bool> {
+        let Some(capacity) = self.hands.workspace_capacity.as_ref() else {
+            return Ok(true);
+        };
+        let request = active_hand_capacity_request(workspace_binding, lease)?;
+        capacity.reacquire_suspended_active_hand(&request).await
     }
 
     async fn wait_for_provisioning(

@@ -2,16 +2,21 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use moa_artifacts::execution_plan::{ExecutionTemporalTarget, ExecutionWaitPolicy, InputAudience};
+use moa_artifacts::execution_plan::{
+    ExecutionFailureClass, ExecutionTemporalTarget, ExecutionUsage, ExecutionWaitPolicy,
+    InputAudience,
+};
 use moa_config::ExecutionConfig;
 use sqlx::{Row, postgres::PgRow};
 
 use crate::capability::node_output_hash;
+use crate::interpreter::TemporalTargetResolution;
 use crate::schema::validate_instance;
 
 use super::*;
 use super::{
     materialize::{ensure_materialization_replay_matches, prepare_task_materialization_batch},
+    outcome_support::outcome_projection_fields,
     rows::*,
     sql::*,
     trigger::{ExecutionTriggerKind, NewExecutionTrigger, create_trigger_with_dispatch_in_conn},
@@ -194,6 +199,8 @@ pub struct ReadyMaterializationRequest {
     pub source_exhausted: bool,
     /// Aggregate output when the source completes without creating a logical task.
     pub terminal_output: Option<Value>,
+    /// Whether the node's declared condition evaluated false and no work may exist.
+    pub condition_skipped: bool,
     /// Bounded deterministic logical tasks in source order.
     pub tasks: Vec<LogicalTask>,
 }
@@ -915,10 +922,28 @@ impl ExecutionRepository {
             reduce_cursor,
             source_exhausted,
             terminal_output,
+            condition_skipped,
             tasks,
         } = request;
+        // A condition skip is the only page that legitimately carries neither tasks nor a
+        // terminal output, and it can only ever be the node's first page: the interpreter
+        // evaluates `when` at cursor zero and declares the source exhausted there.
+        if condition_skipped
+            && !(tasks.is_empty()
+                && source_exhausted
+                && terminal_output.is_none()
+                && reduce_cursor.is_none()
+                && expected_cursor == 0)
+        {
+            return Err(Error::InvalidRepositoryInput {
+                message: "a condition-skipped page must be the empty exhausted first page"
+                    .to_string(),
+            });
+        }
         if tasks.len() > MAX_READY_PAGE_SIZE_USIZE
-            || (tasks.is_empty() && (!source_exhausted || terminal_output.is_none()))
+            || (!condition_skipped
+                && tasks.is_empty()
+                && (!source_exhausted || terminal_output.is_none()))
             || (!tasks.is_empty() && terminal_output.is_some())
         {
             return Err(Error::InvalidRepositoryInput {
@@ -973,7 +998,12 @@ impl ExecutionRepository {
                 .fetch_one(conn.as_mut())
                 .await
                 .map_err(sqlx_error)?;
-        let storage_wait = storage_wait_for_tasks(&tasks, &run, wait_entered_at)?;
+        let (storage_wait, wait_deadline_failure) =
+            match storage_wait_for_tasks(&tasks, &run, wait_entered_at)? {
+                Some(StorageWaitPlan::Enter(wait)) => (Some(*wait), None),
+                Some(StorageWaitPlan::DeadlineExceeded(message)) => (None, Some(message)),
+                None => (None, None),
+            };
         let plan_node = run
             .active_plan
             .definition
@@ -983,6 +1013,19 @@ impl ExecutionRepository {
             .ok_or_else(|| Error::InvalidRepositoryData {
                 message: format!("active plan is missing materialized node `{node_id}`"),
             })?;
+        // A skipped branch does NOT reuse the `terminal_output` path: that path validates
+        // its output against the node's `output_schema` (which a null branch output cannot
+        // satisfy) and lands the node in `completed`. A skip must land in `skipped`, whose
+        // null aggregate is what `load_activation_projection` already materializes for
+        // dependents and what completion accounting already excludes from requirements.
+        if condition_skipped {
+            if plan_node.when.is_none() {
+                return Err(Error::InvalidRepositoryInput {
+                    message: format!("node `{node_id}` was skipped without declaring a condition"),
+                });
+            }
+            return commit_condition_skip(conn, &run, &node_id, expected_cursor).await;
+        }
         let reduce_batch_size = match (&plan_node.operation, reduce_cursor) {
             (ExecutionOperation::Reduce { batch_size, .. }, Some(cursor)) => {
                 let minimum_inputs = if tasks.is_empty() { 1 } else { 2 };
@@ -1236,14 +1279,31 @@ impl ExecutionRepository {
             .iter()
             .map(|task| task.task_id.as_uuid())
             .collect::<Vec<_>>();
-        let (task_status, attempt_state, waiting_since, ready_at) = storage_wait
-            .as_ref()
-            .map_or(("ready", "idle", None, Some(wait_entered_at)), |wait| {
-                (wait.task_status, "waiting", Some(wait_entered_at), None)
-            });
+        let wait_deadline_outcome = wait_deadline_failure.map(|message| {
+            crate::state::failed_task_outcome(
+                ExecutionFailureClass::DeadlineExceeded,
+                message,
+                zero_usage(),
+            )
+        });
+        let (task_status, attempt_state, waiting_since, ready_at) =
+            match (storage_wait.as_ref(), wait_deadline_outcome.as_ref()) {
+                (_, Some(_)) => ("failed", "terminal", None, None),
+                (Some(wait), None) => (wait.task_status, "waiting", Some(wait_entered_at), None),
+                (None, None) => ("ready", "idle", None, Some(wait_entered_at)),
+            };
+        let (current_outcome, current_error) = match wait_deadline_outcome.as_ref() {
+            Some(outcome) => {
+                let (_, error, _) = outcome_projection_fields(outcome)?;
+                (Some(serde_json::to_value(outcome)?), error)
+            }
+            None => (None, None),
+        };
         let transitioned = sqlx::query(
             "UPDATE moa.execution_task SET status = $3, attempt_state = $4, \
                  waiting_since = $5, ready_at = $6, \
+                 current_outcome = $7, error = $8, \
+                 completed_at = CASE WHEN $7::JSONB IS NULL THEN completed_at ELSE NOW() END, \
                  last_progress_at = NOW(), updated_at = NOW() \
              WHERE run_uid = $1 AND task_id = ANY($2::UUID[]) AND status = 'pending'",
         )
@@ -1253,6 +1313,8 @@ impl ExecutionRepository {
         .bind(attempt_state)
         .bind(waiting_since)
         .bind(ready_at)
+        .bind(current_outcome)
+        .bind(current_error)
         .execute(conn.as_mut())
         .await
         .map_err(sqlx_error)?;
@@ -1261,7 +1323,7 @@ impl ExecutionRepository {
                 message: "inserted ready page did not transition every task".to_string(),
             });
         }
-        let ready_delta = if storage_wait.is_some() {
+        let ready_delta = if storage_wait.is_some() || wait_deadline_outcome.is_some() {
             0
         } else {
             page_count
@@ -1271,10 +1333,12 @@ impl ExecutionRepository {
         } else {
             0
         };
-        let node_status = if storage_wait.is_some() {
-            "waiting"
-        } else {
-            "ready"
+        // A deadline-failed wait keeps the pre-terminal node status here; the counter
+        // transition below flips it to `failed` so dependent cancellation runs once.
+        let node_status = match (storage_wait.as_ref(), wait_deadline_outcome.as_ref()) {
+            (_, Some(_)) => "pending",
+            (Some(_), None) => "waiting",
+            (None, None) => "ready",
         };
         let (reduce_round, reduce_batch_cursor, reduce_input_count, reduce_task_delta) =
             next_reduce_cursor.map_or((None, None, None, 0), |(cursor, next_batch)| {
@@ -1387,6 +1451,7 @@ impl ExecutionRepository {
                  waiting_review_task_count = waiting_review_task_count + $10, \
                  waiting_signal_task_count = waiting_signal_task_count + $11, \
                  waiting_timer_task_count = waiting_timer_task_count + $12, \
+                 progress_failed_tasks = progress_failed_tasks + $13, \
                  last_progress_at = NOW(), updated_at = NOW() \
              WHERE run_uid = $1",
         )
@@ -1402,9 +1467,25 @@ impl ExecutionRepository {
         .bind(run_waiting.review)
         .bind(run_waiting.signal)
         .bind(run_waiting.timer)
+        .bind(to_i64(
+            u64::from(wait_deadline_outcome.is_some()),
+            "wait deadline failure count",
+        )?)
         .execute(conn.as_mut())
         .await
         .map_err(sqlx_error)?;
+        if wait_deadline_outcome.is_some() {
+            let task = &tasks[0];
+            transition_node_counters_in_tx(
+                &mut conn,
+                run_uid,
+                &node_id,
+                &task.item_key,
+                ExecutionTaskStatus::Pending,
+                ExecutionTaskStatus::Failed,
+            )
+            .await?;
+        }
         let mut triggers = Vec::new();
         if let Some(wait) = storage_wait {
             let task = &tasks[0];
@@ -1683,11 +1764,28 @@ struct StorageWaitMaterialization {
     reason: WaitingReason,
 }
 
+const fn zero_usage() -> ExecutionUsage {
+    ExecutionUsage {
+        cost_microusd: 0,
+        tokens: 0,
+        tool_calls: 0,
+        retrieved_bytes: 0,
+    }
+}
+
+/// How one storage-only wait node materializes at wait entry.
+enum StorageWaitPlan {
+    /// The wait is enterable and parks the task on its durable trigger.
+    Enter(Box<StorageWaitMaterialization>),
+    /// The wait cannot finish before the run deadline and fails the task instead.
+    DeadlineExceeded(String),
+}
+
 fn storage_wait_for_tasks(
     tasks: &[LogicalTask],
     run: &ExecutionRunRecord,
     wait_entered_at: DateTime<Utc>,
-) -> Result<Option<StorageWaitMaterialization>> {
+) -> Result<Option<StorageWaitPlan>> {
     let Some(first) = tasks.first() else {
         return Ok(None);
     };
@@ -1719,8 +1817,23 @@ fn storage_wait_for_tasks(
             .ok_or_else(|| Error::InvalidRepositoryInput {
                 message: "storage-only waits require an absolute run deadline".to_string(),
             })?;
-    let due_at =
-        crate::interpreter::resolve_temporal_target(target, wait_entered_at, run_deadline_at)?;
+    let due_at = match crate::interpreter::resolve_temporal_target_within_deadline(
+        target,
+        wait_entered_at,
+        run_deadline_at,
+    )? {
+        TemporalTargetResolution::Due(due_at) => due_at,
+        TemporalTargetResolution::DeadlineExceeded {
+            due_at,
+            run_deadline_at,
+        } => {
+            return Ok(Some(StorageWaitPlan::DeadlineExceeded(format!(
+                "wait on node `{}` entered at {wait_entered_at} resolves at {due_at}, \
+                 at or after the run deadline {run_deadline_at}",
+                first.node_id
+            ))));
+        }
+    };
     let exact_target = ExecutionTemporalTarget::At { at: due_at };
     let reason = match &first.kind {
         LogicalTaskKind::Review {
@@ -1758,12 +1871,14 @@ fn storage_wait_for_tasks(
             });
         }
     };
-    Ok(Some(StorageWaitMaterialization {
-        task_status,
-        trigger_kind,
-        due_at,
-        reason,
-    }))
+    Ok(Some(StorageWaitPlan::Enter(Box::new(
+        StorageWaitMaterialization {
+            task_status,
+            trigger_kind,
+            due_at,
+            reason,
+        },
+    ))))
 }
 
 fn waiting_reason_task_id(reason: &WaitingReason) -> Option<ExecutionTaskId> {
@@ -1902,6 +2017,109 @@ fn waiting_run_status_after(
     }
 }
 
+/// Commits the one durable effect of a false node condition: a `skipped` node aggregate.
+///
+/// The node keeps zero logical tasks forever, so its aggregate output is JSON `null`
+/// with a verified hash and `aggregate_complete`, exactly the shape dependents already
+/// load. Dependents are then released so ordering-only successors of a skipped branch
+/// still run.
+async fn commit_condition_skip(
+    mut conn: ScopedConn<'_>,
+    run: &ExecutionRunRecord,
+    node_id: &str,
+    expected_cursor: u64,
+) -> Result<ReadyMaterializationOutcome> {
+    let Some(row) = sqlx::query(
+        "SELECT node_status, materialization_cursor, materialization_complete, \
+                total_task_count, aggregate_complete \
+         FROM moa.execution_node_state WHERE run_uid = $1 AND node_id = $2 FOR UPDATE",
+    )
+    .bind(run.run_uid)
+    .bind(node_id)
+    .fetch_optional(conn.as_mut())
+    .await
+    .map_err(sqlx_error)?
+    else {
+        conn.commit().await.map_err(storage_error)?;
+        return Ok(ReadyMaterializationOutcome::Conflict);
+    };
+    let status: String = row.try_get("node_status").map_err(row_error)?;
+    let cursor = required_u64(&row, "materialization_cursor")?;
+    let total_task_count = required_u64(&row, "total_task_count")?;
+    let materialization_complete: bool =
+        row.try_get("materialization_complete").map_err(row_error)?;
+    let aggregate_complete: bool = row.try_get("aggregate_complete").map_err(row_error)?;
+    // `skipped` is also reachable for a node whose tasks all settled without succeeding,
+    // so the zero-task shape is what distinguishes an already-committed condition skip
+    // from that unrelated aggregate.
+    if status == "skipped"
+        && total_task_count == 0
+        && materialization_complete
+        && aggregate_complete
+    {
+        conn.commit().await.map_err(storage_error)?;
+        return Ok(ReadyMaterializationOutcome::Replayed {
+            tasks: Vec::new(),
+            next_cursor: expected_cursor,
+            triggers: Vec::new(),
+        });
+    }
+    if cursor != expected_cursor
+        || materialization_complete
+        || total_task_count != 0
+        || status != "pending"
+    {
+        conn.commit().await.map_err(storage_error)?;
+        return Ok(ReadyMaterializationOutcome::Conflict);
+    }
+    let output_hash = node_output_hash(&Value::Null)?.to_string();
+    let updated = sqlx::query(
+        "UPDATE moa.execution_node_state SET node_status = 'skipped', \
+             materialization_complete = TRUE, aggregate_output = 'null'::JSONB, \
+             aggregate_output_hash = $4, aggregate_complete = TRUE, updated_at = NOW() \
+         WHERE run_uid = $1 AND node_id = $2 AND materialization_cursor = $3 \
+           AND NOT materialization_complete AND node_status = 'pending' \
+           AND total_task_count = 0",
+    )
+    .bind(run.run_uid)
+    .bind(node_id)
+    .bind(to_i64(
+        expected_cursor,
+        "expected node materialization cursor",
+    )?)
+    .bind(&output_hash)
+    .execute(conn.as_mut())
+    .await
+    .map_err(sqlx_error)?;
+    if updated.rows_affected() != 1 {
+        conn.rollback().await.map_err(storage_error)?;
+        return Ok(ReadyMaterializationOutcome::Conflict);
+    }
+    release_node_dependents_in_tx(&mut conn, run, node_id).await?;
+    sqlx::query(
+        "UPDATE moa.execution_run SET last_progress_at = NOW(), updated_at = NOW() \
+         WHERE run_uid = $1",
+    )
+    .bind(run.run_uid)
+    .execute(conn.as_mut())
+    .await
+    .map_err(sqlx_error)?;
+    conn.commit().await.map_err(storage_error)?;
+    Ok(ReadyMaterializationOutcome::Applied {
+        tasks: Vec::new(),
+        next_cursor: expected_cursor,
+        triggers: Vec::new(),
+    })
+}
+
+/// Releases one dependency edge on every direct dependent of a settled node.
+///
+/// A dependent whose counter cannot be decremented is normally a corrupted projection,
+/// with one legitimate exception: a *sibling* dependency may have failed first and
+/// cancelled this dependent through `cancel_unmaterialized_dependents_in_tx`, which
+/// zeroes its counter. That is reachable whenever one branch of a fan-in settles
+/// without tasks — an empty map, or a node whose condition evaluated false — after a
+/// sibling has already failed.
 async fn release_node_dependents_in_tx(
     conn: &mut ScopedConn<'_>,
     run: &ExecutionRunRecord,
@@ -1924,6 +2142,20 @@ async fn release_node_dependents_in_tx(
         .await
         .map_err(sqlx_error)?;
         if released.rows_affected() != 1 {
+            let already_cancelled = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM moa.execution_node_state \
+                 WHERE run_uid = $1 AND node_id = $2 AND node_status = 'cancelled' \
+                   AND total_task_count = 0 AND remaining_dependency_count = 0 \
+                   AND materialization_complete AND aggregate_complete)",
+            )
+            .bind(run.run_uid)
+            .bind(&dependent.id)
+            .fetch_one(conn.as_mut())
+            .await
+            .map_err(sqlx_error)?;
+            if already_cancelled {
+                continue;
+            }
             return Err(Error::InvalidRepositoryData {
                 message: format!(
                     "dependent node `{}` lost its dependency counter",
@@ -2218,6 +2450,10 @@ async fn transition_node_counters_inner(
             updated_node_status = "pending".to_string();
         }
     }
+    // `waiting_reasons_truncated` is derived from the post-update counters rather than
+    // maintained separately. Not every durable wait has a sampleable reason — a WaitingReplan
+    // task has no `WaitingReason` variant at all — so a wait that raises `waiting_task_count`
+    // without appending a sample must still leave the row readable by `run_from_row`.
     let run_updated = sqlx::query(
         "UPDATE moa.execution_run SET ready_task_count = ready_task_count + $2, \
              active_task_count = active_task_count + $3, \
@@ -2232,6 +2468,8 @@ async fn transition_node_counters_inner(
              waiting_input_tenant_admin_task_count = \
                  waiting_input_tenant_admin_task_count + $12, \
              waiting_input_external_task_count = waiting_input_external_task_count + $13, \
+             waiting_reasons_truncated = \
+                 jsonb_array_length(waiting_reasons) < waiting_task_count + $4, \
              last_progress_at = GREATEST(last_progress_at, NOW()), \
              wake_epoch = wake_epoch + 1, updated_at = NOW() \
          WHERE run_uid = $1 AND ready_task_count + $2 >= 0 AND active_task_count + $3 >= 0 \

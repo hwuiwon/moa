@@ -95,8 +95,16 @@ impl WorkerFanInSettledKind {
 }
 
 /// Bounded nonterminal execution phases exported for fleet run counts.
+///
+/// The variants are exactly the thirteen nonterminal `ExecutionRunStatus`
+/// values carried by the durable `execution_run_nonterminal_idx` predicate, in
+/// that order. The mapping is total on purpose: a status with no phase would be
+/// dropped from the census, and `sum(moa_execution_runs)` would quietly stop
+/// equalling the live nonterminal fleet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionRunMetricPhase {
+    /// The displayed plan and estimate await owning-user confirmation.
+    AwaitingConfirmation,
     /// Accepted work waiting for controller activation.
     Queued,
     /// Work currently advancing or running an attempt.
@@ -111,6 +119,8 @@ pub enum ExecutionRunMetricPhase {
     WaitingTimer,
     /// Storage-only wait for an asynchronous external job.
     WaitingExternal,
+    /// Storage-only wait for a compiler-validated plan amendment.
+    WaitingReplan,
     /// A pause has been requested but active work is still settling.
     PauseRequested,
     /// The run is checkpointing and releasing resources before pausing.
@@ -126,6 +136,7 @@ impl ExecutionRunMetricPhase {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::AwaitingConfirmation => "awaiting_confirmation",
             Self::Queued => "queued",
             Self::Running => "running",
             Self::WaitingInput => "waiting_input",
@@ -133,6 +144,7 @@ impl ExecutionRunMetricPhase {
             Self::WaitingSignal => "waiting_signal",
             Self::WaitingTimer => "waiting_timer",
             Self::WaitingExternal => "waiting_external",
+            Self::WaitingReplan => "waiting_replan",
             Self::PauseRequested => "pause_requested",
             Self::Pausing => "pausing",
             Self::Paused => "paused",
@@ -146,8 +158,8 @@ impl ExecutionRunMetricPhase {
 pub enum ExecutionAdmissionResource {
     /// Nonterminal runs that are not fully parked.
     ActiveRuns,
-    /// Task attempts currently holding active-compute reservations.
-    ActiveAttempts,
+    /// Forward and compensation attempts holding active-compute reservations.
+    ActiveTasks,
     /// Runs retained in storage-only waiting or paused states.
     ParkedRuns,
     /// Pending durable trigger rows.
@@ -158,11 +170,16 @@ pub enum ExecutionAdmissionResource {
 
 impl ExecutionAdmissionResource {
     /// Returns the stable low-cardinality resource label.
+    ///
+    /// The labels are exactly the durable
+    /// `moa.execution_capacity_bucket.resource_dimension` discriminators, so an
+    /// operator reading an alert can query the originating bucket row without a
+    /// translation table.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ActiveRuns => "active_runs",
-            Self::ActiveAttempts => "active_attempts",
+            Self::ActiveTasks => "active_tasks",
             Self::ParkedRuns => "parked_runs",
             Self::ScheduledTriggers => "scheduled_triggers",
             Self::ExternalJobs => "external_jobs",
@@ -237,6 +254,10 @@ pub enum SandboxWorkspaceLifecycleOperation {
     Purge,
     /// Apply checkpoint retention and garbage collection.
     Retention,
+    /// Release compute at a continuation boundary while keeping the filesystem.
+    Suspend,
+    /// Keep compute hot at a continuation boundary because suspend is unavailable.
+    Retain,
 }
 
 impl SandboxWorkspaceLifecycleOperation {
@@ -253,6 +274,8 @@ impl SandboxWorkspaceLifecycleOperation {
             Self::Reconcile => "reconcile",
             Self::Purge => "purge",
             Self::Retention => "retention",
+            Self::Suspend => "suspend",
+            Self::Retain => "retain",
         }
     }
 }
@@ -766,15 +789,7 @@ const HISTOGRAM_BOUNDARIES: &[(&str, &[f64])] = &[
         COORDINATION_ACK_DURATION_SECONDS_BUCKETS,
     ),
     (
-        "moa_execution_mutation_run_wake_ack_seconds",
-        COORDINATION_ACK_DURATION_SECONDS_BUCKETS,
-    ),
-    (
         "moa_execution_dispatch_batch_size",
-        EXECUTION_TASK_COUNT_BUCKETS,
-    ),
-    (
-        "moa_execution_owned_in_flight_tasks",
         EXECUTION_TASK_COUNT_BUCKETS,
     ),
     (
@@ -1041,25 +1056,17 @@ pub fn record_worker_terminal_parent_ack(duration: Duration) {
     histogram!("moa_worker_terminal_parent_ack_seconds").record(duration.as_secs_f64());
 }
 
-/// Records persisted-execution-mutation-to-run-wake acknowledgement latency.
-///
-/// The duration begins after the user-facing mutation commits and ends when
-/// the exact `ExecutionRun` wake is acknowledged by Restate.
-pub fn record_execution_mutation_run_wake_ack(duration: Duration) {
-    histogram!("moa_execution_mutation_run_wake_ack_seconds").record(duration.as_secs_f64());
-}
-
-/// Records how many ready execution tasks were dispatched in one bounded refill.
+/// Records how many ready execution tasks the dispatcher admitted in one
+/// bounded refill.
 pub fn record_execution_dispatch_batch_size(size: usize) {
     histogram!("moa_execution_dispatch_batch_size").record(size as f64);
 }
 
-/// Records the number of task calls currently owned by one `ExecutionRun`.
-pub fn record_execution_owned_in_flight_tasks(count: usize) {
-    histogram!("moa_execution_owned_in_flight_tasks").record(count as f64);
-}
-
 /// Sets the current fleet count for one bounded nonterminal execution phase.
+///
+/// Callers must record every phase on each fleet snapshot including the healthy
+/// zero, so a phase that drains reports zero rather than keeping its last value
+/// forever.
 pub fn record_execution_run_phase(phase: ExecutionRunMetricPhase, count: u64) {
     gauge!("moa_execution_runs", "phase" => phase.as_str()).set(count as f64);
 }
@@ -1070,37 +1077,30 @@ pub fn record_execution_oldest_ready_age(age: Duration) {
 }
 
 /// Sets the number of nonterminal runs whose absolute deadline has elapsed.
+///
+/// This is the exact-deadline invariant guard, so callers must record it on
+/// every fleet snapshot including the healthy zero.
 pub fn record_execution_overdue_deadlines(count: u64) {
     gauge!("moa_execution_overdue_deadlines").set(count as f64);
 }
 
 /// Sets trigger delivery lag, capped depth, and sample-completeness from one fleet snapshot.
+///
+/// Triggers carry no dead-letter state: claiming and retry exhaustion live entirely on
+/// the dispatch outbox, so only the due sample is observed here.
 pub fn record_execution_trigger_queue(
     lag: Duration,
     due_triggers: u64,
     due_sample_saturated: bool,
-    dead_letters: u64,
-    dead_letter_sample_saturated: bool,
 ) {
     gauge!("moa_execution_trigger_lag_seconds").set(lag.as_secs_f64());
     gauge!("moa_execution_trigger_due").set(due_triggers as f64);
-    gauge!("moa_execution_trigger_dead_letters").set(dead_letters as f64);
     gauge!(
         "moa_execution_queue_sample_saturated",
         "queue" => "trigger",
         "sample" => "due"
     )
     .set(if due_sample_saturated { 1.0 } else { 0.0 });
-    gauge!(
-        "moa_execution_queue_sample_saturated",
-        "queue" => "trigger",
-        "sample" => "dead_letter"
-    )
-    .set(if dead_letter_sample_saturated {
-        1.0
-    } else {
-        0.0
-    });
 }
 
 /// Sets outbox delivery lag, capped depth, and sample-completeness from one fleet snapshot.
@@ -1133,11 +1133,20 @@ pub fn record_execution_outbox_queue(
 }
 
 /// Sets the age of the oldest active task-attempt lease.
+///
+/// Callers must record this on every fleet snapshot, using `Duration::ZERO`
+/// when no attempt is active. A gauge only written while work exists keeps its
+/// last value forever once the fleet drains, so its alert would page on a queue
+/// that emptied hours earlier.
 pub fn record_execution_active_attempt_oldest_age(age: Duration) {
     gauge!("moa_execution_active_attempt_oldest_age_seconds").set(age.as_secs_f64());
 }
 
 /// Sets the age of the oldest nonterminal asynchronous external job.
+///
+/// Callers must record this on every fleet snapshot, using `Duration::ZERO`
+/// when no external job is outstanding, so the alert can tell a quiet fleet
+/// from a stopped producer.
 pub fn record_execution_external_job_oldest_age(age: Duration) {
     gauge!("moa_execution_external_job_oldest_age_seconds").set(age.as_secs_f64());
 }
@@ -1188,21 +1197,33 @@ pub fn record_execution_retention(ready: bool, last_success_age: Option<Duration
         .set(last_success_age.map_or(f64::INFINITY, |duration| duration.as_secs_f64()));
 }
 
-/// Sets draining Restate deployment age and resource-cost snapshots.
+/// Sets the draining Restate deployment snapshot: how many superseded revisions
+/// still hold work, how much work is left, and how long the oldest has drained.
 ///
-/// Replica-hours is a gauge because the maintenance owner derives the complete
-/// current value from Kubernetes observations rather than incrementing it from
-/// potentially duplicated process-local samples.
+/// `blocking_invocations` counts non-terminal invocations still pinned to, or
+/// last attempted on, a draining deployment. That is the same predicate that
+/// refuses deregistration in `bootstrap::active_invocations_query`, so the
+/// gauge reads as work remaining before the old revision can be removed; zero
+/// means the drain finished and the revision is merely un-deregistered.
+///
+/// `oldest_drain_age` is measured from supersession, not from registration. A
+/// long-lived healthy deployment is registered far earlier than it is
+/// superseded, so registration age would put nearly every revision instantly
+/// past the alert threshold.
+///
+/// All three are unlabeled process-level gauges: deployment IDs stay in-process
+/// for the supersession sort. Callers must record every snapshot including the
+/// fully drained zero, or the `absent()`-guarded drain alert cannot tell a
+/// finished drain from a stopped producer.
 pub fn record_restate_draining_deployments(
     deployments: u64,
-    replicas: u64,
-    oldest_age: Duration,
-    replica_hours: f64,
+    blocking_invocations: u64,
+    oldest_drain_age: Duration,
 ) {
     gauge!("moa_restate_draining_deployments").set(deployments as f64);
-    gauge!("moa_restate_draining_deployment_replicas").set(replicas as f64);
-    gauge!("moa_restate_draining_deployment_oldest_age_seconds").set(oldest_age.as_secs_f64());
-    gauge!("moa_restate_draining_deployment_replica_hours").set(replica_hours.max(0.0));
+    gauge!("moa_restate_draining_deployment_blocking_invocations").set(blocking_invocations as f64);
+    gauge!("moa_restate_draining_deployment_oldest_age_seconds")
+        .set(oldest_drain_age.as_secs_f64());
 }
 
 /// Records whether one worker terminal delivery was accepted or deduplicated.
@@ -1366,8 +1387,11 @@ pub fn record_sandbox_workspace_active_hands(provider: SandboxWorkspaceProviderK
 
 /// Sets the number of parked execution tasks that still own active compute.
 ///
-/// This must remain zero. The aggregate intentionally carries no run, task, or
-/// tenant label so an invariant check cannot create an unbounded series.
+/// This must remain zero: it is the only automated guard on the invariant that
+/// a parked run owns no sandbox. The aggregate intentionally carries no run,
+/// task, or tenant label so an invariant check cannot create an unbounded
+/// series, and callers must record it on every fleet snapshot including the
+/// healthy zero so its alert can tell "no violations" from "no producer".
 pub fn record_sandbox_workspace_parked_tasks_with_active_hands(count: u64) {
     gauge!("moa_sandbox_workspace_parked_tasks_with_active_hands").set(count as f64);
 }
@@ -1785,16 +1809,8 @@ fn register_metric_descriptions() {
         "Worker-terminal-to-parent acknowledgement latency in seconds."
     );
     describe_histogram!(
-        "moa_execution_mutation_run_wake_ack_seconds",
-        "Persisted execution mutation to ExecutionRun wake acknowledgement latency in seconds."
-    );
-    describe_histogram!(
         "moa_execution_dispatch_batch_size",
-        "Ready execution tasks dispatched by one bounded ExecutionRun refill."
-    );
-    describe_histogram!(
-        "moa_execution_owned_in_flight_tasks",
-        "Task calls owned by an ExecutionRun after a bounded dispatch refill."
+        "Ready execution tasks admitted by one bounded execution dispatcher refill."
     );
     describe_gauge!(
         "moa_execution_runs",
@@ -1815,10 +1831,6 @@ fn register_metric_descriptions() {
     describe_gauge!(
         "moa_execution_trigger_due",
         "Due execution triggers observed in the bounded fleet queue-health sample."
-    );
-    describe_gauge!(
-        "moa_execution_trigger_dead_letters",
-        "Execution triggers currently held in dead-letter state."
     );
     describe_gauge!(
         "moa_execution_outbox_lag_seconds",
@@ -1873,16 +1885,12 @@ fn register_metric_descriptions() {
         "Restate service deployment revisions still draining active invocations."
     );
     describe_gauge!(
-        "moa_restate_draining_deployment_replicas",
-        "Kubernetes replicas retained by draining Restate deployment revisions."
+        "moa_restate_draining_deployment_blocking_invocations",
+        "Non-terminal invocations still blocking retirement of a draining Restate revision."
     );
     describe_gauge!(
         "moa_restate_draining_deployment_oldest_age_seconds",
-        "Age in seconds of the oldest draining Restate deployment revision."
-    );
-    describe_gauge!(
-        "moa_restate_draining_deployment_replica_hours",
-        "Replica-hours currently attributable to draining Restate revisions."
+        "Seconds since the oldest still-draining Restate deployment revision was superseded."
     );
     describe_counter!(
         "moa_worker_terminal_deliveries_total",
@@ -2098,8 +2106,6 @@ mod tests {
             "moa_approval_wait_seconds",
             "moa_cache_hit_rate",
             "moa_execution_dispatch_batch_size",
-            "moa_execution_mutation_run_wake_ack_seconds",
-            "moa_execution_owned_in_flight_tasks",
             "moa_knowledge_ingestion_step_duration_seconds",
             "moa_lineage_durable_append_seconds",
             "moa_retrieval_cache_hit_seconds",
@@ -2154,9 +2160,7 @@ mod tests {
         histogram!(SESSION_EVENT_APPEND_PHASE_METRIC, "phase" => "commit").record(0.002);
         histogram!("moa_turn_latency_seconds").record(0.025);
         record_worker_terminal_parent_ack(Duration::from_millis(4));
-        record_execution_mutation_run_wake_ack(Duration::from_millis(5));
         record_execution_dispatch_batch_size(32);
-        record_execution_owned_in_flight_tasks(64);
         provider
             .force_flush()
             .expect("in-memory metric exporter should flush");
@@ -2174,9 +2178,7 @@ mod tests {
         for metric in [
             "moa_turn_latency_seconds",
             "moa_worker_terminal_parent_ack_seconds",
-            "moa_execution_mutation_run_wake_ack_seconds",
             "moa_execution_dispatch_batch_size",
-            "moa_execution_owned_in_flight_tasks",
         ] {
             assert!(
                 names.contains(metric),
@@ -2199,9 +2201,7 @@ mod tests {
         metrics::with_local_recorder(&recorder, || {
             register_metric_descriptions();
             record_worker_terminal_parent_ack(Duration::from_millis(4));
-            record_execution_mutation_run_wake_ack(Duration::from_millis(5));
             record_execution_dispatch_batch_size(32);
-            record_execution_owned_in_flight_tasks(64);
             record_worker_terminal_delivery(WorkerTerminalDeliveryResult::Accepted);
             record_worker_terminal_delivery(WorkerTerminalDeliveryResult::Duplicate);
             record_worker_fan_in_settled(WorkerFanInSettledKind::Completed);
@@ -2211,9 +2211,7 @@ mod tests {
 
         let coordination_metrics = [
             "moa_worker_terminal_parent_ack_seconds",
-            "moa_execution_mutation_run_wake_ack_seconds",
             "moa_execution_dispatch_batch_size",
-            "moa_execution_owned_in_flight_tasks",
             "moa_worker_terminal_deliveries_total",
             "moa_worker_fan_in_settled_total",
         ];
@@ -2261,13 +2259,17 @@ mod tests {
 
     #[test]
     fn long_horizon_metrics_export_descriptions_and_only_bounded_labels() {
-        // Pins: execution, drain, and sandbox-yield health reaches production
-        // exporters without tenant, run, task, deployment-version, or provider-account IDs.
+        // Pins: execution fleet health, drain cost, and the sandbox-yield and
+        // parked-task hand invariants reach production exporters without tenant,
+        // run, task, deployment-version, or provider-account IDs. That each
+        // recorder also has a caller outside this crate is pinned separately by
+        // `validate-observability.sh`, not by this test.
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
             register_metric_descriptions();
             for phase in [
+                ExecutionRunMetricPhase::AwaitingConfirmation,
                 ExecutionRunMetricPhase::Queued,
                 ExecutionRunMetricPhase::Running,
                 ExecutionRunMetricPhase::WaitingInput,
@@ -2275,6 +2277,7 @@ mod tests {
                 ExecutionRunMetricPhase::WaitingSignal,
                 ExecutionRunMetricPhase::WaitingTimer,
                 ExecutionRunMetricPhase::WaitingExternal,
+                ExecutionRunMetricPhase::WaitingReplan,
                 ExecutionRunMetricPhase::PauseRequested,
                 ExecutionRunMetricPhase::Pausing,
                 ExecutionRunMetricPhase::Paused,
@@ -2284,12 +2287,12 @@ mod tests {
             }
             record_execution_oldest_ready_age(Duration::from_secs(31));
             record_execution_overdue_deadlines(2);
-            record_execution_trigger_queue(Duration::from_secs(7), 11, true, 1, false);
+            record_execution_trigger_queue(Duration::from_secs(7), 11, true);
             record_execution_outbox_queue(Duration::from_secs(8), 12, false, 1, true);
             record_execution_active_attempt_oldest_age(Duration::from_secs(61));
             record_execution_external_job_oldest_age(Duration::from_secs(62));
             record_execution_admission_utilization(
-                ExecutionAdmissionResource::ActiveAttempts,
+                ExecutionAdmissionResource::ActiveTasks,
                 ExecutionAdmissionScope::Fleet,
                 0.75,
             );
@@ -2303,7 +2306,7 @@ mod tests {
             record_execution_maintenance(false, None);
             record_execution_retention(true, Some(Duration::from_secs(3_600)));
             record_execution_retention(false, None);
-            record_restate_draining_deployments(2, 3, Duration::from_secs(3_600), 4.5);
+            record_restate_draining_deployments(2, 17, Duration::from_secs(3_600));
             record_sandbox_workspace_active_hands(SandboxWorkspaceProviderKind::E2b, 2);
             record_sandbox_workspace_parked_tasks_with_active_hands(0);
             record_sandbox_workspace_restore(SandboxWorkspaceProviderKind::E2b);
@@ -2320,7 +2323,6 @@ mod tests {
             "moa_execution_overdue_deadlines",
             "moa_execution_trigger_lag_seconds",
             "moa_execution_trigger_due",
-            "moa_execution_trigger_dead_letters",
             "moa_execution_outbox_lag_seconds",
             "moa_execution_outbox_claimable",
             "moa_execution_outbox_dead_letters",
@@ -2334,9 +2336,8 @@ mod tests {
             "moa_execution_retention_ready",
             "moa_execution_retention_last_success_age_seconds",
             "moa_restate_draining_deployments",
-            "moa_restate_draining_deployment_replicas",
+            "moa_restate_draining_deployment_blocking_invocations",
             "moa_restate_draining_deployment_oldest_age_seconds",
-            "moa_restate_draining_deployment_replica_hours",
             "moa_sandbox_workspace_active_hands",
             "moa_sandbox_workspace_parked_tasks_with_active_hands",
             "moa_sandbox_workspace_restores_total",
@@ -2367,8 +2368,13 @@ mod tests {
         );
 
         for label in [
+            // The census is only total if the two statuses that carry no active
+            // compute still get a phase; dropping either desyncs
+            // `sum(moa_execution_runs)` from the durable nonterminal predicate.
+            "phase=\"awaiting_confirmation\"",
+            "phase=\"waiting_replan\"",
             "phase=\"waiting_timer\"",
-            "resource=\"active_attempts\"",
+            "resource=\"active_tasks\"",
             "scope=\"fleet\"",
             "scope=\"tenant_peak\"",
             "provider_kind=\"e2b\"",

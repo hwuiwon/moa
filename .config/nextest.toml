@@ -107,6 +107,20 @@ junit.path = "target/nextest/long-horizon-execution/junit.xml"
 default-filter = 'package(moa-orchestrator) & binary(/^long_horizon_execution_service_e2e$/)'
 slow-timeout = { period = "60s", terminate-after = 10 }
 
+# The thousand-common-wake case deliberately spends its first three minutes
+# admitting and parking 1,000 runs before one shared absolute wake, then drains
+# them in ~32 fleet-capped waves. That budget exceeds the lane's own ten-minute
+# ceiling, so nextest was terminating the single gate that proves fleet cap and
+# WFQ fairness instead of letting it fail on one of its own bounded phases.
+# Every phase inside the case is bounded well below this ceiling, so a real
+# regression still reports which phase stalled.
+[[profile.long-horizon-execution.overrides]]
+filter = '''
+binary(/^long_horizon_execution_service_e2e$/)
+  & test(/one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_age/)
+'''
+slow-timeout = { period = "120s", terminate-after = 10 }
+
 # Small deterministic crash/replay and worker-deadline cases run serially on
 # pull requests. Large fan-out, A/B rollout, node-loss, and chaos scenarios
 # remain in their existing local/nightly lanes.

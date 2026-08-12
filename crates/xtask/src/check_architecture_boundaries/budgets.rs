@@ -152,11 +152,11 @@ const LOC_BUDGETS: &[LocBudget] = &[
         reason: "compiler validation is the largest focused compiler module after estimate, amendment, and test extraction",
     },
     LocBudget {
-        label: "execution interpreter terminal decisions",
-        path: "crates/moa-execution/src/interpreter/terminal.rs",
+        label: "execution interpreter capability catalog validation",
+        path: "crates/moa-execution/src/interpreter/catalog.rs",
         scope: LocScope::File,
         max_lines: 450,
-        reason: "terminal interpretation stays separate from projection, reservation, materialization, and aggregation",
+        reason: "catalog validation stays separate from materialization and reservation; the whole-plan scheduler that owned terminal/aggregate/projection interpretation was deleted with the bounded-activation rewrite",
     },
     LocBudget {
         label: "artifact validation shell",
