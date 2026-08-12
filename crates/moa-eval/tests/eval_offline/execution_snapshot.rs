@@ -9,12 +9,15 @@ use moa_artifacts::execution_plan::{
     ExecutionPlanDefinition, ExecutionRequirement, ExecutionTaskOutcome, ExecutionTaskResult,
     ExecutionUsage, RetryPolicy,
 };
-use moa_core::types::{
-    execution_planning::{
-        ExecutionPlannerCallKind, ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelope,
-        ExecutionPlanningAuditPayload, ExecutionSourceProvenance,
+use moa_core::{
+    traits::{Identity, IdentityType},
+    types::{
+        execution_planning::{
+            ExecutionPlannerCallKind, ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelope,
+            ExecutionPlanningAuditPayload, ExecutionSourceProvenance,
+        },
+        identifiers::{SessionId, TenantId, UserId},
     },
-    identifiers::{SessionId, TenantId, UserId},
 };
 use moa_eval::execution::{
     ExecutionEvalSnapshot, ExecutionHarnessEvidence, ExecutionSessionEventSummary,
@@ -25,7 +28,10 @@ use moa_execution::{
     ExecutionValidationReport,
     budget::BudgetLedger,
     compiler::CanonicalExecutionPlan,
-    repository::{ExecutionRunRecord, ExecutionSchedulingSnapshot, ExecutionTaskRecord},
+    repository::{
+        ExecutionActivationState, ExecutionAttemptState, ExecutionRunRecord,
+        ExecutionSchedulingSnapshot, ExecutionTaskRecord,
+    },
     state::{
         ExecutionNodeStatus, ExecutionProjection, ExecutionRunStatus, ExecutionSourceKind,
         ExecutionTaskId, ExecutionTaskProjection, ExecutionTaskStatus, ExecutionTerminalCause,
@@ -193,6 +199,13 @@ fn runtime_parts(
         planning_context_uid: Uuid::from_u128(0x48f8_f1f3_6a67_c90a_7f8f_2f2f_57f5_c444),
         planning_context_hash: ExecutionHash::from_bytes([4; 32]),
         owner_user_id: UserId::new("execution-eval-user"),
+        admitted_identity: Identity {
+            identity_type: IdentityType::Operator,
+            id: Uuid::from_u128(0x38f8_f1f3_6a67_c90a_7f8f_2f2f_57f5_c333),
+            tenant_id,
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        },
         goal: goal(),
         initial_plan: plan.clone(),
         active_plan: plan.clone(),
@@ -227,6 +240,29 @@ fn runtime_parts(
         terminal_evidence: terminal.2,
         terminal_reason: terminal.3,
         status: run_status,
+        controller_generation: 1,
+        activation_state: if run_status.is_terminal() {
+            ExecutionActivationState::Terminal
+        } else {
+            ExecutionActivationState::Advancing
+        },
+        next_wake_at: None,
+        waiting_since: None,
+        last_progress_at: now,
+        pause_requested_at: None,
+        paused_at: None,
+        ready_task_count: 0,
+        active_task_count: 0,
+        waiting_task_count: 0,
+        waiting_input_task_count: 0,
+        waiting_review_task_count: 0,
+        waiting_signal_task_count: 0,
+        waiting_timer_task_count: 0,
+        waiting_external_task_count: 0,
+        waiting_replan_task_count: 0,
+        waiting_input_user_task_count: 0,
+        waiting_input_tenant_admin_task_count: 0,
+        waiting_input_external_task_count: 0,
         approved_budget: approved_budget.clone(),
         reserved: ExecutionEstimate::default(),
         consumed: estimate,
@@ -236,6 +272,7 @@ fn runtime_parts(
         progress_failed_tasks: failed_tasks,
         progress_cancelled_tasks: cancelled_tasks,
         waiting_reasons: Vec::new(),
+        waiting_reasons_truncated: false,
         wake_epoch: 1,
         processed_wake_epoch: 1,
         next_compensation_sequence: 1,
@@ -359,6 +396,20 @@ fn task_record(run_uid: Uuid, item_key: &str, status: ExecutionTaskStatus) -> Ex
         status,
         attempt: 1,
         generation: 1,
+        attempt_generation: 1,
+        attempt_state: if terminal {
+            ExecutionAttemptState::Terminal
+        } else {
+            ExecutionAttemptState::Running
+        },
+        attempt_started_at: Some(now),
+        last_progress_at: now,
+        attempt_deadline_at: None,
+        waiting_since: None,
+        ready_at: None,
+        external_job_uid: None,
+        active_dispatch_uid: None,
+        dispatch_sequence: 0,
         input: json!({ "issuer": item_key, "secret": RAW_TASK_SECRET }),
         resume_input_history: Vec::new(),
         kind: LogicalTaskKind::Capability {
@@ -427,6 +478,12 @@ fn canonical_plan(catalog_hash: ExecutionHash) -> CanonicalExecutionPlan {
     CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::At {
+                    at: fixed_time() + chrono::TimeDelta::hours(1),
+                },
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+            },
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
             nodes: vec![moa_artifacts::execution_plan::ExecutionNode {
@@ -474,7 +531,7 @@ fn budget() -> ExecutionBudgetLimit {
         max_tasks: Some(10),
         max_tool_calls: Some(10),
         max_retrieved_bytes: Some(10),
-        deadline_at: None,
+        deadline_at: Some(fixed_time() + chrono::TimeDelta::days(1)),
     }
 }
 

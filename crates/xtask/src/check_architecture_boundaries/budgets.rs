@@ -29,8 +29,8 @@ const LOC_BUDGETS: &[LocBudget] = &[
         label: "moa-core Rust source",
         path: "crates/moa-core/src",
         scope: LocScope::RustTree,
-        max_lines: 25_836,
-        reason: "Unified Execute routing adds shared Respond/Execute/NeedsInput decisions, Inline/Durable strategies, classifier provenance and configuration, normalized planning audits, session events, and observability DTOs without rebuilding the moa-core root facade",
+        max_lines: 26_291,
+        reason: "long-horizon execution adds shared durable execution identities and events, typed asynchronous tool ownership, and provider-neutral sandbox checkpoint and release contracts without rebuilding the moa-core root facade",
     },
     LocBudget {
         label: "public edge route ladder",
@@ -127,8 +127,8 @@ const LOC_BUDGETS: &[LocBudget] = &[
         label: "execution service shell",
         path: "crates/moa-orchestrator/src/services/execution.rs",
         scope: LocScope::File,
-        max_lines: 250,
-        reason: "the execution Restate surface delegates to focused handlers, capability catalog, planning context, and support modules",
+        max_lines: 263,
+        reason: "the execution Restate trait and DTO shell adds the authorized pause/resume public contract while delegating behavior to focused handlers, capability catalog, planning context, and support modules",
     },
     LocBudget {
         label: "execution service handlers",
@@ -218,8 +218,8 @@ const LOC_BUDGETS: &[LocBudget] = &[
         label: "execution lifecycle DB behavior module",
         path: "crates/moa-execution/tests/execution_db/scope_and_lifecycle_db.rs",
         scope: LocScope::File,
-        max_lines: 1_500,
-        reason: "execution scope and lifecycle scenarios remain in their concrete owner instead of regrowing the shared execution DB harness",
+        max_lines: 1_514,
+        reason: "execution scope and lifecycle scenarios add exact durable-admission and session-fence Pins in their concrete behavior owner instead of regrowing the shared execution DB harness",
     },
     LocBudget {
         label: "connector Restate service shell",

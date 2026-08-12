@@ -490,7 +490,18 @@ fn sse_event_name(event: &Event) -> &'static str {
         Event::WorkerHeartbeatStale { .. } => "worker_stale",
         Event::BrainResponse { .. } => "response",
         Event::ExecutionRunStarted(_) => "execution_started",
-        Event::ExecutionProgress(_) => "execution_progress",
+        Event::ExecutionProgress(progress) => match progress.phase {
+            moa_core::events::ExecutionProgressPhase::WaitingExternal => "execution_external_wait",
+            moa_core::events::ExecutionProgressPhase::PauseRequested
+            | moa_core::events::ExecutionProgressPhase::Pausing
+            | moa_core::events::ExecutionProgressPhase::Paused => "execution_pause",
+            moa_core::events::ExecutionProgressPhase::WaitingInput => "execution_input_wait",
+            moa_core::events::ExecutionProgressPhase::WaitingReview => "execution_review_wait",
+            moa_core::events::ExecutionProgressPhase::WaitingSignal => "execution_signal_wait",
+            moa_core::events::ExecutionProgressPhase::WaitingTimer => "execution_timer_wait",
+            moa_core::events::ExecutionProgressPhase::StaleWork => "execution_stale",
+            moa_core::events::ExecutionProgressPhase::Running => "execution_progress",
+        },
         Event::ExecutionInputRequired(_) => "execution_input_request",
         Event::ExecutionCompleted(_) => "execution_completed",
         Event::ExecutionFailed { .. } | Event::ExecutionCancelled(_) => "execution_failed",
@@ -727,13 +738,66 @@ mod tests {
     }
 
     #[test]
-    fn execution_delivery_events_use_only_the_five_stable_sse_names() {
-        // Pins: all durable run delivery frames use the public five-name contract; cancellation
-        // is a typed failed frame and synthesis retargets stream completion without a sixth name.
+    fn parked_execution_progress_uses_distinct_public_frames() {
+        // Pins: clients can distinguish timer/signal waits, drained pauses, and provider-owned
+        // asynchronous work without parsing a free-form status string.
+        let run_uid = Uuid::from_u128(80);
+        let progress = |phase| {
+            Event::ExecutionProgress(moa_core::events::ExecutionProgress {
+                run_uid,
+                originating_user_sequence_num: 1,
+                plan_revision: 1,
+                status: "deliberately_unparsed".to_string(),
+                phase,
+                waiting_since: Some(Utc::now()),
+                next_wake_at: None,
+                last_progress_at: Utc::now(),
+                external_job_uid: None,
+                ready_tasks: 0,
+                active_tasks: 0,
+                parked_tasks: 1,
+                blocker_audience: Some(moa_core::events::ExecutionBlockerAudience::System),
+                remaining_budget: moa_core::events::ExecutionRemainingBudget {
+                    cost_microusd: Some(10),
+                    tokens: Some(100),
+                    tasks: Some(1),
+                    tool_calls: Some(1),
+                    retrieved_bytes: Some(1_000),
+                    deadline_at: None,
+                },
+                total: 1,
+                completed: 0,
+                failed: 0,
+                cancelled: 0,
+            })
+        };
+
+        assert_eq!(
+            sse_event_name(&progress(
+                moa_core::events::ExecutionProgressPhase::WaitingTimer
+            )),
+            "execution_timer_wait"
+        );
+        assert_eq!(
+            sse_event_name(&progress(moa_core::events::ExecutionProgressPhase::Paused)),
+            "execution_pause"
+        );
+        assert_eq!(
+            sse_event_name(&progress(
+                moa_core::events::ExecutionProgressPhase::WaitingExternal
+            )),
+            "execution_external_wait"
+        );
+    }
+
+    #[test]
+    fn execution_terminal_and_active_delivery_events_use_typed_sse_names() {
+        // Pins: terminal delivery names stay stable while active progress is separately refined by
+        // parked-state phase; cancellation remains a typed failed frame.
         use moa_core::events::{
             ExecutionFailureDisposition, ExecutionInputRequired, ExecutionProgress,
-            ExecutionRunEvidenceRef, ExecutionSynthesisRequested, ExecutionTaskResultsRef,
-            ExecutionTerminalSummary,
+            ExecutionProgressPhase, ExecutionRunEvidenceRef, ExecutionSynthesisRequested,
+            ExecutionTaskResultsRef, ExecutionTerminalSummary,
         };
 
         let run_uid = Uuid::from_u128(81);
@@ -761,6 +825,23 @@ mod tests {
                     originating_user_sequence_num: 7,
                     plan_revision: 2,
                     status: "running".to_string(),
+                    phase: ExecutionProgressPhase::Running,
+                    waiting_since: None,
+                    next_wake_at: None,
+                    last_progress_at: Utc::now(),
+                    external_job_uid: None,
+                    ready_tasks: 3,
+                    active_tasks: 1,
+                    parked_tasks: 0,
+                    blocker_audience: None,
+                    remaining_budget: moa_core::events::ExecutionRemainingBudget {
+                        cost_microusd: Some(50),
+                        tokens: Some(500),
+                        tasks: Some(5),
+                        tool_calls: Some(10),
+                        retrieved_bytes: Some(5_000),
+                        deadline_at: None,
+                    },
                     total: 9,
                     completed: 4,
                     failed: 1,
@@ -988,6 +1069,7 @@ mod tests {
                     run_uid: Uuid::from_u128(90),
                     task_uid: Uuid::from_u128(91),
                     generation: 1,
+                    attempt_generation: 2,
                 },
             }),
         };

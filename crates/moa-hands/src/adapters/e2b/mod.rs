@@ -67,6 +67,7 @@ use crate::tools::{bash, file_outline, file_read, grep};
 use crate::core::provider_credentials::{
     ProviderCredentialSource, ProviderEndpoint, ProviderHttpAttempt, ProviderSandboxAttempt,
 };
+use crate::core::sandbox_workspace::capacity::PostgresWorkspaceCapacityRepository;
 use crate::core::sandbox_workspace::checkpoint::revision::{
     next_workspace_revision, required_current_revision,
 };
@@ -115,6 +116,7 @@ pub struct E2BHandProvider {
     credentials: Arc<dyn ProviderCredentialSource>,
     sandbox_base_url_override: Option<String>,
     checkpoint_store: Option<Arc<CheckpointObjectStore>>,
+    checkpoint_capacity: Option<Arc<PostgresWorkspaceCapacityRepository>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +146,7 @@ impl E2BHandProvider {
             credentials,
             sandbox_base_url_override: None,
             checkpoint_store: None,
+            checkpoint_capacity: None,
         }
     }
 
@@ -151,6 +154,16 @@ impl E2BHandProvider {
     #[must_use]
     pub fn with_checkpoint_store(mut self, checkpoint_store: Arc<CheckpointObjectStore>) -> Self {
         self.checkpoint_store = Some(checkpoint_store);
+        self
+    }
+
+    /// Installs provider-neutral pre-publication checkpoint admission.
+    #[must_use]
+    pub fn with_checkpoint_capacity(
+        mut self,
+        capacity: Arc<PostgresWorkspaceCapacityRepository>,
+    ) -> Self {
+        self.checkpoint_capacity = Some(capacity);
         self
     }
 

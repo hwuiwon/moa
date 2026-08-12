@@ -4,12 +4,13 @@ use super::capability_catalog::{
     build_capability_response, build_skill_regression_compile_authority, single_tool_estimate,
 };
 use super::planning_context::{
-    PlanningSkillContext, build_planning_skill_context, skill_revision_ref,
+    PlanningSkillContext, build_planning_skill_context, capped_planning_deadline,
+    skill_revision_ref,
 };
 use super::start::validate_start_source_provenance;
 use super::support::{
-    durable_amendment_operation_fingerprints, durable_failure_fingerprint_counts,
-    persisted_input_audience, validate_external_wait_payload,
+    durable_amendment_operation_fingerprints, persisted_input_audience,
+    validate_external_wait_payload,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,9 +35,7 @@ use moa_execution::{
     capability::{amendment_hash, amendment_operations_fingerprint},
     replan::{
         ReplanDecision, ReplanLoopEvaluationRequest, ReplanStopReason, evaluate_replan_loop_stop,
-        failure_fingerprint,
     },
-    state::FailureFingerprintInput,
     wire::PinnedExecutionTemplate,
 };
 use moa_hands::{McpDiscoveredTool, ToolExecution, ToolRegistry};
@@ -46,6 +45,38 @@ use moa_test_support::fixture_capability::{
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+#[test]
+fn planning_deadline_preserves_authorized_bound_and_caps_configured_horizon_offline() {
+    // Pins: admission freezes the shorter of caller authority and the configured maximum horizon,
+    // and never admits an already-expired deadline.
+    let admitted_at = chrono::DateTime::parse_from_rfc3339("2026-08-11T12:00:00Z")
+        .expect("fixture timestamp parses")
+        .with_timezone(&Utc);
+    let authorized_shorter = admitted_at + chrono::TimeDelta::hours(2);
+    assert_eq!(
+        capped_planning_deadline(admitted_at, authorized_shorter, 86_400),
+        Ok(authorized_shorter)
+    );
+
+    let authorized_longer = admitted_at + chrono::TimeDelta::days(7);
+    assert_eq!(
+        capped_planning_deadline(admitted_at, authorized_longer, 86_400),
+        Ok(admitted_at + chrono::TimeDelta::days(1))
+    );
+    assert_eq!(
+        capped_planning_deadline(admitted_at, admitted_at, 86_400),
+        Err("execution planning deadline must be later than admission time")
+    );
+    assert_eq!(
+        capped_planning_deadline(admitted_at, authorized_longer, u64::MAX),
+        Err("execution maximum horizon does not fit the timestamp range")
+    );
+    assert_eq!(
+        capped_planning_deadline(admitted_at, authorized_longer, i64::MAX as u64),
+        Err("execution maximum horizon does not fit the timestamp range")
+    );
+}
 
 #[test]
 fn tool_estimate_reserves_serialized_output_bytes_from_token_budget() {
@@ -229,6 +260,13 @@ fn skill_revision(name: &str, revision_uid: u128) -> StoredArtifactRevision {
                     plan: ExecutionPlanDefinition {
                         cancel_policy:
                             moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+                        input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+                            expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                                delay_seconds: 86_400,
+                            },
+                            on_expiry:
+                                moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                        },
                         input_schema: json!({"type": "object"}),
                         output_schema: json!({"type": "object"}),
                         nodes: Vec::new(),
@@ -596,6 +634,12 @@ fn accepted_turn_requires_skill_template_provenance_from_planning_snapshot() {
             },
             plan: ExecutionPlanDefinition {
                 cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+                input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+                    expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                        delay_seconds: 86_400,
+                    },
+                    on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                },
                 input_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
                 nodes: Vec::new(),
@@ -671,6 +715,12 @@ fn pinned_execution_template(
             },
             plan: ExecutionPlanDefinition {
                 cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+                input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+                    expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                        delay_seconds: 86_400,
+                    },
+                    on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+                },
                 input_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
                 nodes: Vec::new(),
@@ -955,7 +1005,8 @@ fn capability_catalog_uses_live_execution_metadata_and_omits_non_invocable_decla
     // source variant contributing a name from the wrong namespace — which
     // type-checks, and fails only when a live run dispatches it.
     for capability in &response.catalog.capabilities {
-        let Ok(dispatch_name) = crate::workflows::execution_task::capability_tool_name(capability)
+        let Ok(dispatch_name) =
+            crate::workflows::execution_task_attempt::capability_tool_name(capability)
         else {
             continue;
         };
@@ -1127,33 +1178,6 @@ fn execution_external_wait_payload_is_validated_against_node_schema() {
         validate_external_wait_payload(&plan, "review", &Value::String("bypass".to_string()))
             .is_err(),
         "schema-invalid caller output must be rejected"
-    );
-}
-
-#[test]
-fn replan_failure_counts_include_append_only_superseded_history() {
-    // Pins: superseding a NeedsReplan task cannot erase its normalized
-    // failure occurrence from the next amendment stop evaluation.
-    let failure = FailureFingerprintInput {
-        class: moa_artifacts::execution_plan::ExecutionFailureClass::Terminal,
-        node_id: "collect".to_string(),
-        capability_ref: None,
-        message: " Source   Unavailable ".to_string(),
-    };
-    let fingerprint = failure_fingerprint(&failure).expect("failure should hash");
-    let history = vec![
-        json!({
-            "failure_fingerprint": fingerprint,
-            "failure_fingerprint_count": 1
-        }),
-        json!({
-            "failure_fingerprint": fingerprint,
-            "failure_fingerprint_count": 2
-        }),
-    ];
-    assert_eq!(
-        durable_failure_fingerprint_counts(&history),
-        [(fingerprint, 2)].into_iter().collect()
     );
 }
 

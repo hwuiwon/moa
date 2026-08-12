@@ -14,8 +14,8 @@
 //! is never returned to `Active`: a sandbox the reaper decided to destroy is
 //! not a sandbox anyone should get back.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
@@ -30,12 +30,14 @@ use moa_core::{
 use moa_db::ScopedConn;
 use sqlx::{PgConnection, PgPool, Row};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::leases::{
     HandLeaseWorkspaceAttachment, LeaseHandle, PROVISIONING_EMPTY_CONFIRMATION,
     PROVISIONING_VISIBILITY_GRACE, map_sqlx_error,
 };
+use super::sandbox_workspace::capacity::release_active_hand_for_reaper_in_transaction;
 
 /// One generation the reaper owns and must destroy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,6 +292,19 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
     async fn finalize_destroyed(&self, claimed: &ClaimedHandLease) -> Result<bool> {
         let mut conn = self.begin_maintenance().await?;
         if !transition_attached_workspace_after_destroy(conn.as_mut(), claimed).await? {
+            conn.rollback().await?;
+            return Ok(false);
+        }
+        if claimed.attachment.is_some()
+            && !release_active_hand_for_reaper_in_transaction(
+                conn.as_mut(),
+                claimed.tenant_id,
+                claimed.provisioning_operation_id,
+                claimed.generation,
+                claimed.claim_token,
+            )
+            .await?
+        {
             conn.rollback().await?;
             return Ok(false);
         }
@@ -637,6 +652,8 @@ pub struct HandLeaseReaperConfig {
     pub base_retry_delay: Duration,
     /// Ceiling the exponential backoff never exceeds.
     pub max_retry_delay: Duration,
+    /// Maximum acceptable age of the last complete successful sweep.
+    pub heartbeat_maximum_age: Duration,
 }
 
 impl Default for HandLeaseReaperConfig {
@@ -648,6 +665,7 @@ impl Default for HandLeaseReaperConfig {
             max_destroy_concurrency: 4,
             base_retry_delay: Duration::from_secs(15),
             max_retry_delay: Duration::from_secs(15 * 60),
+            heartbeat_maximum_age: Duration::from_secs(90),
         }
     }
 }
@@ -668,6 +686,126 @@ pub struct HandLeaseReaper {
     claims: Arc<dyn ExpiredHandLeaseClaims>,
     providers: Vec<Arc<dyn HandProvider>>,
     config: HandLeaseReaperConfig,
+}
+
+/// Supervised process handle for durable hand-lease cleanup.
+pub struct HandLeaseReaperHandle {
+    state: Arc<HandLeaseReaperHealth>,
+    shutdown: CancellationToken,
+    task: JoinHandle<Result<()>>,
+    heartbeat_maximum_age: Duration,
+}
+
+/// Cloneable readiness projection for the supervised hand-lease reaper.
+#[derive(Clone)]
+pub struct HandLeaseReaperReadiness {
+    state: Arc<HandLeaseReaperHealth>,
+    heartbeat_maximum_age: Duration,
+}
+
+#[derive(Debug)]
+struct HandLeaseReaperHealth {
+    started_at: Instant,
+    last_heartbeat: RwLock<Option<Instant>>,
+    unready_reason: RwLock<Option<String>>,
+    exited: std::sync::atomic::AtomicBool,
+}
+
+impl HandLeaseReaperHandle {
+    /// Returns the age of the most recent complete successful sweep.
+    #[must_use]
+    pub fn heartbeat_age(&self) -> Duration {
+        self.readiness().heartbeat_age()
+    }
+
+    /// Returns a cloneable health projection for process readiness.
+    #[must_use]
+    pub fn readiness(&self) -> HandLeaseReaperReadiness {
+        HandLeaseReaperReadiness {
+            state: Arc::clone(&self.state),
+            heartbeat_maximum_age: self.heartbeat_maximum_age,
+        }
+    }
+
+    /// Awaits the task result so unexpected exit can be process-fatal.
+    pub async fn task_result(&mut self) -> Result<()> {
+        match (&mut self.task).await {
+            Ok(result) => result,
+            Err(error) => Err(MoaError::StorageError(format!(
+                "hand lease reaper task join failed: {error}"
+            ))),
+        }
+    }
+
+    /// Cancels and joins the supervised task during graceful shutdown.
+    pub async fn shutdown(mut self) -> Result<()> {
+        self.shutdown.cancel();
+        match tokio::time::timeout(Duration::from_secs(10), &mut self.task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(MoaError::StorageError(format!(
+                "hand lease reaper task join failed: {error}"
+            ))),
+            Err(_) => {
+                self.task.abort();
+                let _ = (&mut self.task).await;
+                Err(MoaError::StorageError(
+                    "hand lease reaper exceeded its shutdown deadline".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+impl Drop for HandLeaseReaperHandle {
+    fn drop(&mut self) {
+        self.state
+            .exited
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.shutdown.cancel();
+        self.task.abort();
+    }
+}
+
+impl HandLeaseReaperReadiness {
+    /// Returns the age of the most recent complete successful sweep.
+    #[must_use]
+    pub fn heartbeat_age(&self) -> Duration {
+        let heartbeat = self
+            .state
+            .last_heartbeat
+            .read()
+            .ok()
+            .and_then(|guard| *guard);
+        heartbeat.map_or_else(
+            || self.state.started_at.elapsed(),
+            |heartbeat| heartbeat.elapsed(),
+        )
+    }
+
+    /// Returns a bounded reason readiness must refuse sandbox traffic.
+    #[must_use]
+    pub fn unready_reason(&self) -> Option<String> {
+        if self.state.exited.load(std::sync::atomic::Ordering::Acquire) {
+            return Some("hand lease reaper exited unexpectedly".to_string());
+        }
+        if self.heartbeat_age() > self.heartbeat_maximum_age {
+            return Some("hand lease reaper heartbeat is stale".to_string());
+        }
+        match self.state.unready_reason.read() {
+            Ok(reason) => reason.clone(),
+            Err(_) => Some("hand lease reaper health lock is poisoned".to_string()),
+        }
+    }
+}
+
+fn set_reaper_heartbeat(state: &HandLeaseReaperHealth) -> Result<()> {
+    *state.last_heartbeat.write().map_err(|_| {
+        MoaError::StorageError("hand lease reaper heartbeat lock is poisoned".to_string())
+    })? = Some(Instant::now());
+    *state.unready_reason.write().map_err(|_| {
+        MoaError::StorageError("hand lease reaper health lock is poisoned".to_string())
+    })? = None;
+    Ok(())
 }
 
 impl HandLeaseReaper {
@@ -814,21 +952,58 @@ impl HandLeaseReaper {
         }
     }
 
-    /// Spawns the sweep loop and returns its join handle.
-    #[must_use]
-    pub fn spawn(self) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(self.config.interval);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                ticker.tick().await;
-                if let Err(error) = self.sweep().await {
-                    tracing::warn!(
-                        error = %error,
-                        "durable hand-lease reaper sweep failed; retrying next interval"
-                    );
+    /// Spawns the supervised sweep loop.
+    pub fn spawn(self) -> Result<HandLeaseReaperHandle> {
+        if self.config.interval.is_zero()
+            || self.config.batch_size <= 0
+            || self.config.max_destroy_concurrency == 0
+            || self.config.heartbeat_maximum_age.is_zero()
+            || self.config.interval >= self.config.heartbeat_maximum_age
+        {
+            return Err(MoaError::ConfigError(
+                "hand lease reaper requires positive sweep bounds and an interval shorter than heartbeat freshness"
+                    .to_string(),
+            ));
+        }
+        let heartbeat_maximum_age = self.config.heartbeat_maximum_age;
+        let state = Arc::new(HandLeaseReaperHealth {
+            started_at: Instant::now(),
+            last_heartbeat: RwLock::new(None),
+            unready_reason: RwLock::new(Some(
+                "hand lease reaper has not completed its first pass".to_string(),
+            )),
+            exited: std::sync::atomic::AtomicBool::new(false),
+        });
+        let shutdown = CancellationToken::new();
+        let task_state = Arc::clone(&state);
+        let task_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move {
+            let result = async {
+                loop {
+                    self.sweep().await?;
+                    set_reaper_heartbeat(&task_state)?;
+                    tokio::select! {
+                        () = task_shutdown.cancelled() => return Ok(()),
+                        () = tokio::time::sleep(self.config.interval) => {}
+                    }
                 }
             }
+            .await;
+            task_state
+                .exited
+                .store(true, std::sync::atomic::Ordering::Release);
+            if result.is_err()
+                && let Ok(mut reason) = task_state.unready_reason.write()
+            {
+                *reason = Some("hand lease reaper pass failed".to_string());
+            }
+            result
+        });
+        Ok(HandLeaseReaperHandle {
+            state,
+            shutdown,
+            task,
+            heartbeat_maximum_age,
         })
     }
 }
@@ -1197,6 +1372,119 @@ mod tests {
         assert_eq!(
             reaper.sweep().await.expect("lost claim is a fenced no-op"),
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn supervised_reaper_opens_readiness_after_a_complete_pass_and_shuts_down() {
+        // Pins: sandbox traffic stays unready until the destruction owner has
+        // completed a full database pass, after which a graceful shutdown joins
+        // the owner instead of abandoning it.
+        let config = HandLeaseReaperConfig {
+            interval: Duration::from_secs(60),
+            heartbeat_maximum_age: Duration::from_secs(120),
+            ..HandLeaseReaperConfig::default()
+        };
+        let handle = HandLeaseReaper::new(Arc::new(RecordingClaims::default()), Vec::new(), config)
+            .spawn()
+            .expect("valid supervised reaper config should start");
+        let readiness = handle.readiness();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while readiness.unready_reason().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first empty sweep should open readiness");
+        assert!(
+            handle.heartbeat_age() < Duration::from_secs(1),
+            "the first complete sweep should record a fresh heartbeat"
+        );
+        handle
+            .shutdown()
+            .await
+            .expect("graceful shutdown should join the reaper");
+    }
+
+    #[tokio::test]
+    async fn supervised_reaper_failure_closes_readiness_and_surfaces_task_result() {
+        // Pins: a failed cleanup pass cannot leave the process reporting ready;
+        // the task result reaches the process supervisor as a fatal error.
+        struct FailingClaims;
+
+        #[async_trait::async_trait]
+        impl ExpiredHandLeaseClaims for FailingClaims {
+            async fn claim_expired(
+                &self,
+                _limit: i64,
+                _claim_ttl: Duration,
+            ) -> Result<Vec<ClaimedHandLease>> {
+                Err(MoaError::StorageError("forced reaper failure".to_string()))
+            }
+
+            async fn finalize_destroyed(&self, _claimed: &ClaimedHandLease) -> Result<bool> {
+                panic!("a failed claim pass cannot finalize work")
+            }
+
+            async fn release_for_retry(
+                &self,
+                _claimed: &ClaimedHandLease,
+                _retry_after: Duration,
+            ) -> Result<bool> {
+                panic!("a failed claim pass cannot release work")
+            }
+
+            async fn renew_claim(
+                &self,
+                _claimed: &ClaimedHandLease,
+                _claim_ttl: Duration,
+            ) -> Result<bool> {
+                panic!("a failed claim pass cannot renew work")
+            }
+        }
+
+        let config = HandLeaseReaperConfig {
+            interval: Duration::from_millis(10),
+            heartbeat_maximum_age: Duration::from_secs(1),
+            ..HandLeaseReaperConfig::default()
+        };
+        let mut handle = HandLeaseReaper::new(Arc::new(FailingClaims), Vec::new(), config)
+            .spawn()
+            .expect("valid supervised reaper config should start");
+        let readiness = handle.readiness();
+
+        let error = handle
+            .task_result()
+            .await
+            .expect_err("failed sweep must terminate the supervised owner");
+        assert!(
+            matches!(error, MoaError::StorageError(message) if message == "forced reaper failure")
+        );
+        assert_eq!(
+            readiness.unready_reason().as_deref(),
+            Some("hand lease reaper exited unexpectedly")
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_supervised_reaper_immediately_closes_readiness() {
+        // Pins: losing the cleanup-owner handle cannot leave a cloned process
+        // readiness projection healthy until its heartbeat eventually ages out.
+        let config = HandLeaseReaperConfig {
+            interval: Duration::from_secs(60),
+            heartbeat_maximum_age: Duration::from_secs(120),
+            ..HandLeaseReaperConfig::default()
+        };
+        let handle = HandLeaseReaper::new(Arc::new(RecordingClaims::default()), Vec::new(), config)
+            .spawn()
+            .expect("valid supervised reaper config should start");
+        let readiness = handle.readiness();
+        drop(handle);
+
+        assert_eq!(
+            readiness.unready_reason().as_deref(),
+            Some("hand lease reaper exited unexpectedly")
         );
     }
 

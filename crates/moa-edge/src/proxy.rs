@@ -106,7 +106,7 @@ fn should_forward_header(name: &str, has_body: bool) -> bool {
 
 /// W3C trace-context headers are re-injected from the edge span, so the raw
 /// inbound values are dropped to avoid forwarding a conflicting second copy.
-fn is_trace_context_header(name: &str) -> bool {
+pub(crate) fn is_trace_context_header(name: &str) -> bool {
     name.eq_ignore_ascii_case(moa_observability::TRACEPARENT_HEADER)
         || name.eq_ignore_ascii_case(moa_observability::TRACESTATE_HEADER)
 }
@@ -182,7 +182,8 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn is_hop_by_hop_header(name: &str) -> bool {
+/// Returns whether an HTTP header is connection-specific and must not be proxied.
+pub(crate) fn is_hop_by_hop_header(name: &str) -> bool {
     const HOP_BY_HOP: [&str; 9] = [
         "host",
         "connection",

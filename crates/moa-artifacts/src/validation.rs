@@ -1,6 +1,7 @@
 //! Semantic validation for artifact documents.
 
 mod connectors;
+mod execution_plan;
 mod json;
 
 use std::collections::{HashMap, HashSet};
@@ -19,8 +20,7 @@ use crate::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind, Artifa
 use crate::execution_plan::{
     CapabilityReference, CompensationValueSource, CompletionCheckKind, ExecutionCondition,
     ExecutionGoalContract, ExecutionGoalTemplate, ExecutionNode, ExecutionOperation,
-    ExecutionPlanDefinition, ExecutionReducer, ExecutionTaskOutcome, MapTask, PlanAmendment,
-    PlanAmendmentOperation,
+    ExecutionPlanDefinition, ExecutionTaskOutcome, PlanAmendment, PlanAmendmentOperation,
 };
 use crate::reference::{ArtifactRef, ReferenceResolution, ReferenceState};
 use crate::simulation::{
@@ -220,7 +220,7 @@ pub fn validate_execution_plan_definition(
     definition: &ExecutionPlanDefinition,
 ) -> ValidationReport {
     let mut report = ValidationReport::default();
-    validate_execution_plan_at("execution_plan", definition, &mut report);
+    validate_execution_plan_at("execution_plan", definition, true, &mut report);
     report
 }
 
@@ -261,7 +261,7 @@ pub fn validate_plan_amendment(amendment: &PlanAmendment) -> ValidationReport {
         let root = format!("plan_amendment.operations[{index}]");
         match operation {
             PlanAmendmentOperation::AddNode { node } => {
-                validate_execution_node(&format!("{root}.node"), node, None, &mut report);
+                validate_execution_node(&format!("{root}.node"), node, None, true, &mut report);
             }
             PlanAmendmentOperation::ReplacePendingNode { node_id, node } => {
                 validate_stable_id(
@@ -270,7 +270,7 @@ pub fn validate_plan_amendment(amendment: &PlanAmendment) -> ValidationReport {
                     "pending node id",
                     &mut report,
                 );
-                validate_execution_node(&format!("{root}.node"), node, None, &mut report);
+                validate_execution_node(&format!("{root}.node"), node, None, true, &mut report);
             }
             PlanAmendmentOperation::RemovePendingNode { node_id } => validate_stable_id(
                 &format!("{root}.node_id"),
@@ -856,6 +856,7 @@ fn validate_skill(definition: &SkillDefinition, report: &mut ValidationReport) {
         validate_execution_plan_at(
             "definition.spec.execution_plan.plan",
             &execution_plan.plan,
+            false,
             report,
         );
     }
@@ -930,8 +931,15 @@ fn validate_execution_goal_template(
 fn validate_execution_plan_at(
     root: &str,
     definition: &ExecutionPlanDefinition,
+    allow_absolute_temporal_targets: bool,
     report: &mut ValidationReport,
 ) {
+    execution_plan::validate_temporal_target(
+        &format!("{root}.input_wait_policy.expiry"),
+        &definition.input_wait_policy.expiry,
+        allow_absolute_temporal_targets,
+        report,
+    );
     validate_json_schema(
         &format!("{root}.input_schema"),
         &definition.input_schema,
@@ -957,6 +965,7 @@ fn validate_execution_plan_at(
             &format!("{root}.nodes[{index}]"),
             node,
             Some(&node_ids),
+            allow_absolute_temporal_targets,
             report,
         );
     }
@@ -969,6 +978,7 @@ fn validate_execution_node(
     root: &str,
     node: &ExecutionNode,
     known_node_ids: Option<&HashSet<&str>>,
+    allow_absolute_temporal_targets: bool,
     report: &mut ValidationReport,
 ) {
     validate_stable_id(&format!("{root}.id"), &node.id, "execution node id", report);
@@ -1023,7 +1033,7 @@ fn validate_execution_node(
         report,
     );
     validate_retry_policy(root, node, report);
-    validate_execution_operation(root, node, report);
+    execution_plan::validate_operation(root, node, allow_absolute_temporal_targets, report);
     validate_execution_compensation(root, node, report);
 }
 
@@ -1129,163 +1139,6 @@ fn validate_retry_policy(root: &str, node: &ExecutionNode, report: &mut Validati
             format!("{root}.retry.max_backoff_ms"),
             "retry max_backoff_ms must be greater than or equal to initial_backoff_ms",
         );
-    }
-}
-
-fn validate_execution_operation(root: &str, node: &ExecutionNode, report: &mut ValidationReport) {
-    let operation_root = format!("{root}.operation");
-    match &node.operation {
-        ExecutionOperation::Capability { reference } => {
-            validate_capability_reference(
-                &format!("{operation_root}.reference"),
-                reference,
-                report,
-            );
-        }
-        ExecutionOperation::Agent {
-            instructions,
-            skill_refs,
-            capability_refs,
-            max_turns,
-        } => validate_agent_operation(
-            &operation_root,
-            instructions,
-            skill_refs,
-            capability_refs,
-            *max_turns,
-            report,
-        ),
-        ExecutionOperation::Map {
-            items,
-            item_key,
-            max_items,
-            item_output_schema,
-            task,
-        } => {
-            validate_dynamic_value(
-                &format!("{operation_root}.items"),
-                items,
-                node,
-                false,
-                report,
-            );
-            validate_json_pointer(&format!("{operation_root}.item_key"), item_key, report);
-            if *max_items == 0 {
-                report.push_error(
-                    format!("{operation_root}.max_items"),
-                    "map max_items must be at least one",
-                );
-            }
-            if items.as_array().is_some_and(|items| {
-                u64::try_from(items.len()).map_or(true, |length| length > *max_items)
-            }) {
-                report.push_error(
-                    format!("{operation_root}.items"),
-                    "literal map items must not exceed max_items",
-                );
-            }
-            validate_json_schema(
-                &format!("{operation_root}.item_output_schema"),
-                item_output_schema,
-                report,
-            );
-            validate_static_map_keys(&operation_root, items, item_key, report);
-            match task {
-                MapTask::Capability { reference } => validate_capability_reference(
-                    &format!("{operation_root}.task.reference"),
-                    reference,
-                    report,
-                ),
-                MapTask::Agent {
-                    instructions,
-                    skill_refs,
-                    capability_refs,
-                    max_turns,
-                } => validate_agent_operation(
-                    &format!("{operation_root}.task"),
-                    instructions,
-                    skill_refs,
-                    capability_refs,
-                    *max_turns,
-                    report,
-                ),
-            }
-        }
-        ExecutionOperation::Reduce {
-            items,
-            max_items,
-            reducer,
-            batch_size,
-        } => {
-            validate_dynamic_value(
-                &format!("{operation_root}.items"),
-                items,
-                node,
-                false,
-                report,
-            );
-            if *max_items == 0 {
-                report.push_error(
-                    format!("{operation_root}.max_items"),
-                    "reduce max_items must be at least one",
-                );
-            }
-            if items.as_array().is_some_and(|items| {
-                u64::try_from(items.len()).map_or(true, |length| length > *max_items)
-            }) {
-                report.push_error(
-                    format!("{operation_root}.items"),
-                    "literal reduce items must not exceed max_items",
-                );
-            }
-            if *batch_size < 2 {
-                report.push_error(
-                    format!("{operation_root}.batch_size"),
-                    "reduce batch_size must be at least two",
-                );
-            }
-            match reducer {
-                ExecutionReducer::Capability { reference } => validate_capability_reference(
-                    &format!("{operation_root}.reducer.reference"),
-                    reference,
-                    report,
-                ),
-                ExecutionReducer::Agent {
-                    instructions,
-                    skill_refs,
-                    capability_refs,
-                    max_turns,
-                } => validate_agent_operation(
-                    &format!("{operation_root}.reducer"),
-                    instructions,
-                    skill_refs,
-                    capability_refs,
-                    *max_turns,
-                    report,
-                ),
-            }
-        }
-        ExecutionOperation::Review { prompt } => require_non_empty(
-            format!("{operation_root}.prompt"),
-            prompt,
-            "review prompt",
-            report,
-        ),
-        ExecutionOperation::WaitSignal { signal_name } => {
-            if !is_capability_component(signal_name, 64) {
-                report.push_error(
-                    format!("{operation_root}.signal_name"),
-                    "signal_name must be a non-empty ASCII name of at most 64 characters",
-                );
-            }
-        }
-        ExecutionOperation::Output { value } => validate_dynamic_value(
-            &format!("{operation_root}.value"),
-            value,
-            node,
-            false,
-            report,
-        ),
     }
 }
 

@@ -16,7 +16,9 @@ use moa_core::types::{
     session::SessionMeta,
 };
 use moa_core::{canonical_json::canonical_json_bytes, traits::SessionStore};
-use moa_execution::repository::{CompileAuditWriteOutcome, ExecutionRepository, ExecutionScope};
+use moa_execution::repository::{
+    ExecutionRepository, ExecutionScope, audit::CompileAuditWriteOutcome,
+};
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::{Value, json};
 use uuid::Uuid;

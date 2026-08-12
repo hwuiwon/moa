@@ -1,6 +1,7 @@
 //! Restate virtual objects hosted by the orchestrator binary.
 
 pub mod cron_job;
+pub mod execution_run_controller;
 pub mod ingestion;
 pub mod session;
 pub mod session_status_migrator;

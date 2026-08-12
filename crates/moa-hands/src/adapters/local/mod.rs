@@ -65,6 +65,7 @@ use crate::adapters::trusted_command::{
     normalized_trusted_skill_path, resolve_trusted_skill_command, rewrite_bash_input,
 };
 use crate::core::leases::LeaseHandle;
+use crate::core::sandbox_workspace::capacity::PostgresWorkspaceCapacityRepository;
 use crate::core::sandbox_workspace::checkpoint::archive::build_checkpoint_archive;
 use crate::core::sandbox_workspace::checkpoint::revision::{
     next_workspace_revision, required_current_revision,
@@ -314,6 +315,7 @@ pub struct LocalHandProvider {
     local_sandboxes: Arc<RwLock<HashMap<PathBuf, LocalSandbox>>>,
     docker_sandboxes: Arc<RwLock<HashMap<String, DockerSandbox>>>,
     checkpoint_store: Option<Arc<CheckpointObjectStore>>,
+    checkpoint_capacity: Option<Arc<PostgresWorkspaceCapacityRepository>>,
 }
 
 impl LocalHandProvider {
@@ -342,6 +344,7 @@ impl LocalHandProvider {
             local_sandboxes: Arc::new(RwLock::new(HashMap::new())),
             docker_sandboxes: Arc::new(RwLock::new(HashMap::new())),
             checkpoint_store: None,
+            checkpoint_capacity: None,
         })
     }
 
@@ -361,6 +364,16 @@ impl LocalHandProvider {
     #[must_use]
     pub fn with_checkpoint_store(mut self, checkpoint_store: Arc<CheckpointObjectStore>) -> Self {
         self.checkpoint_store = Some(checkpoint_store);
+        self
+    }
+
+    /// Installs provider-neutral pre-publication checkpoint admission.
+    #[must_use]
+    pub fn with_checkpoint_capacity(
+        mut self,
+        capacity: Arc<PostgresWorkspaceCapacityRepository>,
+    ) -> Self {
+        self.checkpoint_capacity = Some(capacity);
         self
     }
 

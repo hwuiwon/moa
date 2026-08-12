@@ -9,5 +9,6 @@ kind: Kustomization
 resources:
   - moa-durability.yaml
   - moa-lineage.yaml
+  - moa-long-horizon-execution.yaml
   - moa-restate.yaml
   - sandbox-workspaces.yaml

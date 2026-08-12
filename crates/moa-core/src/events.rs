@@ -30,6 +30,66 @@ pub enum ExecutionTaskResultsRef {
     },
 }
 
+/// Public activity or parked-state distinction for detached execution progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionProgressPhase {
+    /// The controller or a bounded attempt is advancing work.
+    Running,
+    /// A task is parked for user input.
+    WaitingInput,
+    /// A governed action is parked for review.
+    WaitingReview,
+    /// A task is parked for an external signal.
+    WaitingSignal,
+    /// A task or run is parked until an absolute timer.
+    WaitingTimer,
+    /// A provider-owned asynchronous job is running outside MOA compute.
+    WaitingExternal,
+    /// An operator pause has been requested but attempts are still draining.
+    PauseRequested,
+    /// Active attempts are being fenced before the run becomes paused.
+    Pausing,
+    /// The run is fully paused and consumes no active execution capacity.
+    Paused,
+    /// A late callback or activation was fenced without advancing canonical state.
+    StaleWork,
+}
+
+/// Audience expected to resolve the run's current public blocker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionBlockerAudience {
+    /// The owning user must provide input.
+    User,
+    /// Another authorized agent must provide input.
+    Agent,
+    /// A tenant reviewer must decide.
+    TenantReviewer,
+    /// An external actor or callback must signal.
+    External,
+    /// Time or internal execution state is the only blocker.
+    System,
+}
+
+/// Exact unconsumed and unreserved execution budget exposed with public progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionRemainingBudget {
+    /// Remaining billed cost in integer micro-US-dollars.
+    pub cost_microusd: Option<u64>,
+    /// Remaining model tokens.
+    pub tokens: Option<u64>,
+    /// Remaining logical tasks.
+    pub tasks: Option<u64>,
+    /// Remaining governed tool or capability calls.
+    pub tool_calls: Option<u64>,
+    /// Remaining bytes retrievable from external or memory sources.
+    pub retrieved_bytes: Option<u64>,
+    /// Absolute execution deadline; unlike counters, time is not consumed arithmetically.
+    pub deadline_at: Option<DateTime<Utc>>,
+}
+
 /// Compact aggregate progress for one detached execution run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +102,26 @@ pub struct ExecutionProgress {
     pub plan_revision: u64,
     /// Exhaustively mapped stable execution status.
     pub status: String,
+    /// Typed public distinction between active, parked, and pause states.
+    pub phase: ExecutionProgressPhase,
+    /// Time at which the current storage-only wait began.
+    pub waiting_since: Option<DateTime<Utc>>,
+    /// Earliest durable time at which the controller should be reactivated.
+    pub next_wake_at: Option<DateTime<Utc>>,
+    /// Latest durable scheduler progress time.
+    pub last_progress_at: DateTime<Utc>,
+    /// Current provider job when progress is externally owned.
+    pub external_job_uid: Option<Uuid>,
+    /// Exact number of ready logical tasks.
+    pub ready_tasks: u64,
+    /// Exact number of active task attempts.
+    pub active_tasks: u64,
+    /// Exact number of logical tasks parked on durable waits.
+    pub parked_tasks: u64,
+    /// Audience expected to resolve the highest-priority current blocker.
+    pub blocker_audience: Option<ExecutionBlockerAudience>,
+    /// Budget remaining after cumulative consumption and live reservations.
+    pub remaining_budget: ExecutionRemainingBudget,
     /// Number of materialized logical tasks.
     pub total: u64,
     /// Number of successfully completed logical tasks.
@@ -1324,6 +1404,7 @@ mod tests {
                 run_uid: Uuid::from_u128(40),
                 task_uid: Uuid::from_u128(41),
                 generation: 2,
+                attempt_generation: 3,
             },
         };
         let event = Event::ActionReviewRequested {
@@ -1816,6 +1897,23 @@ mod tests {
                     originating_user_sequence_num: 9,
                     plan_revision: 2,
                     status: "running".to_string(),
+                    phase: ExecutionProgressPhase::Running,
+                    waiting_since: None,
+                    next_wake_at: None,
+                    last_progress_at: Utc::now(),
+                    external_job_uid: None,
+                    ready_tasks: 1,
+                    active_tasks: 1,
+                    parked_tasks: 0,
+                    blocker_audience: None,
+                    remaining_budget: ExecutionRemainingBudget {
+                        cost_microusd: Some(80),
+                        tokens: Some(800),
+                        tasks: Some(2),
+                        tool_calls: Some(4),
+                        retrieved_bytes: Some(8_000),
+                        deadline_at: None,
+                    },
                     total: 4,
                     completed: 2,
                     failed: 1,

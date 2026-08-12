@@ -30,8 +30,8 @@ use moa_execution::{
     compiler::{CompileExecutionRequest, CompiledExecution, compile},
     repository::{
         ExecutionRepository, ExecutionRunRecord, ExecutionScope, ExecutionTaskRecord,
-        FencedTerminalFinalizationOutcome, NewExecutionRun, ReservationOutcome,
-        TaskOutcomeRejection, TaskOutcomeWrite, TransitionOutcome,
+        NewExecutionRun, ReservationOutcome, TaskOutcomeRejection, TaskOutcomeWrite,
+        TransitionOutcome, run::RunAdmissionOutcome,
     },
     state::{
         ExecutionRunStatus, ExecutionTaskId, ExecutionTaskStatus, ExecutionTerminalCause,
@@ -318,9 +318,9 @@ async fn terminal_failure_does_not_retry_service_e2e() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn confirmation_retries_after_persisted_epoch_before_wake_ack_service_e2e() -> Result<()> {
-    // Pins: confirmation cannot return after its run transition commits but before the exact
-    // run wake is accepted; process recovery replays the confirmation without another epoch.
+async fn confirmation_retries_after_persisted_epoch_before_dispatch_service_e2e() -> Result<()> {
+    // Pins: confirmation cannot return after its run transition commits but before the dispatcher
+    // kick is accepted; outbox recovery replays the confirmation without another epoch.
     let tool_name = "lifecycle_confirmation_handoff_probe";
     let fixture = confirmation_execution_fixture(tool_name).await?;
     let prepared = prepare_capability_run(
@@ -367,12 +367,12 @@ async fn confirmation_retries_after_persisted_epoch_before_wake_ack_service_e2e(
     .await?;
     assert!(
         !interrupted.is_finished(),
-        "public confirmation returned before its joined run wake acknowledgement"
+        "public confirmation returned before its dispatcher handoff"
     );
     fixture
         .hard_crash_and_restart_orchestrator()
         .await
-        .context("crash in the persisted-confirmation/pre-wake acknowledgement window")?;
+        .context("crash in the persisted-confirmation/pre-dispatch window")?;
     let recovered = tokio::time::timeout(SERVICE_TIMEOUT, interrupted)
         .await
         .context("confirmation request did not retry after orchestrator recovery")???;
@@ -417,80 +417,6 @@ async fn confirmation_retries_after_persisted_epoch_before_wake_ack_service_e2e(
     let controller = fixture_capability(&fixture)?;
     assert!(controller.calls().is_empty());
     assert!(controller.transport_attempts().is_empty());
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn wake_ack_before_park_failure_loses_no_wake_or_task_service_e2e() -> Result<()> {
-    // Pins: a task outcome committed while ExecutionRun fails after acknowledging its current
-    // epoch but before parking is recovered from the persisted epoch/owned-call paths exactly once.
-    let tool_name = "lifecycle_wake_ack_before_park_probe";
-    let fixture = execution_fixture(
-        tool_name,
-        success_outcomes(),
-        vec![
-            (
-                "MOA_EXECUTION_TEST_SKIP_SESSION_DELIVERY".to_string(),
-                "true".to_string(),
-            ),
-            (
-                "MOA_EXECUTION_TEST_WAKE_HANDOFF".to_string(),
-                "crash_once".to_string(),
-            ),
-        ],
-    )
-    .await?;
-    let prepared = prepare_capability_run(
-        &fixture,
-        "wake-ack-before-park-recovery",
-        tool_name,
-        no_retry(),
-        ActionPolicyEffect::Allow,
-    )
-    .await?;
-    let run = start_service_run(&fixture, &prepared, false).await?;
-    let controller = fixture_capability(&fixture)?;
-    controller.wait_for_calls(1, SERVICE_TIMEOUT).await?;
-    let acknowledged_epoch = await_positive_processed_wake_epoch(&run).await?;
-
-    controller.release(1);
-    let terminal = await_execution_terminal(&fixture.client, &run.request).await?;
-    assert_terminal(
-        &terminal,
-        ExecutionRunStatus::Completed,
-        ExecutionTerminalCause::Completion { limit_stop: None },
-        1,
-        1,
-    );
-    let persisted = load_run(&run).await?;
-    assert!(persisted.processed_wake_epoch >= acknowledged_epoch);
-    let tasks = list_execution_tasks(&fixture.client, run.request.clone()).await?;
-    assert_eq!(tasks.tasks.len(), 2);
-    assert_eq!(
-        tasks
-            .tasks
-            .iter()
-            .filter(|task| task.node_id == CAPABILITY_NODE_ID)
-            .count(),
-        1
-    );
-    assert_eq!(
-        tasks
-            .tasks
-            .iter()
-            .filter(|task| task.node_id == OUTPUT_NODE_ID)
-            .count(),
-        1
-    );
-    assert!(
-        tasks.tasks.iter().all(|task| {
-            task.status == ExecutionTaskStatus::Completed && task.outcome.is_some()
-        })
-    );
-    assert_eq!(controller.calls().len(), 1);
-    assert_eq!(controller.transport_attempts().len(), 1);
-    assert_eq!(controller.current_live_calls(), 0);
     Ok(())
 }
 
@@ -573,18 +499,6 @@ async fn cancellation_releases_reservations_and_prevents_dispatch_service_e2e() 
             .await?,
         TaskOutcomeWrite::Applied { .. }
     ));
-    let settled = load_run(&run).await?;
-    assert!(matches!(
-        run.repository
-            .finalize_fenced_terminal(
-                run.scope,
-                run.run_uid,
-                settled.plan_revision,
-                settled.wake_epoch,
-            )
-            .await?,
-        FencedTerminalFinalizationOutcome::Finalized(_)
-    ));
     let terminal = await_execution_terminal(&fixture.client, &run.request).await?;
     assert_terminal(
         &terminal,
@@ -631,9 +545,9 @@ async fn cancellation_releases_reservations_and_prevents_dispatch_service_e2e() 
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn cancellation_retries_after_persisted_epoch_before_wake_ack_service_e2e() -> Result<()> {
-    // Pins: a process crash after the cancellation fence commits but before the
-    // joined run wake acknowledges cannot return success or advance the epoch twice;
+async fn cancellation_retries_after_persisted_epoch_before_dispatch_service_e2e() -> Result<()> {
+    // Pins: a process crash after the cancellation fence commits but before the dispatcher
+    // accepts the kick cannot return success or advance the epoch twice;
     // an already-admitted late effect remains authoritative under RetainEffects.
     let tool_name = "lifecycle_cancel_handoff_probe";
     let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
@@ -672,13 +586,13 @@ async fn cancellation_retries_after_persisted_epoch_before_wake_ack_service_e2e(
         await_committed_cancellation_fence(&run, before_cancel.wake_epoch).await?;
     assert!(
         !interrupted.is_finished(),
-        "public cancellation returned before its joined run wake acknowledgement"
+        "public cancellation returned before its dispatcher handoff"
     );
 
     fixture
         .hard_crash_and_restart_orchestrator()
         .await
-        .context("crash in the persisted-epoch/pre-wake acknowledgement window")?;
+        .context("crash in the persisted-epoch/pre-dispatch window")?;
     let recovered = tokio::time::timeout(SERVICE_TIMEOUT, interrupted)
         .await
         .context("cancel request did not retry after orchestrator recovery")???;
@@ -725,76 +639,9 @@ async fn cancellation_retries_after_persisted_epoch_before_wake_ack_service_e2e(
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn public_mutation_waits_for_run_wake_handler_ack_service_e2e() -> Result<()> {
-    // Pins: public mutations join ExecutionRun/wake through its handler acknowledgement;
-    // replacing the shared `.call()` with `.send()` returns while this gate is still held.
-    let tool_name = "lifecycle_joined_wake_ack_probe";
-    let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
-    let prepared = prepare_capability_run(
-        &fixture,
-        "joined-wake-acknowledgement",
-        tool_name,
-        no_retry(),
-        ActionPolicyEffect::Allow,
-    )
-    .await?;
-    let run = start_service_run(&fixture, &prepared, false).await?;
-    let controller = fixture_capability(&fixture)?;
-    controller.wait_for_calls(1, SERVICE_TIMEOUT).await?;
-    let before_cancel = load_run(&run).await?;
-    fixture
-        .restart_orchestrator_with_env(vec![(
-            "MOA_EXECUTION_TEST_DELAY_WAKE_ACK".to_string(),
-            "true".to_string(),
-        )])
-        .await
-        .context("arm the integration-only run wake acknowledgement gate")?;
-
-    let request = ExecutionCancelRequest {
-        run: run.request.clone(),
-        reason: "prove the public mutation joins its run wake".to_string(),
-    };
-    let client = fixture.client.clone();
-    let request_for_call = request.clone();
-    let response = tokio::spawn(async move {
-        client
-            .post_call::<_, ExecutionMutationResponse>("/Execution/cancel", &request_for_call)
-            .await
-    });
-    let committed_epoch =
-        await_committed_cancellation_fence(&run, before_cancel.wake_epoch).await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(
-        !response.is_finished(),
-        "public cancellation returned before ExecutionRun/wake acknowledged the call"
-    );
-    let accepted = tokio::time::timeout(SERVICE_TIMEOUT, response)
-        .await
-        .context("cancellation did not cross the run wake acknowledgement gate")???;
-    assert!(matches!(
-        accepted,
-        ExecutionMutationResponse::Applied { .. } | ExecutionMutationResponse::Replayed { .. }
-    ));
-
-    controller.release(1);
-    let terminal = await_execution_terminal(&fixture.client, &run.request).await?;
-    assert_terminal(
-        &terminal,
-        ExecutionRunStatus::Cancelled,
-        ExecutionTerminalCause::Cancellation,
-        0,
-        1,
-    );
-    assert!(load_run(&run).await?.wake_epoch >= committed_epoch);
-    assert_eq!(controller.calls().len(), 1);
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
 async fn input_resume_preserves_attempt_and_history_service_e2e() -> Result<()> {
-    // Pins: the public input mutation acknowledges the exact parked ExecutionTask and run wake,
-    // preserves attempt one across a post-commit crash, and replays without duplicating history.
+    // Pins: the public input mutation persists the exact parked task transition and dispatch
+    // outbox row, preserves attempt one across a crash, and never duplicates history.
     let tool_name = "lifecycle_input_probe";
     let fixture = input_execution_fixture(tool_name).await?;
     let prepared = prepare_capability_run(
@@ -853,12 +700,12 @@ async fn input_resume_preserves_attempt_and_history_service_e2e() -> Result<()> 
     assert_eq!(resumed.generation_history.len(), 2);
     assert!(
         !interrupted.is_finished(),
-        "public input delivery returned before its task and run acknowledgements"
+        "public input delivery returned before its dispatcher handoff"
     );
     fixture
         .hard_crash_and_restart_orchestrator()
         .await
-        .context("crash in the persisted-input/pre-wake acknowledgement window")?;
+        .context("crash in the persisted-input/pre-dispatch window")?;
     let recovered = tokio::time::timeout(SERVICE_TIMEOUT, interrupted)
         .await
         .context("input request did not retry after orchestrator recovery")???;
@@ -920,9 +767,9 @@ async fn input_resume_preserves_attempt_and_history_service_e2e() -> Result<()> 
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn explicit_review_retries_after_persisted_epoch_before_ack_service_e2e() -> Result<()> {
-    // Pins: an approved Review node returns only after its exact task promise and run wake are
-    // acknowledged; a post-commit crash neither loses the decision nor duplicates its outcome.
+async fn explicit_review_retries_after_persisted_epoch_before_dispatch_service_e2e() -> Result<()> {
+    // Pins: an approved Review node persists its exact task transition and dispatch outbox row;
+    // a post-commit crash neither loses the decision nor duplicates its outcome.
     let tool_name = "lifecycle_explicit_review_handoff_probe";
     let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
     let prepared = prepare_capability_run(
@@ -971,12 +818,12 @@ async fn explicit_review_retries_after_persisted_epoch_before_ack_service_e2e() 
         await_task_completion(&run, before_review.wake_epoch, &payload).await?;
     assert!(
         !interrupted.is_finished(),
-        "public review decision returned before its task and run acknowledgements"
+        "public review decision returned before its dispatcher handoff"
     );
     fixture
         .hard_crash_and_restart_orchestrator()
         .await
-        .context("crash in the persisted-review/pre-acknowledgement window")?;
+        .context("crash in the persisted-review/pre-dispatch window")?;
     let recovered = tokio::time::timeout(SERVICE_TIMEOUT, interrupted)
         .await
         .context("review decision did not retry after orchestrator recovery")???;
@@ -1013,9 +860,9 @@ async fn explicit_review_retries_after_persisted_epoch_before_ack_service_e2e() 
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn external_signal_retries_after_persisted_epoch_before_ack_service_e2e() -> Result<()> {
-    // Pins: a named WaitSignal node returns only after its exact task promise and run wake are
-    // acknowledged; a post-commit crash neither loses the payload nor duplicates its outcome.
+async fn external_signal_retries_after_persisted_epoch_before_dispatch_service_e2e() -> Result<()> {
+    // Pins: a named WaitSignal node persists its exact task transition and dispatch outbox row;
+    // a post-commit crash neither loses the payload nor duplicates its outcome.
     let tool_name = "lifecycle_external_signal_handoff_probe";
     let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
     let prepared = prepare_capability_run(
@@ -1063,12 +910,12 @@ async fn external_signal_retries_after_persisted_epoch_before_ack_service_e2e() 
         await_task_completion(&run, before_signal.wake_epoch, &payload).await?;
     assert!(
         !interrupted.is_finished(),
-        "public signal delivery returned before its task and run acknowledgements"
+        "public signal delivery returned before its dispatcher handoff"
     );
     fixture
         .hard_crash_and_restart_orchestrator()
         .await
-        .context("crash in the persisted-signal/pre-acknowledgement window")?;
+        .context("crash in the persisted-signal/pre-dispatch window")?;
     let recovered = tokio::time::timeout(SERVICE_TIMEOUT, interrupted)
         .await
         .context("signal delivery did not retry after orchestrator recovery")???;
@@ -1115,7 +962,8 @@ async fn artifact_required_admin_review_reaches_durable_dispatch() -> Result<()>
     let pool = sqlx::PgPool::connect(&fixture.postgres_url)
         .await
         .context("connect artifact-floor review reaper")?;
-    let reaper = ActionReviewReaper::with_restate_ingress(pool, fixture.ingress_url.clone());
+    let reaper =
+        ActionReviewReaper::with_restate_ingress(pool.clone(), fixture.ingress_url.clone());
 
     for (completed_calls, route) in [
         ArtifactCapabilityRoute::DirectAction,
@@ -1217,7 +1065,13 @@ async fn artifact_required_admin_review_reaches_durable_dispatch() -> Result<()>
             .await
             .with_context(|| format!("clearing {label} artifact-floor review timed out"))???;
 
-        assert_eq!(reaper.trigger_execution_review_dispatch().await?, 1);
+        let delivered = await_outbox_delivered(&pool, review.id, 1).await?;
+        assert_eq!(delivered.resolution_status, "completed");
+        assert_eq!(
+            reaper.trigger_execution_review_dispatch().await?,
+            0,
+            "the decision handler must durably enqueue delivery; a duplicate drain is idle"
+        );
         let terminal =
             await_review_terminal(label, &fixture, &run, Duration::from_secs(15)).await?;
         assert_terminal(
@@ -1278,10 +1132,12 @@ async fn action_review_terminal_states_deliver_once_service_e2e() -> Result<()> 
     tokio::time::timeout(SERVICE_TIMEOUT, clear)
         .await
         .context("cleared action-review decision timed out")???;
+    let cleared_outbox = await_outbox_delivered(&pool, cleared_review.id, 1).await?;
+    assert_eq!(cleared_outbox.resolution_status, "completed");
     assert_eq!(
         reaper.trigger_execution_review_dispatch().await?,
-        1,
-        "the cleared review resolution must be dispatched through the production outbox"
+        0,
+        "the cleared decision must durably wake the production outbox dispatcher"
     );
     let cleared_terminal =
         await_review_terminal("cleared", &fixture, &cleared_run, Duration::from_secs(15)).await?;
@@ -1293,9 +1149,28 @@ async fn action_review_terminal_states_deliver_once_service_e2e() -> Result<()> 
         1,
     );
     assert_review_status(&pool, cleared_review.id, "cleared").await?;
-    let cleared_outbox = await_outbox_delivered(&pool, cleared_review.id, 1).await?;
-    assert_eq!(cleared_outbox.resolution_status, "completed");
     assert_review_audit_once(&cleared_run, cleared_review.id, 1).await?;
+
+    fixture
+        .client
+        .post_void(
+            "/ActionReviews/decide",
+            &DecideActionReviewRequest {
+                tenant_id: cleared_run.tenant_id,
+                review_id: cleared_review.id,
+                decision: ActionReviewDecisionKind::Cleared,
+                reason: None,
+            },
+        )
+        .await?;
+    assert_eq!(
+        reaper.trigger_execution_review_dispatch().await?,
+        0,
+        "replaying the exact decision must not enqueue another resolution"
+    );
+    let cleared_replay = await_outbox_delivered(&pool, cleared_review.id, 1).await?;
+    assert_eq!(cleared_replay.attempt_count, 1);
+    assert_eq!(controller.calls().len(), 1);
 
     let denied = prepare_capability_run(
         &fixture,
@@ -1320,10 +1195,12 @@ async fn action_review_terminal_states_deliver_once_service_e2e() -> Result<()> 
             },
         )
         .await?;
+    let denied_outbox = await_outbox_delivered(&pool, denied_review.id, 1).await?;
+    assert_eq!(denied_outbox.resolution_status, "denied");
     assert_eq!(
         reaper.trigger_execution_review_dispatch().await?,
-        1,
-        "the denied review resolution must be dispatched through the production outbox"
+        0,
+        "the denied decision must durably wake the production outbox dispatcher"
     );
     let denied_terminal =
         await_review_terminal("denied", &fixture, &denied_run, Duration::from_secs(15)).await?;
@@ -1337,8 +1214,6 @@ async fn action_review_terminal_states_deliver_once_service_e2e() -> Result<()> 
         1,
     );
     assert_review_status(&pool, denied_review.id, "denied").await?;
-    let denied_outbox = await_outbox_delivered(&pool, denied_review.id, 1).await?;
-    assert_eq!(denied_outbox.resolution_status, "denied");
     assert_review_audit_once(&denied_run, denied_review.id, 1).await?;
     assert_eq!(controller.calls().len(), 1);
 
@@ -1605,6 +1480,7 @@ async fn duplicate_completion_does_not_double_account_service_e2e() -> Result<()
 struct PreparedCapabilityRun {
     tenant_id: TenantId,
     session_id: SessionId,
+    admitted_identity: moa_core::traits::Identity,
     originating_user_sequence_num: u64,
     planning: ExecutionPlanningContextResponse,
     compiled: CompiledExecution,
@@ -1864,6 +1740,7 @@ async fn prepare_capability_run_inner(
                 contact_id: None,
                 session_id,
                 originating_user_sequence_num,
+                deadline_at: chrono::Utc::now() + chrono::TimeDelta::days(1),
                 requested_template: None,
             },
         )
@@ -1907,6 +1784,11 @@ async fn prepare_capability_run_inner(
     Ok(PreparedCapabilityRun {
         tenant_id: session.tenant_id,
         session_id,
+        admitted_identity: fixture
+            .client
+            .identity()
+            .cloned()
+            .context("fixture client must carry an admitted identity")?,
         originating_user_sequence_num,
         planning,
         compiled,
@@ -2106,6 +1988,12 @@ fn recompile_as_agent(
     });
     let plan = ExecutionPlanDefinition {
         cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+        input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+            expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                delay_seconds: 86_400,
+            },
+            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+        },
         input_schema: json!({"type": "object", "additionalProperties": false}),
         output_schema: output_schema.clone(),
         nodes: vec![
@@ -2171,13 +2059,31 @@ fn recompile_as_external_wait(
     let operation = match wait {
         ExternalWaitKind::Review => ExecutionOperation::Review {
             prompt: "Approve the deterministic fixture result".to_string(),
+            wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                    delay_seconds: 86_400,
+                },
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+            },
         },
         ExternalWaitKind::Signal => ExecutionOperation::WaitSignal {
             signal_name: "fixture-ready".to_string(),
+            wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                    delay_seconds: 86_400,
+                },
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+            },
         },
     };
     let plan = ExecutionPlanDefinition {
         cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+        input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+            expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                delay_seconds: 86_400,
+            },
+            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+        },
         input_schema: json!({"type": "object", "additionalProperties": false}),
         output_schema: output_schema.clone(),
         nodes: vec![
@@ -2292,6 +2198,7 @@ async fn create_direct_run(
         .repository
         .create_run(
             prepared.scope,
+            &moa_config::ExecutionConfig::default(),
             NewExecutionRun {
                 tenant_id: prepared.tenant_id,
                 contact_id: None,
@@ -2300,6 +2207,7 @@ async fn create_direct_run(
                 planning_context_uid: prepared.planning.planning_context_uid,
                 planning_context_hash: prepared.planning.planning_context_hash.parse()?,
                 owner_user_id: prepared.planning.snapshot.owner_user_id.clone(),
+                admitted_identity: prepared.admitted_identity.clone(),
                 goal: prepared.compiled.goal.clone(),
                 plan: prepared.compiled.plan.clone(),
                 catalog: prepared.planning.snapshot.catalog.clone(),
@@ -2317,6 +2225,9 @@ async fn create_direct_run(
             },
         )
         .await?;
+    let RunAdmissionOutcome::Admitted(run) = run else {
+        bail!("direct task lifecycle run was not admitted: {run:?}")
+    };
     let task_id = ExecutionTaskId::derive(run.run_uid, CAPABILITY_NODE_ID, "")?;
     prepared
         .repository
@@ -2389,6 +2300,12 @@ fn lifecycle_plan_with_output_schema(
 ) -> ExecutionPlanDefinition {
     ExecutionPlanDefinition {
         cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+        input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+            expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                delay_seconds: 86_400,
+            },
+            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+        },
         input_schema: json!({"type": "object", "additionalProperties": false}),
         output_schema: output_schema.clone(),
         nodes: vec![
@@ -2544,25 +2461,6 @@ async fn await_run_status(
         }
         if Instant::now() >= deadline {
             bail!("run did not reach {expected:?} within {SERVICE_TIMEOUT:?}: {persisted:#?}");
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-}
-
-async fn await_positive_processed_wake_epoch(run: &RunningCapabilityRun) -> Result<u64> {
-    let deadline = Instant::now() + SERVICE_TIMEOUT;
-    loop {
-        let persisted = load_run(run).await?;
-        if persisted.processed_wake_epoch > 0 {
-            return Ok(persisted.processed_wake_epoch);
-        }
-        if persisted.status.is_terminal() {
-            bail!("run terminalized before acknowledging a wake epoch: {persisted:#?}");
-        }
-        if Instant::now() >= deadline {
-            bail!(
-                "run did not acknowledge a positive wake epoch within {SERVICE_TIMEOUT:?}: {persisted:#?}"
-            );
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }

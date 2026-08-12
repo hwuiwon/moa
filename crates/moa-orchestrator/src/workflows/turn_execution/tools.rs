@@ -659,7 +659,8 @@ async fn handle_tool_call(
                 *tool_context.delegated_worker = true;
             }
         }
-        GovernedInvocationOutcome::UnknownOutcome { .. }
+        GovernedInvocationOutcome::ExternalJob { .. }
+        | GovernedInvocationOutcome::UnknownOutcome { .. }
         | GovernedInvocationOutcome::NotDispatched { .. } => {
             return Err(TerminalError::new(
                 "root-turn governed invocation returned an execution-only outcome",

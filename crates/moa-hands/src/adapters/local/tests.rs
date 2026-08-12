@@ -228,6 +228,7 @@ async fn local_commit_rejects_a_parent_at_generation_zero_before_storage_work() 
             operation,
             hand: HandHandle::local(dir.path().join("missing-compute")),
             parent_revision: Some(parent),
+            release_compute: false,
         })
         .await
         .expect_err("generation-zero parent must fail before compute/storage access");

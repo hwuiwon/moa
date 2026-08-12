@@ -67,13 +67,15 @@ use crate::services::{
 };
 use moa_artifacts::registry::ArtifactRegistry;
 
+#[cfg(all(feature = "provider-overrides", feature = "integration"))]
+use crate::services::tool_executor::{
+    ExecutionExternalJobAdapter, FixtureExternalJobTool, FixtureHttpExecutionExternalJobAdapter,
+};
 use crate::{
     config::ProvidersOverride,
     lineage::{LineageSinkRuntime, build_lineage_sink},
-    runtime::{
-        jobs::{restate_ingress_base_url, start_authz_outbox_poller},
-        kms::KmsRuntime,
-    },
+    runtime::{jobs::restate_ingress_base_url, kms::KmsRuntime},
+    services::tool_executor::ExecutionExternalJobAdapterRegistry,
 };
 
 /// Constructed dependencies shared by Restate handlers and process services.
@@ -106,6 +108,8 @@ pub struct RuntimeDeps {
     pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     /// Tool router used by ToolExecutor and runtime services.
     pub tool_router: Arc<ToolRouter>,
+    /// Shared asynchronous-provider adapter registry used by execution and raw callbacks.
+    pub external_job_adapters: ExecutionExternalJobAdapterRegistry,
     /// Authenticated checkpoint-bucket versioning observer shared with the store gate.
     pub checkpoint_versioning_observer: Option<
         moa_hands::core::sandbox_workspace::checkpoint::versioning::CheckpointBucketVersioningObserver,
@@ -141,8 +145,6 @@ pub struct RuntimeDeps {
     pub lineage: LineageSinkRuntime,
     /// Awakeable resolver used by builtin async authorization.
     pub awakeable_resolver: Arc<dyn AwakeableResolver>,
-    /// Optional OpenFGA outbox poller handle.
-    pub authz_outbox_poller: Option<moa_authz::PollerHandle>,
     /// Owned security-audit writer.
     ///
     /// Held so shutdown can drain it. Dropping these deps instead aborts it,
@@ -218,9 +220,6 @@ impl RuntimeDeps {
                 emit_allows: config.audit_security.emit_authz_allows,
             }))
         };
-        let authz_outbox_poller = fga_client
-            .clone()
-            .map(|fga_client| start_authz_outbox_poller(&background_pool, fga_client));
         let session_store = Arc::new(
             PostgresSessionStore::from_existing_pool_with_config(config.as_ref(), pool.clone())
                 .await?,
@@ -239,6 +238,7 @@ impl RuntimeDeps {
             .context("build operator-message delivery sink")?;
         let egress_classifier = (!config.mcp_servers.is_empty() || config.llm_dlp.tokenize_enabled)
             .then(|| build_egress_pii_classifier(config.as_ref()));
+        let provider_override_active = providers_override.is_active();
         let providers = Arc::new(build_provider_registry(
             config.as_ref(),
             Arc::clone(&runtime_cache),
@@ -307,7 +307,7 @@ impl RuntimeDeps {
             mcp_egress_guard,
             Some(session_store.clone()),
             checkpoint_store.clone(),
-            workspace_runtime_enabled.then(|| pool.clone()),
+            Some(pool.clone()),
             workspace_runtime_enabled.then(|| kms.provider()),
             workspace_runtime_enabled,
         )
@@ -334,6 +334,8 @@ impl RuntimeDeps {
         .with_memory_tool_executor(Arc::new(
             moa_memory_ingest::FastMemoryToolExecutor::new(ingest_runtime.clone()),
         ));
+        let external_job_adapters = build_external_job_adapter_registry(provider_override_active)?;
+        let tool_router = register_fixture_external_job_tool(tool_router, &external_job_adapters)?;
         // Both sandbox owners are attached by the builder chain above, so the
         // cloud requirement can only be checked once the router is complete.
         if workspace_runtime_enabled {
@@ -386,7 +388,6 @@ impl RuntimeDeps {
             lineage.handle.clone(),
         ));
         let channel_adapters = build_channel_adapters(config.as_ref(), runtime_cache.clone())?;
-
         Ok(Self {
             config,
             pool,
@@ -400,6 +401,7 @@ impl RuntimeDeps {
             providers,
             embedding_provider,
             tool_router,
+            external_job_adapters,
             checkpoint_versioning_observer,
             workspace_maintenance,
             sandbox_workspace_fenced_tenants,
@@ -414,7 +416,6 @@ impl RuntimeDeps {
             delivery_sink,
             lineage,
             awakeable_resolver,
-            authz_outbox_poller,
             channel_adapters,
             audit: Arc::new(audit),
         })
@@ -663,6 +664,59 @@ fn build_provider_registry(
             Ok(ProviderRegistry::mock(seed)?)
         }
     }
+}
+
+#[cfg(all(feature = "provider-overrides", feature = "integration"))]
+fn build_external_job_adapter_registry(
+    provider_override_active: bool,
+) -> Result<ExecutionExternalJobAdapterRegistry> {
+    let Some(base_url) = std::env::var("MOA_FIXTURE_EXTERNAL_JOB_ADAPTER_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(ExecutionExternalJobAdapterRegistry::default());
+    };
+    if !provider_override_active {
+        bail!(
+            "MOA_FIXTURE_EXTERNAL_JOB_ADAPTER_URL requires the provider-override integration lane"
+        );
+    }
+    let adapter = Arc::new(FixtureHttpExecutionExternalJobAdapter::new(&base_url)?)
+        as Arc<dyn ExecutionExternalJobAdapter>;
+    ExecutionExternalJobAdapterRegistry::new([adapter]).map_err(Into::into)
+}
+
+#[cfg(not(all(feature = "provider-overrides", feature = "integration")))]
+fn build_external_job_adapter_registry(
+    _provider_override_active: bool,
+) -> Result<ExecutionExternalJobAdapterRegistry> {
+    if std::env::var_os("MOA_FIXTURE_EXTERNAL_JOB_ADAPTER_URL").is_some() {
+        bail!(
+            "MOA_FIXTURE_EXTERNAL_JOB_ADAPTER_URL requires provider-overrides and integration features"
+        );
+    }
+    Ok(ExecutionExternalJobAdapterRegistry::default())
+}
+
+#[cfg(all(feature = "provider-overrides", feature = "integration"))]
+fn register_fixture_external_job_tool(
+    tool_router: ToolRouter,
+    adapters: &ExecutionExternalJobAdapterRegistry,
+) -> Result<ToolRouter> {
+    if !adapters.is_empty() {
+        return tool_router
+            .with_additional_builtin(Arc::new(FixtureExternalJobTool))
+            .map_err(Into::into);
+    }
+    Ok(tool_router)
+}
+
+#[cfg(not(all(feature = "provider-overrides", feature = "integration")))]
+fn register_fixture_external_job_tool(
+    tool_router: ToolRouter,
+    _adapters: &ExecutionExternalJobAdapterRegistry,
+) -> Result<ToolRouter> {
+    Ok(tool_router)
 }
 
 /// Attaches LLM DLP to `registry` when `[llm_dlp].tokenize_enabled`

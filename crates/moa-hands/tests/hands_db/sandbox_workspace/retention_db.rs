@@ -40,6 +40,7 @@ use object_store::memory::InMemory;
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use tempfile::TempDir;
 use tokio::sync::Mutex;
+use tokio::sync::oneshot;
 
 /// Provider registry key shared by the three maintenance DB behavior modules.
 pub(super) const SCRIPTED_PROVIDER: &str = "scripted-maintenance-db";
@@ -123,6 +124,8 @@ pub(super) struct ScriptedMaintenanceStorageProvider {
     account_id: ProviderAccountId,
     runtime_pool: PgPool,
     inventory: Mutex<Vec<ProviderInventoryResource>>,
+    inventory_started: Mutex<Option<oneshot::Sender<()>>>,
+    inventory_release: Mutex<Option<oneshot::Receiver<()>>>,
     delete_observations: Mutex<Vec<DeleteObservation>>,
 }
 
@@ -133,6 +136,8 @@ impl ScriptedMaintenanceStorageProvider {
             account_id,
             runtime_pool,
             inventory: Mutex::new(Vec::new()),
+            inventory_started: Mutex::new(None),
+            inventory_release: Mutex::new(None),
             delete_observations: Mutex::new(Vec::new()),
         }
     }
@@ -140,6 +145,15 @@ impl ScriptedMaintenanceStorageProvider {
     /// Replaces the complete provider-account inventory returned on the next observation.
     pub(super) async fn set_inventory(&self, resources: Vec<ProviderInventoryResource>) {
         *self.inventory.lock().await = resources;
+    }
+
+    /// Gates the next inventory call so a second maintenance replica can race its claim.
+    pub(super) async fn gate_next_inventory(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        *self.inventory_started.lock().await = Some(started_tx);
+        *self.inventory_release.lock().await = Some(release_rx);
+        (started_rx, release_tx)
     }
 
     /// Returns the exact tenant-purge delete calls observed by the provider.
@@ -169,6 +183,14 @@ impl SandboxStorageProvider for ScriptedMaintenanceStorageProvider {
             return Err(MoaError::ValidationError(
                 "scripted inventory crossed its provider-account generation".to_string(),
             ));
+        }
+        if let Some(started) = self.inventory_started.lock().await.take() {
+            let _ = started.send(());
+        }
+        if let Some(release) = self.inventory_release.lock().await.take() {
+            release.await.map_err(|_| {
+                MoaError::StorageError("inventory claim gate disappeared".to_string())
+            })?;
         }
         Ok(ProviderAccountStorageInventory {
             provider_account_id,

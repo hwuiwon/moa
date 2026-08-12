@@ -1,7 +1,7 @@
 //! Restate execution service handlers and durable mutation operations.
 
 use super::capability_catalog::list_capabilities_inner;
-use super::planning_context::planning_context_inner;
+use super::planning_context::{PlanningContextInput, planning_context_inner};
 use super::start::start_inner;
 use super::support::*;
 use super::*;
@@ -81,21 +81,23 @@ impl Execution for ExecutionImpl {
         let connector_catalog = self.connector_catalog.clone();
         let catalog_identity = identity.clone();
         let config = self.config.clone();
+        let planning_admitted_at = event_record.timestamp;
         Ok(ctx
             .run(|| async move {
                 let scoped_catalog = connector_catalog
                     .for_session(&catalog_identity, &parent)
                     .await
                     .map_err(scoped_catalog_error)?;
-                planning_context_inner(
+                planning_context_inner(PlanningContextInput {
                     pool,
-                    scoped_catalog.snapshot().capability_registrations(),
+                    registrations: scoped_catalog.snapshot().capability_registrations(),
                     config,
                     parent,
                     owner_user_id,
-                    event_record.event,
+                    originating_event: event_record.event,
+                    planning_admitted_at,
                     request,
-                )
+                })
                 .await
                 .map(Json::from)
             })
@@ -163,9 +165,10 @@ impl Execution for ExecutionImpl {
         };
         let pool = self.pool.clone();
         let config = self.config.clone();
+        let admitted_identity = identity.clone();
         let response = ctx
             .run(|| async move {
-                start_inner(pool, config, request, objective)
+                start_inner(pool, config, request, objective, admitted_identity)
                     .await
                     .map(Json::from)
             })
@@ -180,6 +183,11 @@ impl Execution for ExecutionImpl {
             &identity,
         )
         .send();
+        if !response.confirmation_required {
+            // A newly admitted run always starts at controller generation zero. The durable
+            // RunActivation outbox remains authoritative; this stable kick only reduces latency.
+            kick_execution_dispatcher(&ctx, response.run.run_uid, 0, "start").await?;
+        }
         Ok(Json::from(response))
     }
 
@@ -203,16 +211,8 @@ impl Execution for ExecutionImpl {
             .await?
             .into_inner();
         if let Some(wake_epoch) = accepted.wake_epoch() {
-            let handoff_started = std::time::Instant::now();
             pause_execution_mutation_handoff_for_test().await;
-            call_run_wake(
-                &ctx,
-                run_request.run_uid,
-                wake_epoch,
-                ExecutionRunWakeReason::Confirmed,
-                handoff_started,
-            )
-            .await?;
+            kick_execution_dispatcher(&ctx, run_request.run_uid, wake_epoch, "confirm").await?;
         }
         Ok(Json::from(accepted.into_response()))
     }
@@ -311,29 +311,65 @@ impl Execution for ExecutionImpl {
             .await?;
         let run_request = request.run.clone();
         let pool = self.pool.clone();
+        let config = self.config.clone();
         let accepted = ctx
-            .run(|| async move { cancel_inner(pool, request).await.map(Json::from) })
+            .run(|| async move { cancel_inner(pool, config, request).await.map(Json::from) })
             .name("execution_cancel")
             .await?
             .into_inner();
         if let Some(wake_epoch) = accepted.wake_epoch() {
-            let handoff_started = std::time::Instant::now();
             pause_execution_mutation_handoff_for_test().await;
-            cancel_completion_owner_from_service(
-                &ctx,
-                LLMCompletionOwner::execution_run(run_request.run_uid.to_string()),
-            )
-            .await?;
-            call_run_wake(
-                &ctx,
-                run_request.run_uid,
-                wake_epoch,
-                ExecutionRunWakeReason::Cancelled,
-                handoff_started,
-            )
-            .await?;
+            kick_execution_dispatcher(&ctx, run_request.run_uid, wake_epoch, "cancel").await?;
         }
         Ok(Json::from(accepted.into_response()))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn pause(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ExecutionRunControlRequest>,
+    ) -> Result<Json<ExecutionRunControlResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Execution", "pause");
+        let request = request.into_inner();
+        self.authz
+            .authorize_session_participant(&ctx, request.run.session_id)
+            .await?;
+        let run_uid = request.run.run_uid;
+        let pool = self.pool.clone();
+        let config = self.config.clone();
+        let response = ctx
+            .run(|| async move { pause_inner(pool, config, request).await.map(Json::from) })
+            .name("execution_pause")
+            .await?
+            .into_inner();
+        kick_control_dispatcher(&ctx, run_uid, "pause", &response).await?;
+        Ok(Json::from(response))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn resume(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ExecutionRunControlRequest>,
+    ) -> Result<Json<ExecutionRunControlResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Execution", "resume");
+        let request = request.into_inner();
+        self.authz
+            .authorize_session_participant(&ctx, request.run.session_id)
+            .await?;
+        let run_uid = request.run.run_uid;
+        let pool = self.pool.clone();
+        let config = self.config.clone();
+        let response = ctx
+            .run(|| async move { resume_inner(pool, config, request).await.map(Json::from) })
+            .name("execution_resume")
+            .await?
+            .into_inner();
+        kick_control_dispatcher(&ctx, run_uid, "resume", &response).await?;
+        Ok(Json::from(response))
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -363,45 +399,19 @@ impl Execution for ExecutionImpl {
         }
         let task_request = request.clone();
         let pool = self.pool.clone();
+        let config = self.config.clone();
         let accepted = ctx
-            .run(|| async move { deliver_input_inner(pool, request).await.map(Json::from) })
+            .run(|| async move {
+                deliver_input_inner(pool, config, request)
+                    .await
+                    .map(Json::from)
+            })
             .name("execution_deliver_input")
             .await?
             .into_inner();
         if let Some(wake_epoch) = accepted.wake_epoch() {
-            let handoff_started = std::time::Instant::now();
             pause_execution_mutation_handoff_for_test().await;
-            if accepted
-                .task_ids_to_release()
-                .contains(&task_request.task_id)
-            {
-                // The terminal task fence is already committed, and this detached
-                // cancellation releases a parked promise without claiming completion.
-                crate::restate_identity::replay_safe_request(
-                    ctx.workflow_client::<ExecutionTaskClient>(task_request.task_id.to_string())
-                        .cancel(Json::from(
-                            "execution input redispatch reached a terminal admission outcome"
-                                .to_string(),
-                        )),
-                )
-                .send();
-            } else {
-                crate::restate_identity::replay_safe_request(
-                    ctx.workflow_client::<ExecutionTaskClient>(task_request.task_id.to_string())
-                        .input_delivered(Json::from(task_request.clone())),
-                )
-                .call()
-                .await
-                .map_err(HandlerError::from)?;
-            }
-            call_run_wake(
-                &ctx,
-                task_request.run_uid,
-                wake_epoch,
-                ExecutionRunWakeReason::InputDelivered,
-                handoff_started,
-            )
-            .await?;
+            kick_execution_dispatcher(&ctx, task_request.run_uid, wake_epoch, "input").await?;
         }
         Ok(Json::from(accepted.into_response()))
     }
@@ -420,29 +430,19 @@ impl Execution for ExecutionImpl {
             .await?;
         let task_request = request.clone();
         let pool = self.pool.clone();
+        let config = self.config.clone();
         let accepted = ctx
-            .run(|| async move { decide_review_inner(pool, request).await.map(Json::from) })
+            .run(|| async move {
+                decide_review_inner(pool, config, request)
+                    .await
+                    .map(Json::from)
+            })
             .name("execution_decide_review")
             .await?
             .into_inner();
         if let Some(wake_epoch) = accepted.wake_epoch() {
-            let handoff_started = std::time::Instant::now();
             pause_execution_mutation_handoff_for_test().await;
-            crate::restate_identity::replay_safe_request(
-                ctx.workflow_client::<ExecutionTaskClient>(task_request.task_id.to_string())
-                    .review_decided(Json::from(task_request.clone())),
-            )
-            .call()
-            .await
-            .map_err(HandlerError::from)?;
-            call_run_wake(
-                &ctx,
-                task_request.run_uid,
-                wake_epoch,
-                ExecutionRunWakeReason::ReviewDecided,
-                handoff_started,
-            )
-            .await?;
+            kick_execution_dispatcher(&ctx, task_request.run_uid, wake_epoch, "review").await?;
         }
         Ok(Json::from(accepted.into_response()))
     }
@@ -461,29 +461,19 @@ impl Execution for ExecutionImpl {
             .await?;
         let task_request = request.clone();
         let pool = self.pool.clone();
+        let config = self.config.clone();
         let accepted = ctx
-            .run(|| async move { deliver_signal_inner(pool, request).await.map(Json::from) })
+            .run(|| async move {
+                deliver_signal_inner(pool, config, request)
+                    .await
+                    .map(Json::from)
+            })
             .name("execution_deliver_signal")
             .await?
             .into_inner();
         if let Some(wake_epoch) = accepted.wake_epoch() {
-            let handoff_started = std::time::Instant::now();
             pause_execution_mutation_handoff_for_test().await;
-            crate::restate_identity::replay_safe_request(
-                ctx.workflow_client::<ExecutionTaskClient>(task_request.task_id.to_string())
-                    .signal_delivered(Json::from(task_request.clone())),
-            )
-            .call()
-            .await
-            .map_err(HandlerError::from)?;
-            call_run_wake(
-                &ctx,
-                task_request.run_uid,
-                wake_epoch,
-                ExecutionRunWakeReason::SignalDelivered,
-                handoff_started,
-            )
-            .await?;
+            kick_execution_dispatcher(&ctx, task_request.run_uid, wake_epoch, "signal").await?;
         }
         Ok(Json::from(accepted.into_response()))
     }
@@ -513,64 +503,8 @@ impl Execution for ExecutionImpl {
             .await?
             .into_inner();
         if let Some(wake_epoch) = accepted.wake_epoch() {
-            let handoff_started = std::time::Instant::now();
             pause_execution_mutation_handoff_for_test().await;
-            call_run_wake(
-                &ctx,
-                run_uid,
-                wake_epoch,
-                ExecutionRunWakeReason::AmendmentAccepted,
-                handoff_started,
-            )
-            .await?;
-        }
-        // The amendment transaction already fenced these tasks. Cancellation only
-        // releases their parked promises and does not claim task completion.
-        for task_id in accepted.task_ids_to_release() {
-            crate::restate_identity::replay_safe_request(
-                ctx.workflow_client::<ExecutionTaskClient>(task_id.to_string())
-                    .cancel(Json::from(
-                        "execution task superseded or stopped by amendment".to_string(),
-                    )),
-            )
-            .send();
-        }
-        Ok(Json::from(accepted.into_response()))
-    }
-
-    #[tracing::instrument(skip(self, ctx, request))]
-    // SAFETY: called only by the keyed ExecutionRun workflow; the request carries no authority and apply_amendment_inner reloads and revision-fences all persisted scope.
-    async fn apply_planned_amendment(
-        &self,
-        ctx: Context<'_>,
-        request: Json<ExecutionAmendmentRequest>,
-    ) -> Result<Json<ExecutionMutationResponse>, HandlerError> {
-        crate::ctx::adopt_incoming_trace_parent(&ctx);
-        annotate_restate_handler_span("Execution", "apply_planned_amendment");
-        let request = request.into_inner();
-        let pool = self.pool.clone();
-        let config = self.config.clone();
-        let accepted = ctx
-            .run(|| async move {
-                apply_amendment_inner(pool, config, request)
-                    .await
-                    .map(Json::from)
-            })
-            .name("execution_apply_planned_amendment")
-            .await?
-            .into_inner();
-        // The owning ExecutionRun awaits this mutation and immediately continues
-        // its drive loop, so a self-wake would be redundant.
-        // The committed amendment also fences released tasks; these detached
-        // cancellations only release parked promises and claim no completion.
-        for task_id in accepted.task_ids_to_release() {
-            crate::restate_identity::replay_safe_request(
-                ctx.workflow_client::<ExecutionTaskClient>(task_id.to_string())
-                    .cancel(Json::from(
-                        "execution task superseded or stopped by amendment".to_string(),
-                    )),
-            )
-            .send();
+            kick_execution_dispatcher(&ctx, run_uid, wake_epoch, "amendment").await?;
         }
         Ok(Json::from(accepted.into_response()))
     }
@@ -616,7 +550,7 @@ pub(super) async fn confirm_inner(
     let repository = ExecutionRepository::new(pool);
     let scope = execution_scope(request.run.tenant_id, request.run.contact_id);
     let Some(run) = repository
-        .load_run(scope, request.run.run_uid)
+        .load_run_for_session(scope, request.run.run_uid, request.run.session_id)
         .await
         .map_err(execution_error)?
     else {
@@ -651,7 +585,7 @@ pub(super) async fn status_inner(
     let repository = ExecutionRepository::new(pool);
     let scope = execution_scope(request.tenant_id, request.contact_id);
     let run = repository
-        .load_run(scope, request.run_uid)
+        .load_run_for_session(scope, request.run_uid, request.session_id)
         .await
         .map_err(execution_error)?
         .ok_or_else(|| TerminalError::new_with_code(404, "execution run not found"))?;
@@ -671,7 +605,7 @@ pub(super) async fn synthesis_evidence_inner(
     let repository = ExecutionRepository::new(pool);
     let scope = execution_scope(request.run.tenant_id, request.run.contact_id);
     let run = repository
-        .load_run(scope, request.run.run_uid)
+        .load_run_for_session(scope, request.run.run_uid, request.run.session_id)
         .await
         .map_err(execution_error)?
         .ok_or_else(|| TerminalError::new_with_code(404, "execution run not found"))?;
@@ -753,7 +687,7 @@ pub(super) async fn list_tasks_inner(
     let repository = ExecutionRepository::new(pool);
     let scope = execution_scope(request.run.tenant_id, request.run.contact_id);
     let run = repository
-        .load_run(scope, request.run.run_uid)
+        .load_run_for_session(scope, request.run.run_uid, request.run.session_id)
         .await
         .map_err(execution_error)?
         .ok_or_else(|| TerminalError::new_with_code(404, "execution run not found"))?;
@@ -810,32 +744,41 @@ pub(super) async fn list_tasks_inner(
 
 pub(super) async fn cancel_inner(
     pool: sqlx::PgPool,
+    config: moa_config::ExecutionConfig,
     request: ExecutionCancelRequest,
 ) -> Result<ExecutionMutationAccepted, HandlerError> {
     let repository = ExecutionRepository::new(pool);
     let scope = execution_scope(request.run.tenant_id, request.run.contact_id);
-    let Some(snapshot) = repository
-        .load_scheduling_snapshot(scope, request.run.run_uid)
+    let Some(cancellation) = repository
+        .load_cancellation_projection_for_session(
+            scope,
+            request.run.run_uid,
+            request.run.session_id,
+        )
         .await
         .map_err(execution_error)?
     else {
         return Ok(not_found_mutation());
     };
-    verify_run_request(&snapshot.run, &request.run)?;
-    if snapshot.run.status == ExecutionRunStatus::Cancelled {
-        return Ok(replayed_mutation(&snapshot.run));
+    verify_run_request(&cancellation.run, &request.run)?;
+    if cancellation.run.status == ExecutionRunStatus::Cancelled {
+        return Ok(replayed_mutation(&cancellation.run));
     }
-    if let Some(pending) = &snapshot.run.pending_terminal {
+    if let Some(pending) = &cancellation.run.pending_terminal {
         return Ok(if pending.status == ExecutionRunStatus::Cancelled {
-            replayed_mutation(&snapshot.run)
+            replayed_mutation(&cancellation.run)
         } else {
             conflict_mutation(ExecutionConflictReason::AlreadyTerminal)
         });
     }
-    let terminal_evidence = cancellation_terminal_evidence(
-        &snapshot.run.goal,
-        &snapshot.run.active_plan,
-        &snapshot.projection,
+    let completed_node_ids = cancellation
+        .completed_node_ids
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let terminal_evidence = cancellation_terminal_evidence_from_completed_nodes(
+        &cancellation.run.goal,
+        &cancellation.run.active_plan,
+        &completed_node_ids,
     )
     .map_err(execution_error)?;
     let pending_terminal = PendingExecutionTerminal {
@@ -849,37 +792,178 @@ pub(super) async fn cancel_inner(
     };
     Ok(
         match repository
-            .fence_run_for_terminal(
+            .fence_completion_terminal_and_enqueue_settlement(
+                &config,
                 scope,
-                snapshot.run.run_uid,
-                snapshot.run.plan_revision,
-                snapshot.run.wake_epoch,
+                cancellation.run.run_uid,
+                cancellation.run.controller_generation,
+                cancellation.run.wake_epoch,
                 pending_terminal,
+                chrono::Utc::now(),
+                u32::try_from(
+                    config
+                        .maximum_activation_steps
+                        .min(config.max_in_flight_tasks)
+                        .min(1_000),
+                )
+                .map_err(|_| invalid_execution_request("terminal page limit exceeds u32"))?,
             )
             .await
             .map_err(execution_error)?
         {
-            TerminalFenceOutcome::Applied(commit) => applied_mutation(&commit.run),
-            TerminalFenceOutcome::Replayed(commit) => replayed_mutation(&commit.run),
-            TerminalFenceOutcome::NotFound => not_found_mutation(),
-            TerminalFenceOutcome::Conflict => {
+            PendingTerminalAdvanceOutcome::Applied(commit) => applied_mutation(&commit.run),
+            PendingTerminalAdvanceOutcome::Replayed(commit) => replayed_mutation(&commit.run),
+            PendingTerminalAdvanceOutcome::NotFound => not_found_mutation(),
+            PendingTerminalAdvanceOutcome::Conflict => {
                 conflict_mutation(ExecutionConflictReason::AlreadyTerminal)
             }
         },
     )
 }
 
+pub(super) async fn pause_inner(
+    pool: sqlx::PgPool,
+    config: moa_config::ExecutionConfig,
+    request: ExecutionRunControlRequest,
+) -> Result<ExecutionRunControlResponse, HandlerError> {
+    run_control_inner(pool, config, request, true).await
+}
+
+pub(super) async fn resume_inner(
+    pool: sqlx::PgPool,
+    config: moa_config::ExecutionConfig,
+    request: ExecutionRunControlRequest,
+) -> Result<ExecutionRunControlResponse, HandlerError> {
+    run_control_inner(pool, config, request, false).await
+}
+
+async fn run_control_inner(
+    pool: sqlx::PgPool,
+    config: moa_config::ExecutionConfig,
+    request: ExecutionRunControlRequest,
+    pause: bool,
+) -> Result<ExecutionRunControlResponse, HandlerError> {
+    if request.expected_controller_generation == 0 {
+        return Err(invalid_execution_request(
+            "expected_controller_generation must be positive",
+        ));
+    }
+    let repository = ExecutionRepository::new(pool);
+    let scope = execution_scope(request.run.tenant_id, request.run.contact_id);
+    let Some(run) = repository
+        .load_run_for_session(scope, request.run.run_uid, request.run.session_id)
+        .await
+        .map_err(execution_error)?
+    else {
+        return Ok(ExecutionRunControlResponse::NotFound);
+    };
+    verify_run_request(&run, &request.run)?;
+    let outcome = if pause {
+        repository
+            .pause_run(
+                scope,
+                &config,
+                request.run.run_uid,
+                request.expected_controller_generation,
+            )
+            .await
+    } else {
+        repository
+            .resume_run(
+                scope,
+                &config,
+                request.run.run_uid,
+                request.expected_controller_generation,
+            )
+            .await
+    }
+    .map_err(execution_error)?;
+    Ok(match outcome {
+        TransitionOutcome::RunApplied(run) => ExecutionRunControlResponse::Applied {
+            run: run_summary(&run),
+            controller_generation: run.controller_generation,
+            wake_epoch: run.wake_epoch,
+        },
+        TransitionOutcome::RunAlreadyApplied(run) => ExecutionRunControlResponse::Replayed {
+            run: run_summary(&run),
+            controller_generation: run.controller_generation,
+            wake_epoch: run.wake_epoch,
+        },
+        TransitionOutcome::NotFound => ExecutionRunControlResponse::NotFound,
+        TransitionOutcome::Rejected(TransitionRejection::GenerationMismatch) => {
+            ExecutionRunControlResponse::Conflict {
+                reason: ExecutionConflictReason::GenerationMismatch,
+            }
+        }
+        TransitionOutcome::Rejected(_) => ExecutionRunControlResponse::Conflict {
+            reason: ExecutionConflictReason::InvalidStatus,
+        },
+        TransitionOutcome::Applied(_) | TransitionOutcome::AlreadyApplied(_) => {
+            ExecutionRunControlResponse::Conflict {
+                reason: ExecutionConflictReason::InvalidStatus,
+            }
+        }
+    })
+}
+
+async fn kick_control_dispatcher(
+    ctx: &Context<'_>,
+    run_uid: uuid::Uuid,
+    action: &str,
+    response: &ExecutionRunControlResponse,
+) -> Result<(), HandlerError> {
+    let generation = match response {
+        ExecutionRunControlResponse::Applied {
+            controller_generation,
+            ..
+        }
+        | ExecutionRunControlResponse::Replayed {
+            controller_generation,
+            ..
+        } => *controller_generation,
+        ExecutionRunControlResponse::Conflict { .. } | ExecutionRunControlResponse::NotFound => {
+            return Ok(());
+        }
+    };
+    kick_execution_dispatcher(ctx, run_uid, generation, action).await
+}
+
+async fn kick_execution_dispatcher(
+    ctx: &Context<'_>,
+    run_uid: uuid::Uuid,
+    durable_fence: u64,
+    action: &str,
+) -> Result<(), HandlerError> {
+    use crate::services::execution_dispatcher::{
+        DispatchExecutionsRequest, ExecutionDispatcherClient,
+    };
+    let handle = crate::restate_identity::replay_safe_request(
+        ctx.service_client::<ExecutionDispatcherClient>()
+            .dispatch(Json::from(DispatchExecutionsRequest::default()))
+            .idempotency_key(format!("{run_uid}:{durable_fence}:{action}")),
+    )
+    .send();
+    let _invocation_id = handle.invocation_id().await?;
+    Ok(())
+}
+
 pub(super) async fn deliver_input_inner(
     pool: sqlx::PgPool,
+    config: moa_config::ExecutionConfig,
     request: ExecutionInputRequest,
 ) -> Result<ExecutionMutationAccepted, HandlerError> {
     let repository = ExecutionRepository::new(pool);
     let scope = execution_scope(request.tenant_id, request.contact_id);
-    let Some(run) = repository
-        .load_run(scope, request.run_uid)
-        .await
-        .map_err(execution_error)?
-    else {
+    let run = match request.session_id {
+        Some(session_id) => {
+            repository
+                .load_run_for_session(scope, request.run_uid, session_id)
+                .await
+        }
+        None => repository.load_run(scope, request.run_uid).await,
+    }
+    .map_err(execution_error)?;
+    let Some(run) = run else {
         return Ok(not_found_mutation());
     };
     if run.tenant_id != request.tenant_id
@@ -909,6 +993,7 @@ pub(super) async fn deliver_input_inner(
     let transition = repository
         .resume_task_with_input(
             scope,
+            &config,
             run.run_uid,
             task.task_id,
             request.expected_generation,
@@ -921,6 +1006,7 @@ pub(super) async fn deliver_input_inner(
 
 pub(super) async fn decide_review_inner(
     pool: sqlx::PgPool,
+    config: moa_config::ExecutionConfig,
     request: ExecutionReviewDecisionRequest,
 ) -> Result<ExecutionMutationAccepted, HandlerError> {
     let repository = ExecutionRepository::new(pool);
@@ -942,12 +1028,13 @@ pub(super) async fn decide_review_inner(
     else {
         return Ok(not_found_mutation());
     };
-    if !matches!(
-        task.kind,
-        moa_execution::state::LogicalTaskKind::Review { .. }
-    ) {
-        return Ok(conflict_mutation(ExecutionConflictReason::InvalidStatus));
-    }
+    let _wait_policy = match &task.kind {
+        moa_execution::state::LogicalTaskKind::Review {
+            prompt: _,
+            wait_policy,
+        } => wait_policy,
+        _ => return Ok(conflict_mutation(ExecutionConflictReason::InvalidStatus)),
+    };
     let result = match request.decision {
         ExecutionReviewDecision::Approved { payload } => ExecutionTaskResult::Completed {
             output: payload,
@@ -960,6 +1047,7 @@ pub(super) async fn decide_review_inner(
     };
     external_wait_mutation(
         &repository,
+        &config,
         scope,
         &run,
         &task,
@@ -971,6 +1059,7 @@ pub(super) async fn decide_review_inner(
 
 pub(super) async fn deliver_signal_inner(
     pool: sqlx::PgPool,
+    config: moa_config::ExecutionConfig,
     request: ExecutionSignalRequest,
 ) -> Result<ExecutionMutationAccepted, HandlerError> {
     let repository = ExecutionRepository::new(pool);
@@ -992,16 +1081,19 @@ pub(super) async fn deliver_signal_inner(
     else {
         return Ok(not_found_mutation());
     };
-    let signal_matches = matches!(
-        &task.kind,
-        moa_execution::state::LogicalTaskKind::WaitSignal { signal_name }
-            if signal_name == &request.signal_name
-    );
+    let signal_matches = match &task.kind {
+        moa_execution::state::LogicalTaskKind::WaitSignal {
+            signal_name,
+            wait_policy: _wait_policy,
+        } => signal_name == &request.signal_name,
+        _ => false,
+    };
     if !signal_matches {
         return Ok(conflict_mutation(ExecutionConflictReason::SignalMismatch));
     }
     external_wait_mutation(
         &repository,
+        &config,
         scope,
         &run,
         &task,
@@ -1016,6 +1108,7 @@ pub(super) async fn deliver_signal_inner(
 
 pub(super) async fn external_wait_mutation(
     repository: &ExecutionRepository,
+    config: &moa_config::ExecutionConfig,
     scope: ExecutionScope,
     run: &ExecutionRunRecord,
     task: &ExecutionTaskRecord,
@@ -1023,7 +1116,12 @@ pub(super) async fn external_wait_mutation(
     result: ExecutionTaskResult,
 ) -> Result<ExecutionMutationAccepted, HandlerError> {
     if task.generation == generation
-        && task.status == ExecutionTaskStatus::Running
+        && matches!(
+            task.status,
+            ExecutionTaskStatus::Running
+                | ExecutionTaskStatus::WaitingReview
+                | ExecutionTaskStatus::WaitingSignal
+        )
         && let ExecutionTaskResult::Completed { output, .. } = &result
     {
         validate_external_wait_payload(&run.active_plan.definition, &task.node_id, output)?;
@@ -1031,6 +1129,7 @@ pub(super) async fn external_wait_mutation(
     let write = repository
         .complete_external_wait(
             scope,
+            config,
             run.run_uid,
             task.task_id,
             generation,
@@ -1052,19 +1151,12 @@ pub(super) async fn apply_amendment_inner(
 ) -> Result<ExecutionMutationAccepted, HandlerError> {
     let repository = ExecutionRepository::new(pool);
     let scope = execution_scope(request.run.tenant_id, request.run.contact_id);
-    let Some(snapshot) = repository
-        .load_scheduling_snapshot(scope, request.run.run_uid)
-        .await
-        .map_err(execution_error)?
-    else {
-        return Ok(not_found_mutation());
-    };
-    verify_run_request(&snapshot.run, &request.run)?;
     let amendment_digest = amendment_hash(&request.amendment).map_err(execution_error)?;
     match repository
         .recover_amendment_handoff(
             scope,
-            snapshot.run.run_uid,
+            request.run.run_uid,
+            request.run.session_id,
             request.expected_plan_revision,
             &amendment_digest,
         )
@@ -1084,6 +1176,28 @@ pub(super) async fn apply_amendment_inner(
         }
         AmendmentReplayOutcome::NotApplied => {}
     }
+    let snapshot = match repository
+        .load_amendment_projection_for_session(
+            scope,
+            &config,
+            AmendmentProjectionRequest {
+                run_uid: request.run.run_uid,
+                session_id: request.run.session_id,
+                expected_plan_revision: request.expected_plan_revision,
+            },
+        )
+        .await
+        .map_err(execution_error)?
+    {
+        AmendmentProjectionOutcome::Ready(snapshot) => *snapshot,
+        AmendmentProjectionOutcome::NotFound => return Ok(not_found_mutation()),
+        AmendmentProjectionOutcome::Conflict => {
+            return Ok(conflict_mutation(
+                ExecutionConflictReason::PlanRevisionMismatch,
+            ));
+        }
+    };
+    verify_run_request(&snapshot.run, &request.run)?;
     if snapshot.run.plan_revision != request.expected_plan_revision {
         return Ok(conflict_mutation(
             ExecutionConflictReason::PlanRevisionMismatch,
@@ -1093,12 +1207,7 @@ pub(super) async fn apply_amendment_inner(
         .budget_ledger
         .remaining_limit()
         .map_err(execution_error)?;
-    let waiting_tasks = snapshot
-        .projection
-        .tasks
-        .iter()
-        .filter(|task| task.status == ExecutionTaskStatus::WaitingReplan)
-        .collect::<Vec<_>>();
+    let waiting_tasks = &snapshot.projection.replan_tasks;
     let [waiting_task] = waiting_tasks.as_slice() else {
         return Ok(conflict_mutation(ExecutionConflictReason::InvalidStatus));
     };
@@ -1121,8 +1230,8 @@ pub(super) async fn apply_amendment_inner(
         active_plan: snapshot.run.active_plan.clone(),
         amendment: request.amendment.clone(),
         projection: snapshot.projection.clone(),
-        catalog: snapshot.catalog.clone(),
-        authorization: snapshot.authorization.clone(),
+        catalog: snapshot.run.catalog.clone(),
+        authorization: snapshot.run.authorization.clone(),
         remaining_budget: remaining_budget.clone(),
         config: config.clone(),
         now,
@@ -1134,11 +1243,14 @@ pub(super) async fn apply_amendment_inner(
         return finalize_service_replan_stop(
             &repository,
             scope,
-            &snapshot,
-            waiting_task,
-            amendment_digest,
-            reason,
-            Some(&request.amendment.reason),
+            &config,
+            ServiceReplanStopRequest {
+                snapshot: &snapshot,
+                waiting_task,
+                amendment_digest,
+                reason,
+                detail: Some(&request.amendment.reason),
+            },
         )
         .await;
     }
@@ -1147,11 +1259,14 @@ pub(super) async fn apply_amendment_inner(
             return finalize_service_replan_stop(
                 &repository,
                 scope,
-                &snapshot,
-                waiting_task,
-                amendment_digest,
-                reason,
-                Some(&request.amendment.reason),
+                &config,
+                ServiceReplanStopRequest {
+                    snapshot: &snapshot,
+                    waiting_task,
+                    amendment_digest,
+                    reason,
+                    detail: Some(&request.amendment.reason),
+                },
             )
             .await;
         }
@@ -1186,17 +1301,21 @@ pub(super) async fn apply_amendment_inner(
         return finalize_service_replan_stop(
             &repository,
             scope,
-            &snapshot,
-            waiting_task,
-            amendment_digest,
-            reason,
-            Some(&request.amendment.reason),
+            &config,
+            ServiceReplanStopRequest {
+                snapshot: &snapshot,
+                waiting_task,
+                amendment_digest,
+                reason,
+                detail: Some(&request.amendment.reason),
+            },
         )
         .await;
     }
     let write = repository
         .append_amendment(
             scope,
+            &config,
             snapshot.run.run_uid,
             request.expected_plan_revision,
             ValidatedAmendment {
@@ -1223,104 +1342,43 @@ pub(super) async fn apply_amendment_inner(
     })
 }
 
-pub(super) async fn finalize_service_replan_stop(
-    repository: &ExecutionRepository,
-    scope: ExecutionScope,
-    snapshot: &moa_execution::repository::ExecutionSchedulingSnapshot,
-    waiting_task: &ExecutionTaskProjection,
+struct ServiceReplanStopRequest<'a> {
+    snapshot: &'a ExecutionAmendmentSnapshot,
+    waiting_task: &'a ExecutionTaskProjection,
     amendment_digest: ExecutionHash,
     reason: moa_execution::ReplanStopReason,
-    detail: Option<&str>,
-) -> Result<ExecutionMutationAccepted, HandlerError> {
-    let mut evaluation = evaluate_completion(CompletionEvaluationRequest {
-        goal: snapshot.run.goal.clone(),
-        plan: snapshot.run.active_plan.clone(),
-        run_input: snapshot.run.input.clone(),
-        projection: snapshot.projection.clone(),
-        terminal_output: snapshot.run.output.clone(),
-        budget_ledger: snapshot.budget_ledger.clone(),
-        now: chrono::Utc::now(),
-    })
-    .map_err(execution_error)?;
-    evaluation.status = replan_stop_status(
-        snapshot.run.output.is_some(),
-        evaluation.satisfied_requirement_ids.len(),
-    );
-    let stop_gaps = replan_stop_gaps(reason, detail);
-    evaluation.gaps.extend(stop_gaps.iter().cloned());
-    evaluation.gaps.sort();
-    evaluation.gaps.dedup();
-    let terminal = terminal_projection_from_evaluation(
-        &evaluation,
-        snapshot.run.output.clone(),
-        None,
-        None,
-        None,
-    )
-    .map_err(execution_error)?;
-    let terminal_status = moa_execution::state::run_status_from_terminal_projection(&terminal);
-    let terminal_evidence = terminal_evidence_from_evaluation(
-        ExecutionTerminalCause::ReplanStop { reason },
-        &evaluation,
-    )
-    .map_err(execution_error)?;
-    let terminal_reason =
-        execution_terminal_reason(&terminal_evidence.cause, &terminal, &evaluation)
-            .map_err(execution_error)?;
-    let pending_terminal = PendingExecutionTerminal {
-        status: terminal_status,
-        reason: terminal_reason,
-        terminal_evidence,
-        output: snapshot.run.output.clone(),
-        completion_check_results: evaluation
-            .checks
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|error| {
-                invalid_execution_request(format!(
-                    "serialize replan-stop completion checks: {error}"
-                ))
-            })?,
-        terminal_gaps: evaluation.gaps,
-        cancellation_reason: None,
-    };
-    Ok(
-        match repository
-            .fence_replan_stop(
-                scope,
-                snapshot.run.run_uid,
-                snapshot.run.plan_revision,
-                snapshot.run.wake_epoch,
-                pending_terminal,
-                ReplanStopReceipt {
-                    task_id: waiting_task.task_id,
-                    task_generation: waiting_task.generation,
-                    base_plan_revision: snapshot.run.plan_revision,
-                    amendment_hash: amendment_digest,
-                },
-            )
-            .await
-            .map_err(execution_error)?
-        {
-            TerminalFenceOutcome::Applied(commit) => applied_mutation(&commit.run),
-            TerminalFenceOutcome::Replayed(commit) => replayed_mutation(&commit.run),
-            TerminalFenceOutcome::Conflict => {
-                conflict_mutation(ExecutionConflictReason::PlanRevisionMismatch)
-            }
-            TerminalFenceOutcome::NotFound => not_found_mutation(),
-        },
-    )
+    detail: Option<&'a str>,
 }
 
-#[cfg(test)]
-/// Applies an amendment through the production inner boundary for library regressions.
-pub(crate) async fn apply_amendment_for_test(
-    pool: sqlx::PgPool,
-    config: ExecutionConfig,
-    request: ExecutionAmendmentRequest,
-) -> Result<ExecutionMutationResponse, HandlerError> {
-    apply_amendment_inner(pool, config, request)
+async fn finalize_service_replan_stop(
+    repository: &ExecutionRepository,
+    scope: ExecutionScope,
+    config: &ExecutionConfig,
+    request: ServiceReplanStopRequest<'_>,
+) -> Result<ExecutionMutationAccepted, HandlerError> {
+    let write = repository
+        .request_replan_stop(
+            scope,
+            config,
+            NewExecutionReplanStopIntent {
+                run_uid: request.snapshot.run.run_uid,
+                session_id: request.snapshot.run.session_id,
+                base_plan_revision: request.snapshot.run.plan_revision,
+                origin_task_id: request.waiting_task.task_id,
+                task_generation: request.waiting_task.generation,
+                amendment_hash: request.amendment_digest,
+                stop_reason: request.reason,
+                detail: request.detail.map(str::to_string),
+            },
+        )
         .await
-        .map(ExecutionMutationAccepted::into_response)
+        .map_err(execution_error)?;
+    Ok(match write {
+        ReplanStopIntentWriteOutcome::Applied(run) => applied_mutation(&run),
+        ReplanStopIntentWriteOutcome::Replayed(run) => replayed_mutation(&run),
+        ReplanStopIntentWriteOutcome::NotFound => not_found_mutation(),
+        ReplanStopIntentWriteOutcome::Conflict => {
+            conflict_mutation(ExecutionConflictReason::PlanRevisionMismatch)
+        }
+    })
 }

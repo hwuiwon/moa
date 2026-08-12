@@ -473,6 +473,12 @@ fn contract_case(index: usize) -> ExecutionContractCase {
         },
         plan: ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                    delay_seconds: 86_400,
+                },
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+            },
             input_schema: json!({
                 "type": "object",
                 "properties": {

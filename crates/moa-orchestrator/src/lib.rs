@@ -10,6 +10,8 @@ pub(crate) mod connector_catalog;
 pub mod credential_ingress;
 pub mod ctx;
 mod delegation;
+/// Private non-Restate external-job callback boundary types.
+pub mod external_job_ingress;
 pub mod guardrails;
 pub mod handlers;
 pub(crate) mod identity_admin;

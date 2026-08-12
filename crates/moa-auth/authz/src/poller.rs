@@ -5,8 +5,14 @@ use crate::error::AuthzError;
 use crate::outbox::OutboxRow;
 use serde_json::json;
 use sqlx::PgPool;
-use std::time::Duration;
-use tokio::sync::oneshot;
+use std::{
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
+use tokio::sync::watch;
 use tokio::time::sleep;
 use uuid::Uuid;
 
@@ -56,36 +62,58 @@ impl OutboxPoller {
 
     /// Spawn the poller on the current Tokio runtime and return a shutdown handle.
     pub fn spawn(self) -> PollerHandle {
-        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+        let health = Arc::new(PollerHealth {
+            started_at: Instant::now(),
+            last_success: RwLock::new(None),
+            exited: AtomicBool::new(false),
+        });
+        let (shutdown, mut shutdown_rx) = watch::channel(false);
+        let task_health = Arc::clone(&health);
+        let heartbeat_maximum_age = self
+            .cfg
+            .poll_interval
+            .saturating_mul(3)
+            .max(
+                self.cfg
+                    .lease_duration
+                    .saturating_add(self.cfg.poll_interval),
+            )
+            .max(Duration::from_secs(5));
         let task = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = &mut shutdown_rx => {
-                        tracing::info!("outbox poller received shutdown");
-                        break;
-                    }
-                    result = self.tick() => {
-                        if let Err(error) = result {
-                            tracing::error!(error = %error, "outbox poller tick failed");
+            let result = async {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_rx.changed() => {
+                            tracing::info!("outbox poller received shutdown");
+                            return Ok(());
+                        }
+                        result = self.tick() => {
+                            result?;
+                            set_poller_heartbeat(&task_health);
                         }
                     }
-                }
 
-                tokio::select! {
-                    biased;
-                    _ = &mut shutdown_rx => {
-                        tracing::info!("outbox poller received shutdown");
-                        break;
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_rx.changed() => {
+                            tracing::info!("outbox poller received shutdown");
+                            return Ok(());
+                        }
+                        () = sleep(self.cfg.poll_interval) => {}
                     }
-                    _ = sleep(self.cfg.poll_interval) => {}
                 }
             }
+            .await;
+            task_health.exited.store(true, Ordering::Release);
+            result
         });
 
         PollerHandle {
-            shutdown: Some(shutdown_tx),
+            health,
+            shutdown,
             task,
+            heartbeat_maximum_age,
         }
     }
 
@@ -513,18 +541,117 @@ impl ClaimedOutboxRow {
 
 /// Handle for cleanly shutting down a spawned outbox poller.
 pub struct PollerHandle {
-    shutdown: Option<oneshot::Sender<()>>,
-    task: tokio::task::JoinHandle<()>,
+    health: Arc<PollerHealth>,
+    shutdown: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<Result<(), AuthzError>>,
+    heartbeat_maximum_age: Duration,
 }
 
 impl PollerHandle {
-    /// Signal the poller to stop and wait for its task to exit.
-    pub async fn shutdown(mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
+    /// Returns a cloneable readiness projection for the supervised poller.
+    #[must_use]
+    pub fn readiness(&self) -> PollerReadiness {
+        PollerReadiness {
+            health: Arc::clone(&self.health),
+            heartbeat_maximum_age: self.heartbeat_maximum_age,
         }
-        let _ = self.task.await;
     }
+
+    /// Waits for the poller task so unexpected failure can terminate its owner process.
+    pub async fn task_result(&mut self) -> Result<(), PollerTaskError> {
+        match (&mut self.task).await {
+            Ok(result) => result.map_err(PollerTaskError::Poll),
+            Err(error) => Err(PollerTaskError::Join(error.to_string())),
+        }
+    }
+
+    /// Signals the poller to stop and waits for its task to exit.
+    pub async fn shutdown(mut self) -> Result<(), PollerTaskError> {
+        let _ = self.shutdown.send(true);
+        self.task_result().await
+    }
+}
+
+impl Drop for PollerHandle {
+    fn drop(&mut self) {
+        self.health.exited.store(true, Ordering::Release);
+        let _ = self.shutdown.send(true);
+        self.task.abort();
+    }
+}
+
+/// Cloneable health projection for the supervised authorization outbox poller.
+#[derive(Clone)]
+pub struct PollerReadiness {
+    health: Arc<PollerHealth>,
+    heartbeat_maximum_age: Duration,
+}
+
+impl PollerReadiness {
+    /// Returns the age of the most recent complete successful poll.
+    #[must_use]
+    pub fn heartbeat_age(&self) -> Duration {
+        let last_success = self
+            .health
+            .last_success
+            .read()
+            .ok()
+            .and_then(|heartbeat| *heartbeat);
+        last_success.map_or_else(
+            || self.health.started_at.elapsed(),
+            |heartbeat| heartbeat.elapsed(),
+        )
+    }
+
+    /// Returns why the poller must not be considered ready.
+    #[must_use]
+    pub fn unready_reason(&self) -> Option<String> {
+        if self.health.exited.load(Ordering::Acquire) {
+            return Some("authorization outbox poller exited".to_string());
+        }
+        let last_success = self
+            .health
+            .last_success
+            .read()
+            .ok()
+            .and_then(|heartbeat| *heartbeat);
+        let age = self.heartbeat_age();
+        if last_success.is_none() {
+            return Some(
+                "authorization outbox poller has not completed its first pass".to_string(),
+            );
+        }
+        (age > self.heartbeat_maximum_age).then(|| {
+            format!(
+                "authorization outbox poller heartbeat is stale by {:.3}s",
+                age.as_secs_f64()
+            )
+        })
+    }
+}
+
+#[derive(Debug)]
+struct PollerHealth {
+    started_at: Instant,
+    last_success: RwLock<Option<Instant>>,
+    exited: AtomicBool,
+}
+
+fn set_poller_heartbeat(health: &PollerHealth) {
+    if let Ok(mut heartbeat) = health.last_success.write() {
+        *heartbeat = Some(Instant::now());
+    }
+}
+
+/// Failure returned by the supervised authorization outbox poller handle.
+#[derive(Debug, thiserror::Error)]
+pub enum PollerTaskError {
+    /// One poll pass failed.
+    #[error("authorization outbox poll failed: {0}")]
+    Poll(AuthzError),
+    /// The Tokio owner task could not be joined.
+    #[error("authorization outbox poller task join failed: {0}")]
+    Join(String),
 }
 
 fn limit_i64(limit: usize) -> i64 {
@@ -541,7 +668,7 @@ fn missed_claim_is_satisfied(status: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::missed_claim_is_satisfied;
+    use super::*;
 
     #[test]
     fn missed_claim_accepts_only_same_generation_success() {
@@ -556,5 +683,33 @@ mod tests {
         ] {
             assert!(!missed_claim_is_satisfied(status), "status={status:?}");
         }
+    }
+
+    #[test]
+    fn poller_readiness_requires_success_and_rejects_exit() {
+        // Pins: maintenance readiness never reports a poller ready before one
+        // complete pass or after its sole correctness owner exits.
+        let health = Arc::new(PollerHealth {
+            started_at: Instant::now(),
+            last_success: RwLock::new(None),
+            exited: AtomicBool::new(false),
+        });
+        let readiness = PollerReadiness {
+            health: Arc::clone(&health),
+            heartbeat_maximum_age: Duration::from_secs(60),
+        };
+        assert_eq!(
+            readiness.unready_reason().as_deref(),
+            Some("authorization outbox poller has not completed its first pass")
+        );
+
+        set_poller_heartbeat(&health);
+        assert_eq!(readiness.unready_reason(), None);
+
+        health.exited.store(true, Ordering::Release);
+        assert_eq!(
+            readiness.unready_reason().as_deref(),
+            Some("authorization outbox poller exited")
+        );
     }
 }

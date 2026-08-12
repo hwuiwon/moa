@@ -56,10 +56,10 @@ use moa_core::{
     types::session::SessionMeta,
     types::session::TurnOutcome as CoreTurnOutcome,
 };
-use moa_execution::repository::{
-    CompileAuditWriteOutcome, ExecutionRepository, ExecutionScope, PlannerCallAuditWriteOutcome,
-    RouteAuditWriteOutcome,
+use moa_execution::repository::audit::{
+    CompileAuditWriteOutcome, PlannerCallAuditWriteOutcome, RouteAuditWriteOutcome,
 };
+use moa_execution::repository::{ExecutionRepository, ExecutionScope};
 use moa_lineage_core::TurnId;
 use moa_observability::restate_observability::{
     emit_turn_coordination_summary, emit_turn_latency_summary, emit_turn_replay_summary,
@@ -1114,6 +1114,18 @@ async fn execute_durable_admission(
         .into());
     }
     let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
+    let planning_now = durable_utc_now(ctx, "execution_planning_now").await?;
+    let horizon_seconds = i64::try_from(workflow.config.execution.maximum_horizon_seconds)
+        .map_err(|_| TerminalError::new("execution maximum horizon does not fit i64"))?;
+    let horizon = chrono::TimeDelta::try_seconds(horizon_seconds)
+        .ok_or_else(|| TerminalError::new("execution maximum horizon does not fit chrono"))?;
+    let maximum_deadline = planning_now
+        .checked_add_signed(horizon)
+        .ok_or_else(|| TerminalError::new("execution maximum horizon exceeds timestamp range"))?;
+    let deadline_at = request
+        .resource_budget
+        .deadline
+        .map_or(maximum_deadline, |deadline| deadline.min(maximum_deadline));
     let planning_call = ctx
         .service_client::<ExecutionClient>()
         .planning_context(Json::from(
@@ -1122,6 +1134,7 @@ async fn execute_durable_admission(
                 contact_id,
                 session_id,
                 originating_user_sequence_num,
+                deadline_at,
                 requested_template: request
                     .execution_template
                     .as_ref()
@@ -1139,7 +1152,6 @@ async fn execute_durable_admission(
         .auxiliary
         .clone()
         .unwrap_or_else(|| workflow.config.models.main.clone());
-    let planning_now = durable_utc_now(ctx, "execution_planning_now").await?;
     let provider = RestateExecutionModelProvider::new(
         ctx,
         per_model_call_budget(request.resource_budget),

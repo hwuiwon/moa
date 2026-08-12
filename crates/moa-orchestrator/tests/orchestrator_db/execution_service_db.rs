@@ -5,6 +5,7 @@ use moa_artifacts::execution_plan::{
     ExecutionBudgetLimit, ExecutionCitation, ExecutionGoalContract, ExecutionPlanDefinition,
     ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, RetryPolicy,
 };
+use moa_config::ExecutionConfig;
 use moa_core::{
     events::ExecutionTaskResultsRef,
     types::{
@@ -23,9 +24,14 @@ use moa_execution::{
         terminal_evidence_from_evaluation,
     },
     repository::{
-        ExecutionRepository, ExecutionScope, FinalizationOutcome, NewExecutionPlanningContext,
-        NewExecutionRun, PlanningContextWriteOutcome, ReservationOutcome, RunFinalizationRequest,
-        TaskOutcomeWrite, TransitionOutcome,
+        ExecutionRepository, ExecutionScope, NewExecutionRun, ReservationOutcome,
+        RunControllerClaimOutcome, TaskOutcomeWrite, TransitionOutcome,
+        audit::{NewExecutionPlanningContext, PlanningContextWriteOutcome},
+        run::RunAdmissionOutcome,
+        terminal::{
+            FinalizationOutcome, RunFinalizationRequest, RunTriggerDrainOutcome,
+            RunTriggerDrainRequest,
+        },
     },
     state::{
         ExecutionRunStatus, ExecutionTaskId, ExecutionTaskStatus, ExecutionTerminalCause,
@@ -218,6 +224,12 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
     let plan = CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::At {
+                    at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
+                },
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+            },
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
             nodes: Vec::new(),
@@ -233,9 +245,10 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
         },
         report: ExecutionValidationReport::default(),
     };
-    let run = repository
+    let RunAdmissionOutcome::Admitted(run) = repository
         .create_run(
             scope,
+            &ExecutionConfig::default(),
             NewExecutionRun {
                 tenant_id,
                 contact_id: None,
@@ -244,6 +257,13 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
                 planning_context_uid: planning_context.planning_context_uid,
                 planning_context_hash: planning_hash,
                 owner_user_id,
+                admitted_identity: moa_core::traits::Identity {
+                    identity_type: moa_core::traits::IdentityType::Service,
+                    id: Uuid::new_v4(),
+                    tenant_id,
+                    api_key_id: None,
+                    acting_on_behalf_of: None,
+                },
                 goal: ExecutionGoalContract {
                     objective: "preserve exact execution citation lineage".to_string(),
                     requirements: Vec::new(),
@@ -266,17 +286,9 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
                 idempotency_key: Some("execution-lineage".to_string()),
             },
         )
-        .await?;
-    let TransitionOutcome::RunApplied(running) = repository
-        .transition_run_wait(
-            scope,
-            run.run_uid,
-            ExecutionRunStatus::Queued,
-            ExecutionRunStatus::Running,
-        )
         .await?
     else {
-        panic!("execution lineage fixture must transition its run to running");
+        panic!("execution lineage fixture must be admitted");
     };
     let task_id = ExecutionTaskId::derive(run.run_uid, "collect", "primary")?;
     let task = LogicalTask {
@@ -284,7 +296,7 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
         node_id: "collect".to_string(),
         item_key: "primary".to_string(),
         requirement_ids: vec!["lineage".to_string()],
-        plan_revision: running.plan_revision,
+        plan_revision: run.plan_revision,
         generation: 1,
         input: json!({"source_set": "primary"}),
         kind: LogicalTaskKind::Output {
@@ -305,7 +317,7 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
         },
     };
     let tasks = repository
-        .materialize_tasks(scope, run.run_uid, running.plan_revision, vec![task])
+        .materialize_tasks(scope, run.run_uid, run.plan_revision, vec![task])
         .await?;
     assert_eq!(tasks.len(), 1, "fixture must materialize exactly one task");
     assert_eq!(tasks[0].task_id, task_id);
@@ -394,6 +406,39 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
         "another tenant must not load the owning execution run"
     );
 
+    let current = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("execution lineage run must remain visible");
+    let claimed = match repository
+        .claim_controller_wake(
+            scope,
+            current.run_uid,
+            current.controller_generation,
+            current.wake_epoch,
+        )
+        .await?
+    {
+        RunControllerClaimOutcome::Claimed(claimed) => claimed,
+        outcome => panic!("terminal controller wake must be claimable: {outcome:?}"),
+    };
+    let RunTriggerDrainOutcome::ReadyToFinalize { run: drained, .. } = repository
+        .drain_run_triggers_page(
+            scope,
+            &ExecutionConfig::default(),
+            RunTriggerDrainRequest {
+                run_uid: claimed.run_uid,
+                controller_generation: claimed.controller_generation,
+                wake_epoch: claimed.wake_epoch,
+                page_limit: 2,
+                now: Utc::now(),
+            },
+        )
+        .await?
+    else {
+        panic!("bounded trigger drain must make the fixture ready to finalize");
+    };
+
     let completion = CompletionEvaluation {
         status: CompletionStatus::Completed,
         limit_stop: None,
@@ -408,8 +453,8 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
     };
     let finalization = RunFinalizationRequest {
         run_uid: run.run_uid,
-        expected_revision: replayed_run.plan_revision,
-        expected_wake_epoch: replayed_run.wake_epoch,
+        expected_revision: drained.plan_revision,
+        expected_wake_epoch: drained.wake_epoch,
         terminal_projection: terminal.clone(),
         completion_evaluation: completion.clone(),
         terminal_evidence: terminal_evidence_from_evaluation(cause.clone(), &completion)?,
@@ -429,9 +474,9 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
     assert_eq!(replayed_finalized_run, finalized_run);
 
     let delivery = repository
-        .load_terminal_delivery(scope, run.run_uid)
+        .load_bounded_terminal_delivery(scope, run.run_uid)
         .await?
-        .expect("completed execution run must expose terminal delivery");
+        .expect("completed execution run must expose bounded terminal delivery");
     let expected_source_ids = (0..EXECUTION_TERMINAL_MAX_CITATION_IDS)
         .map(|index| format!("source-{index:03}"))
         .collect::<Vec<_>>();
@@ -447,7 +492,7 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
     );
     assert_eq!(
         repository
-            .load_terminal_delivery(other_scope, run.run_uid)
+            .load_bounded_terminal_delivery(other_scope, run.run_uid)
             .await?,
         None,
         "another tenant must not derive the execution terminal summary"
@@ -471,6 +516,12 @@ async fn execution_service_rows_require_parent_session_and_keep_authorization_im
     let plan = serde_json::to_value(CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::At {
+                    at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
+                },
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+            },
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
             nodes: Vec::new(),

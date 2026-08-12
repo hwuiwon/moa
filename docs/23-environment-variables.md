@@ -79,18 +79,33 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
+| `MOA_EXECUTION_ACTIVE_ATTEMPT_TIMEOUT_SECONDS` | `execution.active_attempt_timeout_seconds` | 600 | Maximum wall-clock duration of one bounded active task or compensation attempt |
 | `MOA_EXECUTION_AGENT_TURN_COST_MICROUSD` | `execution.agent_turn_cost_microusd` | 100000 | Worst-case integer micro-USD estimate for one agent turn |
 | `MOA_EXECUTION_AGENT_TURN_RETRIEVED_BYTES` | `execution.agent_turn_retrieved_bytes` | 10000000 | Worst-case retrieved-byte estimate for one agent turn |
 | `MOA_EXECUTION_AGENT_TURN_TOKENS` | `execution.agent_turn_tokens` | 8000 | Worst-case token estimate for one agent turn |
 | `MOA_EXECUTION_AGENT_TURN_TOOL_CALLS` | `execution.agent_turn_tool_calls` | 8 | Worst-case governed tool-call estimate for one agent turn |
+| `MOA_EXECUTION_DISPATCH_BATCH_SIZE` | `execution.dispatch_batch_size` | 64 | Maximum ready task attempts dispatched by one controller activation |
 | `MOA_EXECUTION_MAX_COST_MICROUSD` | `execution.max_cost_microusd` | 100000000 | Default run cost limit in integer micro-USD |
-| `MOA_EXECUTION_MAX_IN_FLIGHT_TASKS` | `execution.max_in_flight_tasks` | 64 | Positive physical window for live `ExecutionTask` invocations owned by one run; distinct from logical task and provider-concurrency limits |
+| `MOA_EXECUTION_MAX_FLEET_ACTIVE_RUNS` | `execution.max_fleet_active_runs` | 1000 | Fleet ceiling for admitted non-parked execution runs |
+| `MOA_EXECUTION_MAX_FLEET_ACTIVE_TASKS` | `execution.max_fleet_active_tasks` | 4096 | Fleet ceiling for active task and compensation attempts |
+| `MOA_EXECUTION_MAX_FLEET_EXTERNAL_JOBS` | `execution.max_fleet_external_jobs` | 10000 | Fleet ceiling for nonterminal asynchronous external jobs |
+| `MOA_EXECUTION_MAX_FLEET_PARKED_RUNS` | `execution.max_fleet_parked_runs` | 100000 | Fleet residency entitlement ceiling shared by active and parked runs; must be at least the active-run ceiling |
+| `MOA_EXECUTION_MAX_FLEET_SCHEDULED_TRIGGERS` | `execution.max_fleet_scheduled_triggers` | 500000 | Fleet ceiling for pending durable execution triggers |
+| `MOA_EXECUTION_MAX_IN_FLIGHT_TASKS` | `execution.max_in_flight_tasks` | 64 | Per-run ceiling contributing to active-attempt admission; it never keeps a waiting task invocation alive |
 | `MOA_EXECUTION_MAX_RETRIEVED_BYTES` | `execution.max_retrieved_bytes` | 10000000000 | Default run retrieved-byte limit |
 | `MOA_EXECUTION_MAX_TASKS` | `execution.max_tasks` | 10000 | Default logical-task limit; this is not an active-worker cap |
+| `MOA_EXECUTION_MAX_TENANT_ACTIVE_RUNS` | `execution.max_tenant_active_runs` | 100 | Per-tenant ceiling for admitted non-parked execution runs |
+| `MOA_EXECUTION_MAX_TENANT_ACTIVE_TASKS` | `execution.max_tenant_active_tasks` | 256 | Per-tenant ceiling for active task and compensation attempts |
+| `MOA_EXECUTION_MAX_TENANT_EXTERNAL_JOBS` | `execution.max_tenant_external_jobs` | 1000 | Per-tenant ceiling for nonterminal asynchronous external jobs |
+| `MOA_EXECUTION_MAX_TENANT_PARKED_RUNS` | `execution.max_tenant_parked_runs` | 10000 | Per-tenant residency entitlement ceiling shared by active and parked runs; must be at least the active-run ceiling |
+| `MOA_EXECUTION_MAX_TENANT_SCHEDULED_TRIGGERS` | `execution.max_tenant_scheduled_triggers` | 50000 | Per-tenant ceiling for pending durable execution triggers |
 | `MOA_EXECUTION_MAX_TOKENS` | `execution.max_tokens` | 10000000 | Default run token limit |
 | `MOA_EXECUTION_MAX_TOOL_CALLS` | `execution.max_tool_calls` | 100000 | Default governed tool-call limit |
+| `MOA_EXECUTION_MAXIMUM_ACTIVATION_STEPS` | `execution.maximum_activation_steps` | 128 | Maximum pure scheduler transitions applied by one controller activation |
+| `MOA_EXECUTION_MAXIMUM_HORIZON_SECONDS` | `execution.maximum_horizon_seconds` | 2592000 | Maximum admitted durable-run horizon, including storage-only waits |
 | `MOA_EXECUTION_PLANNER_REPAIR_ATTEMPTS` | `execution.planner_repair_attempts` | 1 | Maximum repair attempts for an invalid initial planner response |
 | `MOA_EXECUTION_REPEATED_FAILURE_LIMIT` | `execution.repeated_failure_limit` | 3 | Repeated normalized failure count that stops replanning |
+| `MOA_EXECUTION_TRIGGER_RECONCILIATION_CADENCE_SECONDS` | `execution.trigger_reconciliation_cadence_seconds` | 60 | Safety repair cadence for due execution-trigger delivery; normal delivery remains event-driven |
 | `MOA_EXECUTION_UNATTENDED_MAX_COST_MICROUSD` | `execution.unattended_max_cost_microusd` | 5000000 | Cost threshold above which a compiled run requires owning-user confirmation |
 | `MOA_EXECUTION_VERIFIER_TURN_COST_MICROUSD` | `execution.verifier_turn_cost_microusd` | 200000 | Worst-case integer micro-USD estimate for one completion-verifier turn |
 | `MOA_EXECUTION_VERIFIER_TURN_RETRIEVED_BYTES` | `execution.verifier_turn_retrieved_bytes` | 1000000 | Worst-case retrieved-byte estimate for one completion-verifier turn |
@@ -662,7 +677,7 @@ not trip the unknown-variable audit. They do not affect application config.
 | `MOA_POSTMARK_*` | Postmark live-email credentials |
 | `MOA_E2B_*` | E2B sandbox credentials |
 | `MOA_OPENROUTER_*` | OpenRouter credentials (deploy) |
-| `MOA_EDGE_*` | Edge binary bind/upstreams, connector rollout switch, and inbound MCP controls (`MOA_EDGE_BIND`, `MOA_EDGE_UPSTREAM`, `MOA_EDGE_CONNECTOR_CREDENTIAL_UPSTREAM`, `MOA_EDGE_CONNECTOR_MANAGEMENT_ENABLED`, `MOA_EDGE_MCP_ALLOWED_HOSTS`, `MOA_EDGE_MCP_ALLOWED_ORIGINS`, `MOA_EDGE_MCP_TOOL_CALLS_PER_MINUTE`). The tool-call limit defaults to 60, must be greater than zero, and is enforced per authenticated tenant/principal by each edge replica; use an upstream distributed limiter as well when the number must be a fleet-wide quota. Connector management defaults dark: when false, every `/v1/connectors/connections...` route returns 404 before authentication, translation, or proxying. The credential upstream must target the orchestrator's private port 10023, never Restate or a public endpoint. Local Compose explicitly opts in; the Kubernetes base explicitly remains false. |
+| `MOA_EDGE_*` | Edge binary bind/upstreams, connector rollout switch, and inbound MCP controls (`MOA_EDGE_BIND`, `MOA_EDGE_UPSTREAM`, `MOA_EDGE_INTERNAL_INGRESS_UPSTREAM`, `MOA_EDGE_CONNECTOR_MANAGEMENT_ENABLED`, `MOA_EDGE_MCP_ALLOWED_HOSTS`, `MOA_EDGE_MCP_ALLOWED_ORIGINS`, `MOA_EDGE_MCP_TOOL_CALLS_PER_MINUTE`). The tool-call limit defaults to 60, must be greater than zero, and is enforced per authenticated tenant/principal by each edge replica; use an upstream distributed limiter as well when the number must be a fleet-wide quota. Connector management defaults dark: when false, every `/v1/connectors/connections...` route returns 404 before authentication, translation, or proxying. The internal ingress upstream must target the orchestrator's private credential-and-provider-callback port 10023, never Restate or a public endpoint. Local Compose explicitly opts in; the Kubernetes base explicitly remains false. |
 | `MOA_RESTATE_DEPLOYMENT_*` | Restate deploy-registration (`MOA_RESTATE_DEPLOYMENT_HOST`/`_URI`) |
 
 ### Approved exact names

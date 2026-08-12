@@ -91,7 +91,7 @@ The canonical Postgres model is:
 | `moa.sandbox_workspace_grants` | Desired OpenFGA owner/use grants and generation-fenced inverse tuple intent. |
 | `moa.sandbox_provider_accounts` | Non-secret deployment/provider/isolation-cell identity and generation, organization/project fingerprint, configured limits, observed inventory, headroom, health. |
 | `moa.sandbox_storage_resources` | Tenant-owned external storage, such as a Daytona tenant volume, with account ownership, provider reference, generation, deletion intent, and verified ownership metadata. |
-| `moa.sandbox_capacity_reservations` | Pending/committed capacity by tenant, provider account, operation, and exact resource kind: `workspaces`, `volumes`, `checkpoints`, or `logical_bytes`. |
+| `moa.sandbox_capacity_reservations` | Provider-neutral capacity ownership by tenant, provider account, and exact resource kind. `workspaces` is one committed lifetime reservation per workspace; `active_hands` is tied to one provisioning operation and hand-lease generation; `volumes`, `checkpoints`, and `logical_bytes` remain operation-bound. Every row carries the workspace and provider generations needed for exact release. |
 | `moa.hand_leases` workspace fields | `workspace_id`, workspace writer epoch, workspace instance generation, and restored checkpoint ID; the lease still owns only compute. |
 
 Every relationship that crosses a tenant-owned table includes `tenant_id` in
@@ -99,6 +99,24 @@ its foreign key. Tenant-facing repositories use `ScopedConn`, forced RLS,
 tenant-first predicates, and immutable tenant ownership. Cross-tenant
 reconciliation uses a separate, narrow maintenance path unavailable to request
 handlers.
+
+Workspace creation and its committed `workspaces` reservation are one database
+transaction, so a tenant or provider limit rejection leaves neither workspace
+metadata nor a partial reservation. That lifetime reservation has no operation
+owner and is released only after deletion is finalized at its exact next delete
+generation. `active_hands` is distinct from durable `volumes`: it is reserved as
+pending before provider compute creation, committed only when the exact
+provisioning operation and hand-lease generation activate, and released only
+after verified provider destruction or transfer to an exact live durable reaper
+claim. Stale workspace, lease, provisioning, delete, or reaper generations
+cannot release a current owner.
+
+Checkpoint capacity is also provider-neutral. After the bounded archive and
+manifest are built, the publication path reserves one `checkpoints` unit and
+the manifest's exact `logical_bytes` before any adapter uploads bytes. The
+generation-fenced publication compare-and-set commits those reservations with
+the checkpoint head; a failed or ambiguous publication cannot evade or settle
+capacity after the upload.
 
 ## Workspace State Machine
 
@@ -208,6 +226,30 @@ escaping links, hard links, devices, FIFOs, sockets, excessive depth/count/size,
 and decompression expansion beyond configured limits. Object keys are opaque,
 writes are create-only, and restore validates into a fresh root before atomic
 promotion.
+
+### Long-horizon execution yields
+
+An execution attempt may hold a hand only while it is active. Before returning
+for input, review, signal, timer, external-job, retry, pause, compensation, or
+terminal state, it runs the commit barrier when filesystem state must survive,
+releases the exact `active_hands` and hand-lease generation, and proves provider
+compute destroyed. Only then may the task become storage-only. A failed or
+ambiguous destroy remains an active reservation owned by reconciliation; the
+task is not reported as cleanly parked.
+
+`moa.sandbox_execution_hand_release_receipts` persists that yield intent before
+any checkpoint or provider-destroy I/O. Its exact task-or-compensation owner,
+logical generation, bounded-attempt generation, and any workspace, writer,
+instance, provisioning, and hand generations fence rotation while pending.
+Only verified checkpoint publication where applicable, provider absence, and
+lease/active-hand release settle it. A retry returns the stored receipt instead
+of repeating the release boundary.
+
+Resume never revives process memory. It admits current tenant/fleet and provider
+capacity, provisions a fresh hand, restores the verified committed checkpoint,
+reinstalls trusted runtime material outside the checkpoint root, and advances
+the compute-instance fence. The invariant
+`parked execution tasks with active hands = 0` is both alerted and tested.
 
 ## Provider Binding And Admission
 

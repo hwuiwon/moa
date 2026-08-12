@@ -13,9 +13,9 @@ use moa_core::{
     types::completion::ToolInvocation,
     types::hands::HandHandle,
     types::hands::HandStatus,
-    types::identifiers::ToolCallId,
+    types::identifiers::{ExecutionRunScopeId, ToolCallId},
     types::resource::DeadlineGuard,
-    types::sandbox_workspace::{SandboxWorkspaceScope, WorkspaceEffect},
+    types::sandbox_workspace::{ExecutionHandReleaseOwner, SandboxWorkspaceScope, WorkspaceEffect},
     types::security::ToolCapabilityId,
     types::session::SessionMeta,
     types::tools::SecuredToolOutput,
@@ -109,6 +109,21 @@ pub struct JournaledWorkspaceCommit<'a> {
     /// Replay-stable tool call that owns the deterministic commit operation.
     pub tool_call_id: ToolCallId,
     /// Fresh bounded budget owned by the durable commit step.
+    pub scope: ToolCallScope<'a>,
+}
+
+/// One idempotent request to release an execution attempt's exact sandbox hand.
+#[derive(Clone, Copy)]
+pub struct ExecutionHandReleaseRequest<'a> {
+    /// Session whose tenant owns the execution workspace and hand lease.
+    pub session: &'a SessionMeta,
+    /// Verified durable execution run.
+    pub run_id: ExecutionRunScopeId,
+    /// Verified durable execution owner and logical generation.
+    pub owner: ExecutionHandReleaseOwner,
+    /// Exact bounded attempt generation yielding its resources.
+    pub attempt_generation: u64,
+    /// Fresh bounded budget for checkpoint publication and verified destroy.
     pub scope: ToolCallScope<'a>,
 }
 
@@ -845,12 +860,15 @@ impl ToolRouter {
             && workspace_commit_mode == WorkspaceCommitMode::Inline
             && let Err(error) = self
                 .commit_workspace_after_tool(
-                    request.session,
-                    workspace_scope,
-                    request.tool_call_id,
-                    provider,
-                    hand,
-                    request.scope,
+                    super::sandbox_workspace::lifecycle::WorkspaceCommitExecution {
+                        session: request.session,
+                        workspace_scope,
+                        tool_call_id: request.tool_call_id,
+                        provider_name: provider,
+                        hand,
+                        call_scope: request.scope,
+                        release_compute: false,
+                    },
                 )
                 .await
         {
@@ -1398,6 +1416,7 @@ mod egress_dispatch_tests {
                 diff_strategy: ToolDiffStrategy::None,
             },
             idempotency_class: IdempotencyClass::NonIdempotent,
+            async_mode: moa_core::types::tools::ToolAsyncMode::SynchronousOnly,
             rollback: None,
             max_output_tokens: 4096,
         }

@@ -5,7 +5,11 @@ Preserve the user's objective, scope, definitions, time range, universe, output 
 Compiler invariants:
 - Set `goal.objective` to the frozen `objective` byte-for-byte.
 - Choose exactly one explicit `plan.cancel_policy`: `retain_effects` or `compensate_committed`.
-- Set every node's `compensation` explicitly. Use `null` unless the node is a direct side-effecting `Capability` whose exact catalog entry advertises the same compensator and bounded input mapping. Never add compensation to reads, agents, maps, reduces, reviews, signals, or outputs, and never invent rollback authority.
+- Treat the frozen `budget.deadline_at` as the absolute Durable-run deadline. Never emit a wait, retry window, or active task whose bound reaches or exceeds it.
+- Use `WaitUntil` for an absolute calendar-time delay. Its `wake_at` must be before the run deadline, and its declared `result` is the structured value made available to downstream nodes after the timer fires.
+- Give every `Review` and `WaitSignal` an explicit wait policy. Represent human and external waits only with these storage-backed wait operations; never keep an `Agent` or `Capability` active while waiting for a person, callback, schedule, or retry time.
+- Decompose long work into bounded active tasks separated by durable nodes. Never plan a continuously running multi-hour or multi-day model call, tool call, shell process, network connection, or sandbox; use a registered asynchronous capability when the catalog explicitly provides one.
+- Set every node's `compensation` explicitly. Use `null` unless the node is a direct side-effecting `Capability` whose exact catalog entry advertises the same compensator and bounded input mapping, and that compensator has `requires_sandbox=false`. Never add compensation to reads, agents, maps, reduces, reviews, signals, or outputs, never use a sandbox-backed compensator, and never invent rollback authority.
 - An amendment must preserve compensation for work that is running or committed and must not weaken the run's cancellation policy.
 - Every goal-entry ID, completion-check ID, execution-node ID, and every ID referenced from those structures must match `[a-z][a-z0-9_-]{0,63}`.
 - Link every requirement and every constraint to at least one completion check via `requirement_ids` and `constraint_ids`.

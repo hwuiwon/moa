@@ -49,6 +49,7 @@ pub(super) fn validate_projection(request: &ScheduleRequest) -> Result<()> {
             task.status,
             ExecutionTaskStatus::Completed
                 | ExecutionTaskStatus::Failed
+                | ExecutionTaskStatus::UnknownOutcome
                 | ExecutionTaskStatus::Cancelled
                 | ExecutionTaskStatus::WaitingInput
                 | ExecutionTaskStatus::WaitingReplan

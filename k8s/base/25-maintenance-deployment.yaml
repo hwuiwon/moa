@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: moa-maintenance
+  namespace: moa-system
+  labels:
+    app.kubernetes.io/name: moa-maintenance
+    app.kubernetes.io/part-of: moa
+    app.kubernetes.io/component: maintenance
+spec:
+  # Recreate avoids two complete fleet scanners during rollout. Correctness
+  # owners additionally use durable, expiring database leases so recovery from
+  # an unclean pod death remains safe.
+  replicas: 1
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: moa-maintenance
+      app.kubernetes.io/part-of: moa
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: moa-maintenance
+        app.kubernetes.io/part-of: moa
+        app.kubernetes.io/component: maintenance
+    spec:
+      terminationGracePeriodSeconds: 600
+      initContainers:
+        - name: wait-status-cutover
+          image: moa/orchestrator:latest
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - >-
+              exec /usr/local/bin/moa-orchestrator wait-status-cutover
+              --database-url "$MOA_CUTOVER_DATABASE_URL"
+          env:
+            - name: MOA_CUTOVER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: moa-postgres
+                  key: url
+      containers:
+        - name: maintenance
+          image: moa/orchestrator:latest
+          args: ["maintenance"]
+          ports:
+            - name: health
+              containerPort: 9081
+          readinessProbe:
+            httpGet:
+              path: /_health/ready
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /_health/live
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          startupProbe:
+            httpGet:
+              path: /_health/live
+              port: health
+            failureThreshold: 30
+            periodSeconds: 10
+          envFrom:
+            - configMapRef:
+                name: moa-runtime-config
+          # Keep the first four entries aligned with the production security
+          # patch shared with the versioned orchestrator deployment.
+          env:
+            - name: RUST_LOG
+              value: warn,moa_orchestrator=info,moa_brain=info,moa_edge=info,async_openai::error=off
+            - name: MOA_SERVICE_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: MOA_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: moa-postgres
+                  key: url
+            - name: MOA_DATABASE_MAINTENANCE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: moa-postgres-maintenance
+                  key: url
+                  optional: true
+            - name: MOA_DATABASE_MAX_CONNECTIONS
+              value: "4"
+            - name: MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS
+              value: "4"
+            - name: MOA_DATABASE_CONNECT_TIMEOUT_SECONDS
+              value: "3"
+            - name: MOA_RESTATE_INGRESS_URL
+              value: http://restate.moa-restate.svc.cluster.local:8080
+            - name: MOA_METRICS_EXPORTER
+              value: otlp
+          volumeMounts:
+            - name: kms-root-keys
+              mountPath: /var/run/secrets/moa-kms/root-keys
+              readOnly: true
+          resources:
+            requests:
+              cpu: "250m"
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+      volumes:
+        - name: kms-root-keys
+          secret:
+            secretName: moa-kms-root-keys

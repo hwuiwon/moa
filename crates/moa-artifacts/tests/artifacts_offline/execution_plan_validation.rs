@@ -1,23 +1,25 @@
-use moa_artifacts::document::ArtifactDocument;
+use chrono::{DateTime, Utc};
+use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
 use moa_artifacts::execution_plan::{
     CapabilityReference, CompensationInputBinding, CompensationInputMapping,
     CompensationValueSource, CompletionCheck, CompletionCheckKind, CoverageRequirement,
     ExecutionCancelPolicy, ExecutionCompensation, ExecutionCondition, ExecutionConstraint,
     ExecutionDeliverable, ExecutionGoalContract, ExecutionNode, ExecutionOperation,
     ExecutionPlanDefinition, ExecutionReducer, ExecutionReference, ExecutionRequirement,
-    ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, InputAudience, MapTask,
-    PlanAmendment, PlanAmendmentOperation, RetryPolicy,
+    ExecutionTaskOutcome, ExecutionTaskResult, ExecutionTemporalTarget, ExecutionUsage,
+    ExecutionWaitExpiryAction, ExecutionWaitPolicy, InputAudience, MapTask, PlanAmendment,
+    PlanAmendmentOperation, RetryPolicy,
 };
 use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::validation::{
     ValidationReport, validate_execution_goal_contract, validate_execution_plan_definition,
-    validate_execution_task_outcome, validate_plan_amendment,
+    validate_execution_task_outcome, validate_for_status, validate_plan_amendment,
 };
 use serde_json::{Value, json};
 
 #[test]
-fn all_seven_execution_operations_round_trip_exact_json_and_yaml() {
-    // Pins: the public v1 wire shape has exactly the seven contract operations.
+fn all_eight_execution_operations_round_trip_exact_json_and_yaml() {
+    // Pins: the public v1 wire shape has exactly the eight contract operations.
     let cases = [
         (
             ExecutionOperation::Capability {
@@ -94,14 +96,43 @@ fn all_seven_execution_operations_round_trip_exact_json_and_yaml() {
         (
             ExecutionOperation::Review {
                 prompt: "Approve the report?".to_string(),
+                wait_policy: wait_policy(ExecutionWaitExpiryAction::FailRun),
             },
-            json!({ "kind": "review", "prompt": "Approve the report?" }),
+            json!({
+                "kind": "review",
+                "prompt": "Approve the report?",
+                "wait_policy": {
+                    "expiry": { "kind": "after", "delay_seconds": 3600 },
+                    "on_expiry": { "kind": "fail_run" }
+                }
+            }),
         ),
         (
             ExecutionOperation::WaitSignal {
                 signal_name: "source_ready".to_string(),
+                wait_policy: wait_policy(ExecutionWaitExpiryAction::FailTask),
             },
-            json!({ "kind": "wait_signal", "signal_name": "source_ready" }),
+            json!({
+                "kind": "wait_signal",
+                "signal_name": "source_ready",
+                "wait_policy": {
+                    "expiry": { "kind": "after", "delay_seconds": 3600 },
+                    "on_expiry": { "kind": "fail_task" }
+                }
+            }),
+        ),
+        (
+            ExecutionOperation::WaitUntil {
+                wake: ExecutionTemporalTarget::At {
+                    at: at("2030-01-02T02:00:00Z"),
+                },
+                result: json!({ "window": "open" }),
+            },
+            json!({
+                "kind": "wait_until",
+                "wake": { "kind": "at", "at": "2030-01-02T02:00:00Z" },
+                "result": { "window": "open" }
+            }),
         ),
         (
             ExecutionOperation::Output {
@@ -114,7 +145,7 @@ fn all_seven_execution_operations_round_trip_exact_json_and_yaml() {
         ),
     ];
 
-    assert_eq!(cases.len(), 7);
+    assert_eq!(cases.len(), 8);
     for (operation, expected_json) in cases {
         let actual_json = serde_json::to_value(&operation).expect("serialize operation to JSON");
         assert_eq!(actual_json, expected_json);
@@ -131,6 +162,260 @@ fn all_seven_execution_operations_round_trip_exact_json_and_yaml() {
             operation
         );
     }
+}
+
+#[test]
+fn wait_expiry_actions_round_trip_with_canonical_tagged_shapes() {
+    // Pins: wait expiry is explicit and every settlement action has one stable wire shape.
+    let cases = [
+        (
+            ExecutionWaitExpiryAction::FailTask,
+            json!({ "kind": "fail_task" }),
+        ),
+        (
+            ExecutionWaitExpiryAction::FailRun,
+            json!({ "kind": "fail_run" }),
+        ),
+        (
+            ExecutionWaitExpiryAction::ContinueWith {
+                output: json!({ "timed_out": true }),
+            },
+            json!({
+                "kind": "continue_with",
+                "output": { "timed_out": true }
+            }),
+        ),
+    ];
+
+    for (action, expected_json) in cases {
+        let actual_json = serde_json::to_value(&action).expect("serialize wait expiry action");
+        assert_eq!(actual_json, expected_json);
+        assert_eq!(
+            serde_json::from_value::<ExecutionWaitExpiryAction>(actual_json)
+                .expect("deserialize exact wait expiry action"),
+            action
+        );
+    }
+
+    let missing_output = serde_json::from_value::<ExecutionWaitExpiryAction>(json!({
+        "kind": "continue_with"
+    }));
+    assert!(
+        missing_output.is_err(),
+        "continue_with must declare its deterministic output"
+    );
+    let unknown_action = serde_json::from_value::<ExecutionWaitExpiryAction>(json!({
+        "kind": "skip"
+    }));
+    assert!(
+        unknown_action.is_err(),
+        "undeclared wait expiry actions must reject"
+    );
+}
+
+#[test]
+fn temporal_targets_round_trip_and_reject_zero_relative_delay() {
+    // Pins: timers use one typed absolute-or-relative target and relative waits always advance time.
+    let cases = [
+        (
+            absolute_target(),
+            json!({ "kind": "at", "at": "2030-01-02T02:00:00Z" }),
+        ),
+        (
+            ExecutionTemporalTarget::After {
+                delay_seconds: 3_600,
+            },
+            json!({ "kind": "after", "delay_seconds": 3600 }),
+        ),
+    ];
+    for (target, expected_json) in cases {
+        let actual_json = serde_json::to_value(&target).expect("serialize temporal target");
+        assert_eq!(actual_json, expected_json);
+        assert_eq!(
+            serde_json::from_value::<ExecutionTemporalTarget>(actual_json)
+                .expect("deserialize exact temporal target"),
+            target
+        );
+    }
+
+    let mut zero_input_wait = valid_plan();
+    zero_input_wait.input_wait_policy.expiry = ExecutionTemporalTarget::After { delay_seconds: 0 };
+    assert_error(
+        &validate_execution_plan_definition(&zero_input_wait),
+        "execution_plan.input_wait_policy.expiry",
+        "temporal delay_seconds must be at least one",
+    );
+
+    let mut zero_timer = valid_plan();
+    zero_timer.nodes[0].operation = ExecutionOperation::WaitUntil {
+        wake: ExecutionTemporalTarget::After { delay_seconds: 0 },
+        result: json!({}),
+    };
+    assert_error(
+        &validate_execution_plan_definition(&zero_timer),
+        "execution_plan.nodes[0].operation.wake",
+        "temporal delay_seconds must be at least one",
+    );
+}
+
+#[test]
+fn reusable_plan_templates_reject_absolute_temporal_targets_at_every_wait_surface() {
+    // Pins: reusable skill templates stay valid over time by expressing waits relative to when
+    // each wait state is entered; exact UTC targets remain valid only for one-off plans.
+    let mut standalone = valid_plan();
+    standalone.input_wait_policy.expiry = absolute_target();
+    assert!(
+        validate_execution_plan_definition(&standalone).is_ok(),
+        "one-off plans may declare an exact UTC input-wait expiry"
+    );
+
+    let mut cases = Vec::new();
+    cases.push((
+        standalone,
+        "definition.spec.execution_plan.plan.input_wait_policy.expiry",
+    ));
+
+    let mut review = valid_plan();
+    review.nodes[0].operation = ExecutionOperation::Review {
+        prompt: "Approve?".to_string(),
+        wait_policy: ExecutionWaitPolicy {
+            expiry: absolute_target(),
+            on_expiry: ExecutionWaitExpiryAction::FailRun,
+        },
+    };
+    cases.push((
+        review,
+        "definition.spec.execution_plan.plan.nodes[0].operation.wait_policy.expiry",
+    ));
+
+    let mut signal = valid_plan();
+    signal.nodes[0].operation = ExecutionOperation::WaitSignal {
+        signal_name: "ready".to_string(),
+        wait_policy: ExecutionWaitPolicy {
+            expiry: absolute_target(),
+            on_expiry: ExecutionWaitExpiryAction::FailTask,
+        },
+    };
+    cases.push((
+        signal,
+        "definition.spec.execution_plan.plan.nodes[0].operation.wait_policy.expiry",
+    ));
+
+    let mut timer = valid_plan();
+    timer.nodes[0].operation = ExecutionOperation::WaitUntil {
+        wake: absolute_target(),
+        result: json!({ "ready": true }),
+    };
+    cases.push((
+        timer,
+        "definition.spec.execution_plan.plan.nodes[0].operation.wake",
+    ));
+
+    for (plan, expected_path) in cases {
+        let document = skill_document_with_plan(plan);
+        assert_error(
+            &validate_for_status(&document, ArtifactStatus::Draft),
+            expected_path,
+            "reusable execution templates require an after temporal target",
+        );
+    }
+}
+
+#[test]
+fn skill_schema_and_rust_types_require_the_same_wait_contract() {
+    // Pins: the hand-maintained skill schema cannot accept stale wait operations or plans that
+    // the canonical Rust artifact types reject.
+    let skill_schema: Value = serde_json::from_str(include_str!(
+        "../../../../docs/schemas/moa-skill-v1.schema.json"
+    ))
+    .expect("parse skill JSON schema");
+    let operation_validator =
+        jsonschema::validator_for(&schema_entry_document(&skill_schema, "ExecutionOperation"))
+            .expect("compile execution operation schema");
+    let plan_validator = jsonschema::validator_for(&schema_entry_document(
+        &skill_schema,
+        "ExecutionPlanDefinition",
+    ))
+    .expect("compile execution plan schema");
+
+    let wait_operations = [
+        ExecutionOperation::Review {
+            prompt: "Approve?".to_string(),
+            wait_policy: wait_policy(ExecutionWaitExpiryAction::FailRun),
+        },
+        ExecutionOperation::WaitSignal {
+            signal_name: "ready".to_string(),
+            wait_policy: wait_policy(ExecutionWaitExpiryAction::ContinueWith {
+                output: json!({ "ready": false }),
+            }),
+        },
+        ExecutionOperation::WaitUntil {
+            wake: ExecutionTemporalTarget::At {
+                at: at("2030-01-02T02:00:00Z"),
+            },
+            result: json!({ "ready": true }),
+        },
+    ];
+    for operation in wait_operations {
+        let encoded = serde_json::to_value(operation).expect("serialize wait operation");
+        assert!(
+            operation_validator.is_valid(&encoded),
+            "skill schema must accept canonical operation: {encoded}"
+        );
+    }
+
+    let stale_review = json!({
+        "kind": "review",
+        "prompt": "Approve?"
+    });
+    assert!(
+        serde_json::from_value::<ExecutionOperation>(stale_review.clone()).is_err(),
+        "Rust type must reject a review without wait_policy"
+    );
+    assert!(
+        !operation_validator.is_valid(&stale_review),
+        "skill schema must reject a review without wait_policy"
+    );
+    let review_with_extra_expiry_field = json!({
+        "kind": "review",
+        "prompt": "Approve?",
+        "wait_policy": {
+            "expiry": { "kind": "after", "delay_seconds": 3600 },
+            "on_expiry": { "kind": "fail_task", "output": null }
+        }
+    });
+    assert!(
+        !operation_validator.is_valid(&review_with_extra_expiry_field),
+        "skill schema must reject fields not declared by a fieldless expiry action"
+    );
+    let zero_delay_timer = json!({
+        "kind": "wait_until",
+        "wake": { "kind": "after", "delay_seconds": 0 },
+        "result": {}
+    });
+    assert!(
+        !operation_validator.is_valid(&zero_delay_timer),
+        "skill schema must reject a zero-second relative timer"
+    );
+
+    let plan_json = serde_json::to_value(valid_plan()).expect("serialize canonical plan");
+    assert!(
+        plan_validator.is_valid(&plan_json),
+        "skill schema must accept the canonical Rust plan"
+    );
+    let mut stale_plan = plan_json;
+    stale_plan
+        .as_object_mut()
+        .expect("plan is an object")
+        .remove("input_wait_policy");
+    assert!(
+        serde_json::from_value::<ExecutionPlanDefinition>(stale_plan.clone()).is_err(),
+        "Rust type must reject a plan without input_wait_policy"
+    );
+    assert!(
+        !plan_validator.is_valid(&stale_plan),
+        "skill schema must reject a plan without input_wait_policy"
+    );
 }
 
 #[test]
@@ -215,6 +500,10 @@ fn skill_reference_paths_cover_agent_map_and_reducer_agents_only() {
                         },
                         "plan": {
                             "cancel_policy": "retain_effects",
+                            "input_wait_policy": {
+                                "expiry": { "kind": "after", "delay_seconds": 3600 },
+                                "on_expiry": { "kind": "fail_run" }
+                            },
                             "input_schema": { "type": "object" },
                             "output_schema": { "type": "object" },
                             "nodes": [
@@ -335,6 +624,13 @@ fn execution_plan_round_trips_without_a_nested_version() {
     let encoded = serde_json::to_value(&plan).expect("serialize plan");
     assert!(encoded.get("schema_version").is_none());
     assert_eq!(encoded["cancel_policy"], json!("retain_effects"));
+    assert_eq!(
+        encoded["input_wait_policy"],
+        json!({
+            "expiry": { "kind": "after", "delay_seconds": 3600 },
+            "on_expiry": { "kind": "fail_run" }
+        })
+    );
     assert_eq!(
         serde_json::from_value::<ExecutionPlanDefinition>(encoded).expect("deserialize exact plan"),
         plan
@@ -566,6 +862,7 @@ fn execution_plan_requires_one_terminal_output_with_all_nodes_as_ancestors() {
     let mut no_output = valid_plan();
     no_output.nodes[1].operation = ExecutionOperation::Review {
         prompt: "Review".to_string(),
+        wait_policy: wait_policy(ExecutionWaitExpiryAction::FailTask),
     };
     assert_error(
         &validate_execution_plan_definition(&no_output),
@@ -587,6 +884,7 @@ fn execution_plan_requires_one_terminal_output_with_all_nodes_as_ancestors() {
         &["output"],
         ExecutionOperation::Review {
             prompt: "Impossible review".to_string(),
+            wait_policy: wait_policy(ExecutionWaitExpiryAction::FailTask),
         },
     ));
     let report = validate_execution_plan_definition(&output_has_dependent);
@@ -607,6 +905,7 @@ fn execution_plan_requires_one_terminal_output_with_all_nodes_as_ancestors() {
         &[],
         ExecutionOperation::Review {
             prompt: "Unused review".to_string(),
+            wait_policy: wait_policy(ExecutionWaitExpiryAction::FailTask),
         },
     ));
     assert_error(
@@ -749,6 +1048,7 @@ fn execution_plan_rejects_malformed_hidden_and_recursive_references() {
             &["lookup"],
             ExecutionOperation::Review {
                 prompt: "Review".to_string(),
+                wait_policy: wait_policy(ExecutionWaitExpiryAction::FailTask),
             },
         ),
     );
@@ -759,6 +1059,32 @@ fn execution_plan_rejects_malformed_hidden_and_recursive_references() {
     assert_error(
         &validate_execution_plan_definition(&hidden),
         "execution_plan.nodes[2].operation.value",
+        "execution reference may only read a declared dependency output",
+    );
+
+    let mut hidden_timer_result = valid_plan();
+    hidden_timer_result.nodes[0].operation = ExecutionOperation::WaitUntil {
+        wake: ExecutionTemporalTarget::At {
+            at: at("2030-01-02T02:00:00Z"),
+        },
+        result: json!({ "$ref": "$.nodes.output.output" }),
+    };
+    assert_error(
+        &validate_execution_plan_definition(&hidden_timer_result),
+        "execution_plan.nodes[0].operation.result",
+        "execution reference may only read a declared dependency output",
+    );
+
+    let mut hidden_expiry_output = valid_plan();
+    hidden_expiry_output.nodes[0].operation = ExecutionOperation::Review {
+        prompt: "Approve?".to_string(),
+        wait_policy: wait_policy(ExecutionWaitExpiryAction::ContinueWith {
+            output: json!({ "$ref": "$.nodes.output.output" }),
+        }),
+    };
+    assert_error(
+        &validate_execution_plan_definition(&hidden_expiry_output),
+        "execution_plan.nodes[0].operation.wait_policy.on_expiry.output",
         "execution reference may only read a declared dependency output",
     );
 
@@ -1046,6 +1372,7 @@ fn task_outcome_variants_round_trip_without_extra_envelope_fields() {
 fn valid_plan() -> ExecutionPlanDefinition {
     ExecutionPlanDefinition {
         cancel_policy: ExecutionCancelPolicy::RetainEffects,
+        input_wait_policy: wait_policy(ExecutionWaitExpiryAction::FailRun),
         input_schema: json!({ "type": "object" }),
         output_schema: json!({ "type": "object" }),
         nodes: vec![
@@ -1065,6 +1392,63 @@ fn valid_plan() -> ExecutionPlanDefinition {
             ),
         ],
     }
+}
+
+fn wait_policy(on_expiry: ExecutionWaitExpiryAction) -> ExecutionWaitPolicy {
+    ExecutionWaitPolicy {
+        expiry: ExecutionTemporalTarget::After {
+            delay_seconds: 3_600,
+        },
+        on_expiry,
+    }
+}
+
+fn at(value: &str) -> DateTime<Utc> {
+    value.parse().expect("fixture timestamp must be RFC 3339")
+}
+
+fn absolute_target() -> ExecutionTemporalTarget {
+    ExecutionTemporalTarget::At {
+        at: at("2030-01-02T02:00:00Z"),
+    }
+}
+
+fn skill_document_with_plan(plan: ExecutionPlanDefinition) -> ArtifactDocument {
+    ArtifactDocument::from_json(
+        &json!({
+            "api_version": "moa.artifact/v1",
+            "kind": "skill",
+            "metadata": { "name": "temporal-template" },
+            "definition": {
+                "type": "skill",
+                "spec": {
+                    "execution_plan": {
+                        "goal": {
+                            "requirements": [{
+                                "id": "req_one",
+                                "description": "Complete the temporal work."
+                            }],
+                            "deliverables": [],
+                            "coverage": [],
+                            "constraints": [],
+                            "completion_checks": []
+                        },
+                        "plan": plan
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("parse temporal skill template fixture")
+}
+
+fn schema_entry_document(schema: &Value, definition: &str) -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": format!("#/$defs/{definition}"),
+        "$defs": schema["$defs"].clone()
+    })
 }
 
 fn operation_node_json(id: &str, operation: Value) -> Value {

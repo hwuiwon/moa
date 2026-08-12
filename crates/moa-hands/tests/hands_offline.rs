@@ -6,6 +6,8 @@ mod call_origin_offline;
 mod connector_router;
 #[path = "hands_offline/local_tools_offline.rs"]
 mod local_tools_offline;
+#[path = "hands_offline/maintenance_provider_inventory_offline.rs"]
+mod maintenance_provider_inventory_offline;
 #[path = "hands_offline/mcp_router.rs"]
 mod mcp_router;
 #[path = "hands_offline/provider_credentials_offline.rs"]

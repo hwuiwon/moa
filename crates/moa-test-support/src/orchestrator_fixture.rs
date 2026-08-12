@@ -56,6 +56,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
 mod client;
 mod conversation;
+mod external_job;
 mod openfga;
 mod otlp_capture;
 mod postgres;
@@ -72,12 +73,28 @@ pub use crate::fixture_capability::{
 };
 pub use client::{TestApiClient, TestSessionHandle};
 pub use conversation::{ConversationOptions, drive_conversation};
+pub use external_job::{
+    FIXTURE_EXTERNAL_JOB_CALLBACK_TOKEN, FIXTURE_EXTERNAL_JOB_PROVIDER,
+    FixtureExternalJobAfterBind, FixtureExternalJobController, FixtureExternalJobReconciliation,
+    FixtureExternalJobRecovery, FixtureExternalJobStart,
+};
 pub use otlp_capture::OtlpCapture;
 pub use rustfs::RustFsFixture;
 pub use sandbox_workspace::{
     SandboxWorkspaceCrashBarrier, SandboxWorkspaceCrashControl, SandboxWorkspaceFixture,
     WorkspaceRestartProbe,
 };
+
+/// One concrete Restate handler deployment owned by a restartable fixture.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FixtureHandlerRevision {
+    /// Restate-assigned immutable deployment identity.
+    pub deployment_id: String,
+    /// Handler endpoint registered for this revision.
+    pub deployment_uri: String,
+    /// Health endpoint port for the corresponding orchestrator child.
+    pub health_port: u16,
+}
 
 use openfga::{
     bootstrap_openfga, external_fga_client, fixture_fga_endpoint_from_env, start_openfga_container,
@@ -90,9 +107,10 @@ use process::{
     locate_orchestrator_binary, read_child_logs, repo_root, reserve_orchestrator_ports,
     spawn_orchestrator, terminate_child, wait_for_orchestrator_health,
 };
-use redis::{start_redis_container, wait_for_redis};
+use redis::{start_redis_container, start_redis_container_on_port, wait_for_redis};
 use restate::{
-    derive_admin_url, register_deployment, start_restate_container, trim_url,
+    delete_deployment, derive_admin_url, find_deployment, pinned_invocation_count,
+    register_deployment, start_restate_container, start_restate_container_on_ports, trim_url,
     wait_for_registered_services, wait_for_restate_admin,
 };
 use scripted_provider::default_script;
@@ -113,13 +131,16 @@ pub struct OrchestratorTestFixture {
     pub test_prefix: String,
     _script_dir: Option<TempDir>,
     _postgres: Option<ContainerAsync<GenericImage>>,
-    _restate: Option<ContainerAsync<GenericImage>>,
+    restate: Mutex<Option<ContainerAsync<GenericImage>>>,
     _openfga: Option<ContainerAsync<GenericImage>>,
-    _redis: Option<ContainerAsync<GenericImage>>,
+    redis: Mutex<Option<ContainerAsync<GenericImage>>>,
     orchestrator: Mutex<Option<Child>>,
+    maintenance: Mutex<Option<Child>>,
+    handler_revisions: Mutex<HashMap<String, Child>>,
     _orchestrator_binary_snapshot: Option<FixtureBinarySnapshot>,
     restart_config: Option<OrchestratorRestartConfig>,
     fixture_capability: Option<crate::fixture_capability::FixtureCapabilityRuntime>,
+    fixture_external_job: Option<external_job::FixtureExternalJobRuntime>,
     otlp_capture: Option<OtlpCapture>,
     sandbox_workspace: Option<SandboxWorkspaceFixture>,
 }
@@ -153,7 +174,7 @@ impl OrchestratorTestFixture {
         if let Ok(ingress_url) = std::env::var("MOA_RESTATE_INGRESS_URL") {
             return Self::external(ingress_url);
         }
-        Self::internal(None, Vec::new(), None, true, false).await
+        Self::internal(None, Vec::new(), None, true, false, false).await
     }
 
     /// Starts a dedicated fixture with a scripted provider fixture loaded at startup.
@@ -161,7 +182,7 @@ impl OrchestratorTestFixture {
         if std::env::var("MOA_RESTATE_INGRESS_URL").is_ok() {
             bail!("dedicated scripted fixtures cannot use an external orchestrator");
         }
-        Self::internal(Some(script), Vec::new(), None, true, false).await
+        Self::internal(Some(script), Vec::new(), None, true, false, false).await
     }
 
     /// Starts a dedicated scripted fixture with extra orchestrator process environment.
@@ -172,7 +193,7 @@ impl OrchestratorTestFixture {
         if std::env::var("MOA_RESTATE_INGRESS_URL").is_ok() {
             bail!("dedicated scripted fixtures cannot use an external orchestrator");
         }
-        Self::internal(Some(script), extra_env, None, true, false).await
+        Self::internal(Some(script), extra_env, None, true, false, false).await
     }
 
     /// Starts a restartable dedicated fixture with a scripted provider and fake MCP capabilities.
@@ -185,7 +206,19 @@ impl OrchestratorTestFixture {
         }
         validate_execution_fixture_env(&options.orchestrator_env)?;
         let extra_env = options.orchestrator_env.clone();
-        Self::internal(Some(script), extra_env, Some(options), true, false).await
+        Self::internal(Some(script), extra_env, Some(options), true, false, false).await
+    }
+
+    /// Starts a restartable execution fixture with the deterministic asynchronous provider.
+    pub async fn with_external_job_execution_fixture(
+        script: serde_json::Value,
+        extra_env: Vec<(String, String)>,
+    ) -> Result<Self> {
+        if std::env::var("MOA_RESTATE_INGRESS_URL").is_ok() {
+            bail!("dedicated external-job fixtures cannot use an external orchestrator");
+        }
+        validate_execution_fixture_env(&extra_env)?;
+        Self::internal(Some(script), extra_env, None, true, false, true).await
     }
 
     /// Starts a dedicated scripted fixture with durable workspace owners.
@@ -197,7 +230,7 @@ impl OrchestratorTestFixture {
             bail!("sandbox-workspace fixtures cannot use an external orchestrator");
         }
         validate_execution_fixture_env(&extra_env)?;
-        Self::internal(Some(script), extra_env, None, true, true).await
+        Self::internal(Some(script), extra_env, None, true, true, false).await
     }
 
     /// Starts a durable-workspace fixture with the fake MCP capability server.
@@ -210,7 +243,7 @@ impl OrchestratorTestFixture {
         }
         validate_execution_fixture_env(&options.orchestrator_env)?;
         let extra_env = options.orchestrator_env.clone();
-        Self::internal(Some(script), extra_env, Some(options), true, true).await
+        Self::internal(Some(script), extra_env, Some(options), true, true, false).await
     }
 
     /// Starts a dedicated fixture backed by a configured real LLM provider.
@@ -237,7 +270,7 @@ impl OrchestratorTestFixture {
                 "MOA_RUN_LIVE_EXECUTION_EVALS=1 requires MOA_ANTHROPIC_API_KEY, MOA_OPENAI_API_KEY, or MOA_GOOGLE_API_KEY"
             );
         }
-        Self::internal(None, Vec::new(), None, false, false).await
+        Self::internal(None, Vec::new(), None, false, false, false).await
     }
 
     fn external(raw_ingress_url: String) -> Result<Self> {
@@ -262,13 +295,16 @@ impl OrchestratorTestFixture {
             test_prefix: format!("external-{}", Uuid::now_v7().simple()),
             _script_dir: None,
             _postgres: None,
-            _restate: None,
+            restate: Mutex::new(None),
             _openfga: None,
-            _redis: None,
+            redis: Mutex::new(None),
             orchestrator: Mutex::new(None),
+            maintenance: Mutex::new(None),
+            handler_revisions: Mutex::new(HashMap::new()),
             _orchestrator_binary_snapshot: None,
             restart_config: None,
             fixture_capability: None,
+            fixture_external_job: None,
             otlp_capture: None,
             sandbox_workspace: None,
         })
@@ -280,6 +316,7 @@ impl OrchestratorTestFixture {
         capability_options: Option<FixtureCapabilityOptions>,
         use_provider_override: bool,
         use_sandbox_workspace: bool,
+        use_external_job_fixture: bool,
     ) -> Result<Self> {
         if capability_options.is_some() && !use_provider_override {
             bail!("fixture capabilities require the scripted-provider override");
@@ -444,6 +481,24 @@ impl OrchestratorTestFixture {
             }
             None => None,
         };
+        let fixture_external_job = if use_external_job_fixture {
+            if extra_env
+                .iter()
+                .any(|(key, _)| key == "MOA_FIXTURE_EXTERNAL_JOB_ADAPTER_URL")
+            {
+                bail!(
+                    "external-job fixture owns reserved environment key `MOA_FIXTURE_EXTERNAL_JOB_ADAPTER_URL`"
+                );
+            }
+            let runtime = external_job::FixtureExternalJobRuntime::start().await?;
+            extra_env.push((
+                "MOA_FIXTURE_EXTERNAL_JOB_ADAPTER_URL".to_string(),
+                runtime.endpoint().to_string(),
+            ));
+            Some(runtime)
+        } else {
+            None
+        };
         let client = TestApiClient::new(&ingress_url)
             .context("construct test client")?
             .with_identity(default_test_identity());
@@ -524,13 +579,16 @@ impl OrchestratorTestFixture {
             test_prefix: format!("fixture-{}", Uuid::now_v7().simple()),
             _script_dir: script_dir,
             _postgres: postgres,
-            _restate: Some(restate),
+            restate: Mutex::new(Some(restate)),
             _openfga: openfga_container,
-            _redis: redis_container,
+            redis: Mutex::new(redis_container),
             orchestrator: Mutex::new(Some(orchestrator)),
+            maintenance: Mutex::new(None),
+            handler_revisions: Mutex::new(HashMap::new()),
             _orchestrator_binary_snapshot: Some(orchestrator_binary_snapshot),
             restart_config,
             fixture_capability,
+            fixture_external_job,
             otlp_capture: Some(otlp_capture),
             sandbox_workspace,
         })
@@ -572,6 +630,134 @@ impl OrchestratorTestFixture {
         self.replace_orchestrator(Vec::new(), true).await
     }
 
+    /// Stops the fixture-owned Restate node while retaining its local durable state.
+    pub async fn stop_restate(&self) -> Result<()> {
+        let restate = self.restate.lock().await;
+        let container = restate
+            .as_ref()
+            .context("external orchestrator fixture does not own Restate")?;
+        container.stop().await.context("stop fixture Restate")
+    }
+
+    /// Starts a previously stopped Restate node and waits for its registered deployment.
+    pub async fn restart_restate(&self) -> Result<()> {
+        let restate = self.restate.lock().await;
+        let container = restate
+            .as_ref()
+            .context("external orchestrator fixture does not own Restate")?;
+        container.start().await.context("restart fixture Restate")?;
+        wait_for_restate_admin(&self.admin_url).await?;
+        wait_for_registered_services(&self.admin_url).await
+    }
+
+    /// Replaces Restate with an empty node on the same endpoints to model journal loss.
+    ///
+    /// PostgreSQL execution state and its dispatch outbox remain intact. The replacement
+    /// is therefore a proof that MOA can rediscover committed work without relying on the
+    /// lost Restate journal. This intentionally does not pretend to restore Restate state.
+    pub async fn recreate_restate_after_loss(&self) -> Result<()> {
+        let config = self.restart_config.as_ref().context(
+            "external orchestrator fixture cannot replace a Restate node it does not own",
+        )?;
+        let ingress_port = url_port(&config.ingress_url, "Restate ingress")?;
+        let admin_port = url_port(&config.admin_url, "Restate admin")?;
+        let mut restate = self.restate.lock().await;
+        let previous = restate
+            .take()
+            .context("fixture-owned Restate container is unavailable")?;
+        previous
+            .rm()
+            .await
+            .context("remove lost fixture Restate node")?;
+        let (replacement, mapped_ingress, mapped_admin) =
+            start_restate_container_on_ports(Some((ingress_port, admin_port))).await?;
+        if mapped_ingress != ingress_port || mapped_admin != admin_port {
+            bail!(
+                "replacement Restate remapped endpoints: expected {ingress_port}/{admin_port}, got {mapped_ingress}/{mapped_admin}"
+            );
+        }
+        *restate = Some(replacement);
+        drop(restate);
+        wait_for_restate_admin(&config.admin_url).await?;
+        register_deployment(&config.admin_url, &config.deployment_uri()).await?;
+        wait_for_registered_services(&config.admin_url).await?;
+        self.restart_execution_maintenance_owner().await
+    }
+
+    async fn restart_execution_maintenance_owner(&self) -> Result<()> {
+        let config = self.restart_config.as_ref().context(
+            "external orchestrator fixture cannot restart an execution maintenance owner",
+        )?;
+        let health_listener = std::net::TcpListener::bind("0.0.0.0:0")
+            .context("reserve fixture maintenance health port")?;
+        let health_port = health_listener
+            .local_addr()
+            .context("read fixture maintenance health port")?
+            .port();
+        let mut maintenance = self.maintenance.lock().await;
+        if let Some(child) = maintenance.take() {
+            terminate_child(child);
+        }
+        drop(health_listener);
+        let mut child_guard = config.spawn_maintenance(health_port)?;
+        wait_for_orchestrator_health(
+            health_port,
+            child_guard
+                .child_mut()
+                .context("maintenance child guard is unexpectedly disarmed")?,
+        )
+        .await
+        .context("restart fixture execution maintenance owner")?;
+        *maintenance = Some(
+            child_guard
+                .disarm()
+                .context("healthy maintenance child guard is unexpectedly disarmed")?,
+        );
+        Ok(())
+    }
+
+    /// Stops the fixture-owned Valkey process while retaining its container identity.
+    pub async fn stop_valkey(&self) -> Result<()> {
+        let redis = self.redis.lock().await;
+        let container = redis
+            .as_ref()
+            .context("external orchestrator fixture does not own Valkey")?;
+        container.stop().await.context("stop fixture Valkey")
+    }
+
+    /// Starts a previously stopped Valkey process and waits for TCP readiness.
+    pub async fn restart_valkey(&self) -> Result<()> {
+        let config = self.restart_config.as_ref().context(
+            "external orchestrator fixture cannot restart a Valkey node it does not own",
+        )?;
+        let redis = self.redis.lock().await;
+        let container = redis
+            .as_ref()
+            .context("fixture-owned Valkey container is unavailable")?;
+        container.start().await.context("restart fixture Valkey")?;
+        wait_for_redis(&config.redis_url).await
+    }
+
+    /// Replaces Valkey on the same endpoint to prove runtime-cache loss is recoverable.
+    pub async fn recreate_valkey_after_loss(&self) -> Result<()> {
+        let config = self.restart_config.as_ref().context(
+            "external orchestrator fixture cannot replace a Valkey node it does not own",
+        )?;
+        let port = url_port(&config.redis_url, "Valkey")?;
+        let mut redis = self.redis.lock().await;
+        let previous = redis
+            .take()
+            .context("fixture-owned Valkey container is unavailable")?;
+        previous
+            .rm()
+            .await
+            .context("remove lost fixture Valkey node")?;
+        let replacement = start_redis_container_on_port(Some(port)).await?;
+        *redis = Some(replacement);
+        drop(redis);
+        wait_for_redis(&config.redis_url).await
+    }
+
     /// Restarts the dedicated orchestrator once with additional child-process environment.
     ///
     /// The additional environment is not retained by later calls to
@@ -582,6 +768,170 @@ impl OrchestratorTestFixture {
         extra_env: Vec<(String, String)>,
     ) -> Result<()> {
         self.replace_orchestrator(extra_env, false).await
+    }
+
+    /// Returns the fixture's initially registered handler deployment.
+    pub async fn current_handler_revision(&self) -> Result<FixtureHandlerRevision> {
+        let config = self
+            .restart_config
+            .as_ref()
+            .context("external orchestrator fixture does not expose an owned handler deployment")?;
+        let deployment_uri = config.deployment_uri();
+        let (deployment_id, registered_uri) =
+            find_deployment(&config.admin_url, &deployment_uri).await?;
+        Ok(FixtureHandlerRevision {
+            deployment_id,
+            deployment_uri: registered_uri,
+            health_port: config.health_port,
+        })
+    }
+
+    /// Starts and registers one additional real handler revision on fresh ports.
+    ///
+    /// Restate routes new invocations to the newest registered deployment while
+    /// already-pinned invocations remain observable on their previous deployment.
+    pub async fn start_handler_revision(
+        &self,
+        revision_label: &str,
+    ) -> Result<FixtureHandlerRevision> {
+        if revision_label.trim().is_empty() {
+            bail!("fixture handler revision label must not be empty");
+        }
+        let config = self
+            .restart_config
+            .as_ref()
+            .context("external orchestrator fixture cannot start an owned handler revision")?;
+        let ports = reserve_orchestrator_ports()?.release();
+        let mut revision_env = config.extra_env.clone();
+        revision_env.push((
+            "MOA_FIXTURE_HANDLER_REVISION".to_string(),
+            revision_label.to_string(),
+        ));
+        let mut child_guard = spawn_orchestrator(OrchestratorSpawnConfig {
+            binary: &config.binary,
+            port: ports.restate,
+            health_port: ports.health,
+            scim_port: ports.scim,
+            credential_port: ports.credential,
+            postgres_url: &config.postgres_url,
+            ingress_url: &config.ingress_url,
+            redis_url: &config.redis_url,
+            script_path: config.script_path.as_deref(),
+            journal_path: config.journal_path.as_deref(),
+            fga_config: &config.fga_config,
+            extra_env: &revision_env,
+            otlp_endpoint: &config.otlp_endpoint,
+            observability_service_name: revision_label,
+        })?;
+        wait_for_orchestrator_health(
+            ports.health,
+            child_guard
+                .child_mut()
+                .context("new handler revision child guard is unexpectedly disarmed")?,
+        )
+        .await
+        .with_context(|| format!("start fixture handler revision `{revision_label}`"))?;
+        let deployment_uri = format!("http://host.docker.internal:{}", ports.restate);
+        register_deployment(&config.admin_url, &deployment_uri).await?;
+        let (deployment_id, registered_uri) =
+            find_deployment(&config.admin_url, &deployment_uri).await?;
+        let child = child_guard
+            .disarm()
+            .context("healthy handler revision child guard is unexpectedly disarmed")?;
+        let previous = self
+            .handler_revisions
+            .lock()
+            .await
+            .insert(deployment_id.clone(), child);
+        if let Some(previous) = previous {
+            terminate_child(previous);
+            bail!("Restate reused deployment id `{deployment_id}` for a distinct handler URI");
+        }
+        Ok(FixtureHandlerRevision {
+            deployment_id,
+            deployment_uri: registered_uri,
+            health_port: ports.health,
+        })
+    }
+
+    /// Reads the exact count of nonterminal invocations pinned to a handler revision.
+    pub async fn handler_revision_pinned_invocations(
+        &self,
+        revision: &FixtureHandlerRevision,
+    ) -> Result<u64> {
+        pinned_invocation_count(&self.admin_url, &revision.deployment_id).await
+    }
+
+    /// Waits for a handler revision to own zero nonterminal pinned invocations.
+    pub async fn wait_for_handler_revision_drained(
+        &self,
+        revision: &FixtureHandlerRevision,
+        timeout: Duration,
+    ) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let pinned = self.handler_revision_pinned_invocations(revision).await?;
+            if pinned == 0 {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "handler deployment {} did not drain within {timeout:?}; {pinned} invocations remain pinned",
+                    revision.deployment_id
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Deregisters and stops an owned handler revision after it is fully drained.
+    pub async fn stop_drained_handler_revision(
+        &self,
+        revision: &FixtureHandlerRevision,
+    ) -> Result<()> {
+        let pinned = self.handler_revision_pinned_invocations(revision).await?;
+        if pinned != 0 {
+            bail!(
+                "refusing to stop handler deployment {} with {pinned} pinned invocations",
+                revision.deployment_id
+            );
+        }
+        let is_additional = self
+            .handler_revisions
+            .lock()
+            .await
+            .contains_key(&revision.deployment_id);
+        let config = self
+            .restart_config
+            .as_ref()
+            .context("external orchestrator fixture cannot stop an owned handler revision")?;
+        let initial_uri = config.deployment_uri();
+        let is_initial =
+            revision.deployment_uri.trim_end_matches('/') == initial_uri.trim_end_matches('/');
+        if !is_additional && !is_initial {
+            bail!(
+                "handler deployment {} is not owned by this fixture",
+                revision.deployment_id
+            );
+        }
+        delete_deployment(&self.admin_url, &revision.deployment_id).await?;
+        if let Some(child) = self
+            .handler_revisions
+            .lock()
+            .await
+            .remove(&revision.deployment_id)
+        {
+            terminate_child(child);
+            return Ok(());
+        }
+        let child = self
+            .orchestrator
+            .lock()
+            .await
+            .take()
+            .context("fixture initial orchestrator is already stopped")?;
+        terminate_child(child);
+        Ok(())
     }
 
     async fn replace_orchestrator(
@@ -740,6 +1090,38 @@ impl OrchestratorTestFixture {
             .map(crate::fixture_capability::FixtureCapabilityRuntime::controller)
     }
 
+    /// Returns the deterministic asynchronous-provider controller for opt-in fixtures.
+    #[must_use]
+    pub fn fixture_external_job(&self) -> Option<&FixtureExternalJobController> {
+        self.fixture_external_job
+            .as_ref()
+            .map(external_job::FixtureExternalJobRuntime::controller)
+    }
+
+    /// Builds the private callback-ingress URL for one exact fixture job generation and event.
+    pub fn external_job_callback_url(
+        &self,
+        external_job_uid: Uuid,
+        job_generation: u64,
+        provider_event_id: &str,
+    ) -> Result<String> {
+        if provider_event_id.trim().is_empty()
+            || !provider_event_id
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "-_.:".contains(character))
+        {
+            bail!("fixture provider event id must be non-empty and path-segment safe");
+        }
+        let config = self
+            .restart_config
+            .as_ref()
+            .context("external-job callback ingress requires a dedicated orchestrator fixture")?;
+        Ok(format!(
+            "http://127.0.0.1:{}/internal/v1/execution/external-jobs/{external_job_uid}/generations/{job_generation}/callbacks/{provider_event_id}",
+            config.credential_port
+        ))
+    }
+
     /// Grants the provided identity tenant-operator access.
     pub async fn grant_tenant_operator_identity(
         &self,
@@ -838,6 +1220,13 @@ impl OrchestratorTestFixture {
     }
 }
 
+fn url_port(raw_url: &str, dependency: &str) -> Result<u16> {
+    url::Url::parse(raw_url)
+        .with_context(|| format!("parse fixture {dependency} URL"))?
+        .port_or_known_default()
+        .with_context(|| format!("fixture {dependency} URL has no port"))
+}
+
 async fn fixture_host_port_ipv4(
     container: &ContainerAsync<GenericImage>,
     label: &'static str,
@@ -884,7 +1273,10 @@ fn validate_execution_fixture_env(extra_env: &[(String, String)]) -> Result<()> 
         }
         if matches!(
             key.as_str(),
-            "MOA_MCP_SERVERS_JSON" | "MOA_SCRIPTED_PROVIDER_REQUEST_LOG" | "MOA_PROVIDERS_OVERRIDE"
+            "MOA_FIXTURE_EXTERNAL_JOB_ADAPTER_URL"
+                | "MOA_MCP_SERVERS_JSON"
+                | "MOA_SCRIPTED_PROVIDER_REQUEST_LOG"
+                | "MOA_PROVIDERS_OVERRIDE"
         ) {
             bail!("execution fixture owns reserved environment key `{key}`");
         }
@@ -916,7 +1308,16 @@ impl Drop for OrchestratorTestFixture {
         if let Some(child) = self.orchestrator.get_mut().take() {
             terminate_child(child);
         }
+        if let Some(child) = self.maintenance.get_mut().take() {
+            terminate_child(child);
+        }
+        for (_, child) in self.handler_revisions.get_mut().drain() {
+            terminate_child(child);
+        }
         if let Some(runtime) = self.fixture_capability.as_mut() {
+            runtime.stop();
+        }
+        if let Some(runtime) = self.fixture_external_job.as_mut() {
             runtime.stop();
         }
         if let Some(capture) = self.otlp_capture.as_mut() {
@@ -1106,13 +1507,16 @@ mod tests {
             test_prefix: "inert".to_string(),
             _script_dir: None,
             _postgres: None,
-            _restate: None,
+            restate: Mutex::new(None),
             _openfga: None,
-            _redis: None,
+            redis: Mutex::new(None),
             orchestrator: Mutex::new(None),
+            maintenance: Mutex::new(None),
+            handler_revisions: Mutex::new(HashMap::new()),
             _orchestrator_binary_snapshot: None,
             restart_config: None,
             fixture_capability: None,
+            fixture_external_job: None,
             otlp_capture: None,
             sandbox_workspace: None,
         }

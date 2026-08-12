@@ -1,12 +1,13 @@
 //! Cycle-free execution routing, planning-audit, provenance, and admission DTOs.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::canonical_json::canonical_json_bytes;
+use crate::traits::Identity;
 use crate::types::{
     contact::ContactId,
     identifiers::{SessionId, TenantId},
@@ -724,6 +725,409 @@ pub struct ExecutionRunStarted {
     pub status: ExecutionRunAdmissionStatus,
     /// Required only for awaiting-confirmation admissions.
     pub confirmation: Option<ExecutionConfirmationEvidence>,
+}
+
+/// Lifecycle state of one tenant-owned recurring execution schedule.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionScheduleStatus {
+    /// New occurrences may be armed and admitted.
+    Active,
+    /// No occurrence is armed, while immutable schedule inputs are retained.
+    Paused,
+    /// The configured end or occurrence budget was exhausted.
+    Completed,
+    /// An operator permanently fenced future occurrences.
+    Cancelled,
+}
+
+impl ExecutionScheduleStatus {
+    /// Returns the canonical database and wire label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// Policy applied when a scheduled occurrence became due while delivery was unavailable.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionScheduleMissedFirePolicy {
+    /// Discard missed occurrences and arm the first future wall-clock occurrence.
+    Skip,
+    /// Admit at most one catch-up occurrence, then return to the wall-clock series.
+    FireOnce,
+}
+
+impl ExecutionScheduleMissedFirePolicy {
+    /// Returns the canonical database and wire label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Skip => "skip",
+            Self::FireOnce => "fire_once",
+        }
+    }
+}
+
+/// Policy applied when a preceding occurrence still owns a nonterminal run.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionScheduleOverlapPolicy {
+    /// Do not admit the overlapping occurrence.
+    Skip,
+    /// Retain at most one queued overlapping occurrence.
+    QueueOne,
+    /// Admit overlapping occurrences up to the configured concurrency bound.
+    Allow,
+}
+
+impl ExecutionScheduleOverlapPolicy {
+    /// Returns the canonical database and wire label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Skip => "skip",
+            Self::QueueOne => "queue_one",
+            Self::Allow => "allow",
+        }
+    }
+}
+
+/// Resolution policy for ambiguous or nonexistent local wall-clock occurrences.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionScheduleDstPolicy {
+    /// Select the earlier UTC instant for an ambiguous local occurrence.
+    Earliest,
+    /// Select the later UTC instant for an ambiguous local occurrence.
+    Latest,
+    /// Omit ambiguous or nonexistent local occurrences.
+    Skip,
+}
+
+impl ExecutionScheduleDstPolicy {
+    /// Returns the canonical database and wire label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Earliest => "earliest",
+            Self::Latest => "latest",
+            Self::Skip => "skip",
+        }
+    }
+}
+
+/// Trusted control-plane source that created an execution schedule.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionScheduleOriginSource {
+    /// Direct authenticated tenant API request.
+    TenantApi,
+    /// Exact persisted session user event.
+    Session {
+        /// Owning session.
+        session_id: SessionId,
+        /// Exact persisted user event sequence.
+        originating_user_sequence_num: u64,
+    },
+}
+
+/// Immutable creation provenance for one tenant execution schedule.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionScheduleOrigin {
+    /// Replay-stable request identity.
+    pub request_uid: Uuid,
+    /// Exact authenticated creator admitted by the schedule service.
+    pub created_by: Identity,
+    /// Public entry point that originated the schedule.
+    pub source: ExecutionScheduleOriginSource,
+}
+
+/// Immutable pinned template input copied into every schedule occurrence.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionScheduleTemplate {
+    /// Exact immutable artifact revision.
+    pub revision_uid: Uuid,
+    /// Canonical lowercase BLAKE3 hash of the template snapshot.
+    pub template_hash: String,
+    /// Complete bounded template snapshot needed to admit a fresh run.
+    pub snapshot: Value,
+}
+
+/// Computes the canonical domain-separated hash stored with a schedule template snapshot.
+pub fn execution_schedule_template_hash(
+    snapshot: &Value,
+) -> Result<String, ExecutionPlanningContractError> {
+    let bytes = canonical_json_bytes(snapshot)
+        .map_err(|error| ExecutionPlanningContractError::Json(error.to_string()))?;
+    Ok(execution_planning_hash(
+        "moa.execution.schedule.template.v1",
+        &bytes,
+    ))
+}
+
+/// Wall-clock and resource policy for one execution schedule.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionSchedulePolicy {
+    /// IANA timezone used to interpret the calendar expression.
+    pub timezone: String,
+    /// Five- or six-field cron expression evaluated in `timezone`.
+    pub calendar_expression: String,
+    /// Earliest UTC instant that may produce an occurrence.
+    pub start_at: DateTime<Utc>,
+    /// Optional exclusive upper bound for occurrences.
+    pub end_at: Option<DateTime<Utc>>,
+    /// Missed occurrence behavior.
+    pub missed_fire_policy: ExecutionScheduleMissedFirePolicy,
+    /// Concurrent occurrence behavior.
+    pub overlap_policy: ExecutionScheduleOverlapPolicy,
+    /// Ambiguous/nonexistent local-time behavior.
+    pub dst_policy: ExecutionScheduleDstPolicy,
+    /// Maximum number of nonterminal occurrence runs admitted concurrently.
+    pub maximum_concurrent_runs: u64,
+    /// Exact approved execution budget copied into each fresh run.
+    pub occurrence_budget: Value,
+}
+
+/// Authenticated request to create one tenant execution schedule.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionScheduleCreateRequest {
+    /// Tenant authorization and RLS boundary.
+    pub tenant_id: TenantId,
+    /// Caller-selected replay-stable schedule identity.
+    pub schedule_uid: Uuid,
+    /// Non-empty operator-facing schedule name.
+    pub name: String,
+    /// Immutable pinned template revision and snapshot.
+    pub template: ExecutionScheduleTemplate,
+    /// Exact identity under which every occurrence is admitted.
+    pub run_as_identity: Identity,
+    /// Immutable authenticated creation provenance.
+    pub origin: ExecutionScheduleOrigin,
+    /// Wall-clock, overlap, and occurrence resource policy.
+    pub policy: ExecutionSchedulePolicy,
+}
+
+/// Tenant-scoped request targeting one schedule.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionScheduleRequest {
+    /// Tenant authorization and RLS boundary.
+    pub tenant_id: TenantId,
+    /// Target schedule.
+    pub schedule_uid: Uuid,
+}
+
+/// Mutable policy replacement for one schedule incarnation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionScheduleUpdateRequest {
+    /// Tenant authorization and RLS boundary.
+    pub tenant_id: TenantId,
+    /// Target schedule.
+    pub schedule_uid: Uuid,
+    /// Expected incarnation used as a compare-and-set fence.
+    pub expected_incarnation: u64,
+    /// Replacement operator-facing name.
+    pub name: String,
+    /// Replacement timing/resource policy; template, identity, and origin stay immutable.
+    pub policy: ExecutionSchedulePolicy,
+}
+
+/// Bounded stable-page request for tenant schedules.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionScheduleListRequest {
+    /// Tenant authorization and RLS boundary.
+    pub tenant_id: TenantId,
+    /// Maximum rows to return, clamped by the repository.
+    pub limit: u32,
+    /// Exclusive schedule UID cursor from the preceding page.
+    pub cursor: Option<Uuid>,
+}
+
+/// Persisted tenant schedule projection returned by control-plane handlers.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionScheduleRecord {
+    /// Stable schedule identity.
+    pub schedule_uid: Uuid,
+    /// Tenant authorization and RLS boundary.
+    pub tenant_id: TenantId,
+    /// Operator-facing schedule name.
+    pub name: String,
+    /// Immutable pinned template revision and snapshot.
+    pub template: ExecutionScheduleTemplate,
+    /// Exact identity copied into every occurrence run.
+    pub run_as_identity: Identity,
+    /// Immutable authenticated creation provenance.
+    pub origin: ExecutionScheduleOrigin,
+    /// Current timing/resource policy.
+    pub policy: ExecutionSchedulePolicy,
+    /// Current lifecycle state.
+    pub status: ExecutionScheduleStatus,
+    /// Monotonic fence for already-armed occurrence triggers.
+    pub schedule_incarnation: u64,
+    /// Last occurrence sequence considered in this incarnation.
+    pub last_occurrence_sequence: u64,
+    /// Exact UTC instant of the currently armed occurrence.
+    pub next_occurrence_at: Option<DateTime<Utc>>,
+    /// Local wall-clock value corresponding to `next_occurrence_at`.
+    pub next_occurrence_local: Option<NaiveDateTime>,
+    /// Time at which the schedule was paused.
+    pub paused_at: Option<DateTime<Utc>>,
+    /// Database-owned creation time.
+    pub created_at: DateTime<Utc>,
+    /// Database-owned last mutation time.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Stable page of visible tenant schedules.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionSchedulePage {
+    /// Schedule rows in stable UUID order.
+    pub schedules: Vec<ExecutionScheduleRecord>,
+    /// Cursor for a subsequent page.
+    pub next_cursor: Option<Uuid>,
+}
+
+/// Deterministic identities for one immutable schedule occurrence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionScheduleOccurrenceIds {
+    /// Temporal occurrence trigger identity.
+    pub trigger_uid: Uuid,
+    /// Fresh execution-run identity for this occurrence.
+    pub run_uid: Uuid,
+    /// Initial run-activation outbox identity.
+    pub activation_dispatch_uid: Uuid,
+}
+
+/// Derives all occurrence identities from the exact schedule generation tuple.
+#[must_use]
+pub fn execution_schedule_occurrence_ids(
+    schedule_uid: Uuid,
+    schedule_incarnation: u64,
+    occurrence_sequence: u64,
+) -> ExecutionScheduleOccurrenceIds {
+    let name = format!("{schedule_uid}:{schedule_incarnation}:{occurrence_sequence}");
+    let occurrence_namespace = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        b"moa.execution.schedule.occurrence.v1",
+    );
+    let occurrence_uid = Uuid::new_v5(&occurrence_namespace, name.as_bytes());
+    ExecutionScheduleOccurrenceIds {
+        trigger_uid: Uuid::new_v5(&occurrence_uid, b"trigger"),
+        run_uid: Uuid::new_v5(&occurrence_uid, b"run"),
+        activation_dispatch_uid: Uuid::new_v5(&occurrence_uid, b"run-activation"),
+    }
+}
+
+impl ExecutionScheduleCreateRequest {
+    /// Validates all tenant, immutable snapshot, time, and bounded scalar invariants.
+    pub fn validate(&self) -> Result<(), ExecutionPlanningContractError> {
+        if self.schedule_uid.is_nil() || self.template.revision_uid.is_nil() {
+            return Err(ExecutionPlanningContractError::InvalidField {
+                field: "schedule_uid/template.revision_uid".to_string(),
+                message: "identifiers must not be nil".to_string(),
+            });
+        }
+        ensure_nonempty_bytes("name", &self.name, 256)?;
+        validate_hash("template.template_hash", &self.template.template_hash)?;
+        ensure_json_object("template.snapshot", &self.template.snapshot)?;
+        if self.template.template_hash != execution_schedule_template_hash(&self.template.snapshot)?
+        {
+            return Err(ExecutionPlanningContractError::InvalidField {
+                field: "template.template_hash".to_string(),
+                message: "must equal the canonical pinned template snapshot hash".to_string(),
+            });
+        }
+        ensure_schedule_identity("run_as_identity", self.tenant_id, &self.run_as_identity)?;
+        ensure_schedule_identity("origin.created_by", self.tenant_id, &self.origin.created_by)?;
+        if self.origin.request_uid.is_nil() {
+            return Err(ExecutionPlanningContractError::InvalidField {
+                field: "origin.request_uid".to_string(),
+                message: "must not be nil".to_string(),
+            });
+        }
+        validate_schedule_policy(&self.policy)
+    }
+}
+
+impl ExecutionScheduleUpdateRequest {
+    /// Validates mutable policy bounds and the nonzero compare-and-set incarnation.
+    pub fn validate(&self) -> Result<(), ExecutionPlanningContractError> {
+        if self.schedule_uid.is_nil() || self.expected_incarnation == 0 {
+            return Err(ExecutionPlanningContractError::InvalidField {
+                field: "schedule_uid/expected_incarnation".to_string(),
+                message: "identifier and incarnation must be nonzero".to_string(),
+            });
+        }
+        ensure_nonempty_bytes("name", &self.name, 256)?;
+        validate_schedule_policy(&self.policy)
+    }
+}
+
+fn validate_schedule_policy(
+    policy: &ExecutionSchedulePolicy,
+) -> Result<(), ExecutionPlanningContractError> {
+    ensure_nonempty_bytes("policy.timezone", &policy.timezone, 128)?;
+    ensure_nonempty_bytes(
+        "policy.calendar_expression",
+        &policy.calendar_expression,
+        256,
+    )?;
+    if policy
+        .end_at
+        .is_some_and(|end_at| end_at <= policy.start_at)
+    {
+        return Err(ExecutionPlanningContractError::InvalidField {
+            field: "policy.end_at".to_string(),
+            message: "must be later than start_at".to_string(),
+        });
+    }
+    if policy.maximum_concurrent_runs == 0 {
+        return Err(ExecutionPlanningContractError::InvalidField {
+            field: "policy.maximum_concurrent_runs".to_string(),
+            message: "must be greater than zero".to_string(),
+        });
+    }
+    ensure_json_object("policy.occurrence_budget", &policy.occurrence_budget)
+}
+
+fn ensure_schedule_identity(
+    field: &str,
+    tenant_id: TenantId,
+    identity: &Identity,
+) -> Result<(), ExecutionPlanningContractError> {
+    if identity.id.is_nil() || identity.tenant_id != tenant_id {
+        return Err(ExecutionPlanningContractError::InvalidField {
+            field: field.to_string(),
+            message: "identity must be non-nil and belong to the schedule tenant".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn ensure_json_object(field: &str, value: &Value) -> Result<(), ExecutionPlanningContractError> {
+    if !value.is_object() {
+        return Err(ExecutionPlanningContractError::InvalidField {
+            field: field.to_string(),
+            message: "must be a JSON object".to_string(),
+        });
+    }
+    Ok(())
 }
 
 impl ExecutionRunStarted {
@@ -2103,6 +2507,18 @@ mod tests {
             invalid.validate(),
             Err(ExecutionPlanningContractError::InvalidField { field, .. }) if field == "confirmation"
         ));
+    }
+
+    #[test]
+    fn schedule_occurrence_ids_are_tuple_deterministic_and_generation_fenced() {
+        // Pins: retries derive the same trigger/run/outbox identities, while a new schedule
+        // incarnation cannot collide with an already-armed occurrence sequence.
+        let schedule_uid = Uuid::from_u128(91);
+        let first = execution_schedule_occurrence_ids(schedule_uid, 3, 7);
+        assert_eq!(first, execution_schedule_occurrence_ids(schedule_uid, 3, 7));
+        assert_ne!(first, execution_schedule_occurrence_ids(schedule_uid, 4, 7));
+        assert_ne!(first.trigger_uid, first.run_uid);
+        assert_ne!(first.run_uid, first.activation_dispatch_uid);
     }
 
     #[test]

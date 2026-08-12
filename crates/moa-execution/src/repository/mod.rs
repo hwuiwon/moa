@@ -1,19 +1,32 @@
 //! Scoped PostgreSQL persistence for durable execution runs and logical tasks.
 
 mod admission;
-mod audit;
+pub mod amendment;
+/// Immutable execution planning-context and normalized audit persistence.
+pub mod audit;
 mod audit_codec;
-mod compensation;
+pub mod capacity;
+pub mod compensation;
+pub mod completion;
+pub mod external_job;
 mod materialize;
+pub mod outbox;
 mod outcome;
 mod outcome_support;
 mod projection;
+pub mod ready;
+/// Durable bounded replan-stop intent handoff.
+pub mod replan_stop;
+pub mod retention;
 mod rows;
-mod run;
+pub mod run;
+pub mod schedule;
 mod sql;
-mod task;
-mod terminal;
+pub mod task;
+/// Bounded terminal fencing, trigger drain, compensation, and finalization persistence.
+pub mod terminal;
 mod transition;
+pub mod trigger;
 
 use std::{collections::BTreeMap, str::FromStr};
 
@@ -23,6 +36,7 @@ use moa_artifacts::execution_plan::{
     ExecutionOperation, ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, PlanAmendment,
 };
 use moa_core::{
+    traits::Identity,
     types::contact::ContactId,
     types::execution_planning::{
         ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlannerCallKind,
@@ -36,8 +50,10 @@ use moa_core::{
 use moa_db::ScopedConn;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
+use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
+
+use self::outbox::ExecutionDispatchRecord;
 
 use crate::{
     Error, Result,
@@ -65,7 +81,6 @@ use crate::{
         ExecutionActionReviewResolution, ExecutionPlanningContextSnapshot,
         ExecutionTemplateAdmissionRequest, ExecutionTerminalDelivery,
         ExecutionToolDispatchRejection, PinnedInstructionSkill,
-        execution_terminal_delivery_from_state,
     },
 };
 
@@ -75,22 +90,42 @@ const DEFAULT_TASK_PAGE_LIMIT: u32 = 100;
 const MAX_TASK_PAGE_LIMIT: u32 = 1_000;
 const EXECUTION_AUDIT_NAMESPACE: Uuid = Uuid::from_u128(0x7b83_c5c2_5cf7_5fa0_8eb6_2d7c_6e0f_1d11);
 
+/// Phase of one execution-scoped external effect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionEffectPhase {
+    /// The active attempt is invoking an effect without an action-review handoff.
+    Direct,
+    /// The exact parked action review was cleared and claimed for execution.
+    Reviewed {
+        /// Stable action-review identity persisted by both the attempt and review owner.
+        review_uid: Uuid,
+    },
+}
+
 /// Persisted execution operation seeking permission to begin one external effect.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecutionEffectOwner {
-    /// Forward task coordinates fenced by the current task generation.
+    /// Forward task coordinates fenced by the current task and bounded-attempt generations.
     Task {
         /// Stable forward task identifier.
         task_id: ExecutionTaskId,
-        /// Exact current task generation.
+        /// Exact current logical task generation.
         generation: u64,
+        /// Exact current bounded-attempt generation.
+        attempt_generation: u64,
+        /// Exact direct or reviewed invocation phase.
+        phase: ExecutionEffectPhase,
     },
-    /// Compensation coordinates fenced by the current compensation generation.
+    /// Compensation coordinates fenced by the current logical and bounded-attempt generations.
     Compensation {
         /// Stable compensation identifier.
         compensation_id: CompensationId,
-        /// Exact current compensation generation.
+        /// Exact current logical compensation generation.
         generation: u64,
+        /// Exact current bounded-attempt generation.
+        attempt_generation: u64,
+        /// Exact direct or reviewed invocation phase.
+        phase: ExecutionEffectPhase,
     },
 }
 
@@ -116,7 +151,8 @@ struct CompensationReviewAuditEntry {
     review_uid: Uuid,
     generation: u64,
     accepted: bool,
-    resolution: ExecutionActionReviewResolution,
+    resolution: Option<ExecutionActionReviewResolution>,
+    expires_at: Option<DateTime<Utc>>,
     recorded_at: DateTime<Utc>,
 }
 
@@ -185,51 +221,6 @@ impl ExecutionScope {
     }
 }
 
-async fn install_execution_scope(
-    tx: &mut Transaction<'_, Postgres>,
-    scope: ExecutionScope,
-) -> Result<()> {
-    let (tenant_id, storage_partition_id, contact_id, control_plane) = match scope {
-        ExecutionScope::ControlPlane => (None, None, None, true),
-        ExecutionScope::Tenant { tenant_id } => (
-            Some(tenant_id.to_string()),
-            Some(
-                moa_core::types::identifiers::StoragePartitionId::for_tenant(tenant_id).to_string(),
-            ),
-            Some(String::new()),
-            false,
-        ),
-        ExecutionScope::Contact {
-            tenant_id,
-            contact_id,
-        } => (
-            Some(tenant_id.to_string()),
-            Some(
-                moa_core::types::identifiers::StoragePartitionId::for_tenant(tenant_id).to_string(),
-            ),
-            Some(contact_id.to_string()),
-            false,
-        ),
-    };
-    sqlx::query(
-        r#"
-        SELECT
-            pg_catalog.set_config('moa.tenant_id', $1, true),
-            pg_catalog.set_config('moa.storage_partition_id', $2, true),
-            pg_catalog.set_config('moa.contact_id', $3, true),
-            pg_catalog.set_config('moa.control_plane', $4, true)
-        "#,
-    )
-    .bind(tenant_id.as_deref().unwrap_or(""))
-    .bind(storage_partition_id.as_deref().unwrap_or(""))
-    .bind(contact_id.as_deref().unwrap_or(""))
-    .bind(if control_plane { "true" } else { "false" })
-    .execute(&mut **tx)
-    .await
-    .map_err(sqlx_error)?;
-    Ok(())
-}
-
 /// Input used to create one immutable execution run snapshot.
 #[derive(Clone, Debug)]
 pub struct NewExecutionRun {
@@ -247,6 +238,8 @@ pub struct NewExecutionRun {
     pub planning_context_hash: ExecutionHash,
     /// Authenticated tenant user that owns the run.
     pub owner_user_id: UserId,
+    /// Exact authenticated principal admitted to create this durable run.
+    pub admitted_identity: Identity,
     /// Immutable user-derived goal contract.
     pub goal: ExecutionGoalContract,
     /// Initial canonical plan, also installed as revision one.
@@ -301,6 +294,8 @@ pub struct ExecutionRunRecord {
     pub planning_context_hash: ExecutionHash,
     /// Originating tenant user.
     pub owner_user_id: UserId,
+    /// Exact authenticated principal admitted when the run was created.
+    pub admitted_identity: Identity,
     /// Immutable goal contract.
     pub goal: ExecutionGoalContract,
     /// Immutable initial canonical plan.
@@ -345,6 +340,44 @@ pub struct ExecutionRunRecord {
     pub terminal_reason: Option<ExecutionTerminalReason>,
     /// Current durable run status.
     pub status: ExecutionRunStatus,
+    /// Monotonic generation fencing controller activations and delayed wakes.
+    pub controller_generation: u64,
+    /// Current bounded-controller activation lifecycle.
+    pub activation_state: ExecutionActivationState,
+    /// Earliest exact time at which the controller should be reactivated.
+    pub next_wake_at: Option<DateTime<Utc>>,
+    /// Time at which the run entered its current storage-only wait.
+    pub waiting_since: Option<DateTime<Utc>>,
+    /// Latest durable scheduler progress timestamp.
+    pub last_progress_at: DateTime<Utc>,
+    /// Time at which an authorized pause was first requested.
+    pub pause_requested_at: Option<DateTime<Utc>>,
+    /// Time at which the run became fully paused.
+    pub paused_at: Option<DateTime<Utc>>,
+    /// Number of tasks currently admitted to the durable ready queue.
+    pub ready_task_count: u64,
+    /// Number of task attempts currently consuming active capacity.
+    pub active_task_count: u64,
+    /// Exact number of logical tasks parked on durable waits.
+    pub waiting_task_count: u64,
+    /// Exact number of tasks waiting for user input.
+    pub waiting_input_task_count: u64,
+    /// Exact number of tasks waiting for governed review.
+    pub waiting_review_task_count: u64,
+    /// Exact number of tasks waiting for a named signal.
+    pub waiting_signal_task_count: u64,
+    /// Exact number of tasks waiting for an absolute timer.
+    pub waiting_timer_task_count: u64,
+    /// Exact number of tasks waiting for an external job.
+    pub waiting_external_task_count: u64,
+    /// Exact number of tasks waiting for bounded replanning.
+    pub waiting_replan_task_count: u64,
+    /// Exact input waits whose authorized audience is the owning user.
+    pub waiting_input_user_task_count: u64,
+    /// Exact input waits whose authorized audience is a tenant administrator.
+    pub waiting_input_tenant_admin_task_count: u64,
+    /// Exact input waits whose authorized audience is an external system.
+    pub waiting_input_external_task_count: u64,
     /// Approved resource limits.
     pub approved_budget: ExecutionBudgetLimit,
     /// Resources held by nonterminal tasks.
@@ -361,8 +394,10 @@ pub struct ExecutionRunRecord {
     pub progress_failed_tasks: u64,
     /// Number of cancelled tasks.
     pub progress_cancelled_tasks: u64,
-    /// Exact current scheduler wait reasons.
+    /// Bounded deterministic sample of current scheduler wait reasons.
     pub waiting_reasons: Vec<WaitingReason>,
+    /// Whether exact waiting tasks exist outside the bounded reason sample.
+    pub waiting_reasons_truncated: bool,
     /// Monotonic epoch incremented by scheduling-relevant mutations.
     pub wake_epoch: u64,
     /// Last scheduler epoch acknowledged by compare-and-set.
@@ -391,128 +426,6 @@ pub struct ExecutionRunRecord {
     pub confirmed_at: Option<DateTime<Utc>>,
 }
 
-/// Input used to insert one immutable origin-bound planning-context snapshot.
-#[derive(Clone, Debug)]
-pub struct NewExecutionPlanningContext {
-    /// Exact immutable snapshot whose canonical bytes are hashed.
-    pub snapshot: ExecutionPlanningContextSnapshot,
-    /// Domain-separated hash of the canonical snapshot bytes.
-    pub planning_context_hash: ExecutionHash,
-}
-
-/// Persisted immutable planning-context projection.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ExecutionPlanningContextRecord {
-    /// Durable planning-context identifier.
-    pub planning_context_uid: Uuid,
-    /// Exact immutable snapshot.
-    pub snapshot: ExecutionPlanningContextSnapshot,
-    /// Domain-separated hash of the canonical snapshot bytes.
-    pub planning_context_hash: ExecutionHash,
-    /// Database-owned creation timestamp.
-    pub created_at: DateTime<Utc>,
-}
-
-/// Result of inserting or replaying one unique origin-bound planning context.
-#[derive(Clone, Debug, PartialEq)]
-pub enum PlanningContextWriteOutcome {
-    /// The immutable snapshot was inserted.
-    Created(ExecutionPlanningContextRecord),
-    /// The exact immutable snapshot already existed for the origin.
-    Replayed(ExecutionPlanningContextRecord),
-    /// The unique origin already exists with different immutable bytes or scope.
-    Conflict,
-}
-
-/// Persisted low-cardinality evidence for one route-audit insertion.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RouteAuditEvidence {
-    /// Deterministic UUIDv5 audit identifier.
-    pub audit_uid: Uuid,
-    /// Respond, Execute, or NeedsInput decision.
-    pub decision: ExecutionRouteKind,
-    /// Selected strategy, present exactly for Execute.
-    pub strategy: Option<ExecutionStrategy>,
-    /// Redacted trusted-bypass or classifier provenance.
-    pub provenance: ExecutionRouteProvenance,
-    /// First durable acceptance timestamp.
-    pub accepted_at: DateTime<Utc>,
-}
-
-/// Durable result of inserting one normalized route audit.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum RouteAuditWriteOutcome {
-    /// This transaction inserted the first route row.
-    Applied(RouteAuditEvidence),
-    /// The exact semantic route row already existed.
-    Replayed(RouteAuditEvidence),
-    /// The logical key already carries different route semantics.
-    Conflict {
-        /// Deterministic audit identifier for the conflicting logical key.
-        audit_uid: Uuid,
-    },
-}
-
-/// Persisted low-cardinality evidence for one planner-call audit insertion.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct PlannerCallAuditEvidence {
-    /// Deterministic UUIDv5 audit identifier.
-    pub audit_uid: Uuid,
-    /// Exact closed planner call kind.
-    pub call: ExecutionPlannerCallKind,
-    /// Exact closed planner outcome.
-    pub outcome: ExecutionPlannerOutcome,
-    /// First persisted measured duration.
-    pub duration_micros: u64,
-    /// Candidate hash when required by the outcome.
-    pub candidate_hash: Option<String>,
-}
-
-/// Durable result of inserting one normalized planner-call audit.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum PlannerCallAuditWriteOutcome {
-    /// This transaction inserted the first planner-call row.
-    Applied(PlannerCallAuditEvidence),
-    /// The exact semantic planner-call row already existed.
-    Replayed(PlannerCallAuditEvidence),
-    /// The logical key already carries different planner-call semantics.
-    Conflict {
-        /// Deterministic audit identifier for the conflicting logical key.
-        audit_uid: Uuid,
-    },
-}
-
-/// Persisted low-cardinality evidence for one compiler-audit insertion.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CompileAuditEvidence {
-    /// Deterministic UUIDv5 audit identifier.
-    pub audit_uid: Uuid,
-    /// Exact closed compiler source.
-    pub source: ExecutionCompileSource,
-    /// Exact closed compiler outcome.
-    pub outcome: ExecutionCompileOutcome,
-    /// First persisted measured duration.
-    pub duration_micros: u64,
-    /// Hash of the strict compile candidate.
-    pub candidate_hash: String,
-    /// Accepted final plan hash, when compilation succeeded.
-    pub final_plan_hash: Option<String>,
-}
-
-/// Durable result of inserting one normalized compiler audit.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum CompileAuditWriteOutcome {
-    /// This transaction inserted the first compiler row.
-    Applied(CompileAuditEvidence),
-    /// The exact semantic compiler row already existed.
-    Replayed(CompileAuditEvidence),
-    /// The logical key already carries different compiler semantics.
-    Conflict {
-        /// Deterministic audit identifier for the conflicting logical key.
-        audit_uid: Uuid,
-    },
-}
-
 /// Persisted logical-task projection.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ExecutionTaskRecord {
@@ -538,6 +451,26 @@ pub struct ExecutionTaskRecord {
     pub attempt: u32,
     /// One-based dispatch generation fence.
     pub generation: u64,
+    /// One-based generation fencing the currently persisted attempt lifecycle.
+    pub attempt_generation: u64,
+    /// Current bounded-attempt lifecycle state.
+    pub attempt_state: ExecutionAttemptState,
+    /// Time at which the current active attempt began.
+    pub attempt_started_at: Option<DateTime<Utc>>,
+    /// Latest durable progress timestamp for this logical task.
+    pub last_progress_at: DateTime<Utc>,
+    /// Absolute watchdog deadline for the current active attempt.
+    pub attempt_deadline_at: Option<DateTime<Utc>>,
+    /// Time at which the task entered its current storage-only wait.
+    pub waiting_since: Option<DateTime<Utc>>,
+    /// Time at which the task entered the ready queue.
+    pub ready_at: Option<DateTime<Utc>>,
+    /// Current asynchronous provider job, when the task is waiting externally.
+    pub external_job_uid: Option<Uuid>,
+    /// Dispatch lease currently owning this attempt, when one is active.
+    pub active_dispatch_uid: Option<Uuid>,
+    /// Monotonic dispatch fence for this logical task.
+    pub dispatch_sequence: u64,
     /// Resolved structured task input.
     pub input: Value,
     /// Append-only ordered payloads supplied by input resumes.
@@ -578,6 +511,237 @@ pub struct ExecutionTaskRecord {
     pub started_at: Option<DateTime<Utc>>,
     /// Terminal timestamp.
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Bounded controller activation state persisted independently from run status.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionActivationState {
+    /// No controller activation is queued or running.
+    Idle,
+    /// One generation-fenced activation is ready for durable dispatch.
+    Queued,
+    /// The current generation is executing one bounded activation.
+    Advancing,
+    /// The run is explicitly paused and owns no controller activation.
+    Paused,
+    /// The run is terminal and cannot be activated again.
+    Terminal,
+}
+
+impl ExecutionActivationState {
+    /// Returns the canonical database label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Queued => "queued",
+            Self::Advancing => "advancing",
+            Self::Paused => "paused",
+            Self::Terminal => "terminal",
+        }
+    }
+}
+
+impl FromStr for ExecutionActivationState {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "idle" => Ok(Self::Idle),
+            "queued" => Ok(Self::Queued),
+            "advancing" => Ok(Self::Advancing),
+            "paused" => Ok(Self::Paused),
+            "terminal" => Ok(Self::Terminal),
+            _ => Err(Error::InvalidRepositoryData {
+                message: format!("unknown execution activation state `{value}`"),
+            }),
+        }
+    }
+}
+
+/// Bounded task-attempt state persisted independently from logical task status.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionAttemptState {
+    /// No attempt is currently dispatched or running.
+    Idle,
+    /// The attempt is committed for durable dispatch.
+    Dispatching,
+    /// The attempt currently consumes active task capacity.
+    Running,
+    /// Provider teardown was claimed and capacity remains owned until verified release.
+    Cancelling,
+    /// The logical task is parked without an active attempt.
+    Waiting,
+    /// The logical task settled terminally.
+    Terminal,
+    /// A non-idempotent attempt has an ambiguous external outcome.
+    UnknownOutcome,
+}
+
+impl ExecutionAttemptState {
+    /// Returns the canonical database label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Dispatching => "dispatching",
+            Self::Running => "running",
+            Self::Cancelling => "cancelling",
+            Self::Waiting => "waiting",
+            Self::Terminal => "terminal",
+            Self::UnknownOutcome => "unknown_outcome",
+        }
+    }
+}
+
+impl FromStr for ExecutionAttemptState {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "idle" => Ok(Self::Idle),
+            "dispatching" => Ok(Self::Dispatching),
+            "running" => Ok(Self::Running),
+            "cancelling" => Ok(Self::Cancelling),
+            "waiting" => Ok(Self::Waiting),
+            "terminal" => Ok(Self::Terminal),
+            "unknown_outcome" => Ok(Self::UnknownOutcome),
+            _ => Err(Error::InvalidRepositoryData {
+                message: format!("unknown execution attempt state `{value}`"),
+            }),
+        }
+    }
+}
+
+/// Exact durable checkpoint written when one bounded controller activation returns.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionRunActivationCheckpoint {
+    /// Product-visible run state after the bounded activation.
+    pub status: ExecutionRunStatus,
+    /// Whether another activation is queued or the run is parked/terminal.
+    pub activation_state: ExecutionActivationState,
+    /// Earliest exact wake time, when time can make more work ready.
+    pub next_wake_at: Option<DateTime<Utc>>,
+    /// Start of the current storage-only wait, when parked.
+    pub waiting_since: Option<DateTime<Utc>>,
+    /// Exact number of ready logical tasks.
+    pub ready_task_count: u64,
+    /// Exact number of active task attempts.
+    pub active_task_count: u64,
+}
+
+/// Generation-fenced result of claiming or checkpointing a run activation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RunActivationWriteOutcome {
+    /// The exact generation mutation was committed.
+    Applied(ExecutionRunRecord),
+    /// The requested state was already durably present.
+    AlreadyApplied(ExecutionRunRecord),
+    /// No visible run exists under the supplied scope.
+    NotFound,
+    /// The supplied controller generation is stale or from the future.
+    GenerationMismatch,
+    /// The run is not in a lifecycle state that accepts this mutation.
+    InvalidState,
+}
+
+/// Exact generation-and-wake claim made by one bounded run-controller activation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RunControllerClaimOutcome {
+    /// The queued wake was claimed and the run is now advancing.
+    Claimed(ExecutionRunRecord),
+    /// The same wake is already being advanced by a replay of the same durable invocation.
+    Resumed(ExecutionRunRecord),
+    /// The requested wake was already durably acknowledged.
+    Replayed(ExecutionRunRecord),
+    /// The run is terminal, so the activation is a successful no-op.
+    Terminal(ExecutionRunRecord),
+    /// No visible run exists under the supplied scope.
+    NotFound,
+    /// The request did not name the current controller generation.
+    StaleGeneration {
+        /// Current persisted controller generation.
+        current_generation: u64,
+    },
+    /// The request did not name the current unprocessed wake.
+    StaleWake {
+        /// Current persisted wake epoch.
+        current_wake_epoch: u64,
+        /// Greatest wake epoch already acknowledged by the controller.
+        processed_wake_epoch: u64,
+    },
+    /// The run lifecycle cannot accept an activation claim.
+    InvalidState,
+}
+
+/// Atomic checkpoint request for one bounded run-controller activation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunControllerCompletionRequest {
+    /// Exact controller generation claimed by the invocation.
+    pub controller_generation: u64,
+    /// Exact wake epoch claimed by the invocation.
+    pub wake_epoch: u64,
+    /// Durable run checkpoint produced by bounded scheduler work.
+    pub checkpoint: ExecutionRunActivationCheckpoint,
+    /// Structured activation payload when bounded work requires one continuation.
+    pub continuation_payload: Option<Value>,
+    /// Earliest time at which the continuation may be dispatched.
+    pub continuation_not_before_at: DateTime<Utc>,
+}
+
+/// Atomic checkpoint, wake acknowledgement, and optional continuation result.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RunControllerCompletionOutcome {
+    /// The checkpoint and exact wake acknowledgement committed.
+    Applied {
+        /// Current run after the commit.
+        run: Box<ExecutionRunRecord>,
+        /// Exactly one continuation outbox record, when requested.
+        continuation: Option<Box<ExecutionDispatchRecord>>,
+    },
+    /// The exact wake had already completed and changed nothing.
+    Replayed(Box<ExecutionRunRecord>),
+    /// The storage-only checkpoint could not reserve its parked-run capacity.
+    CapacitySaturated {
+        /// Exact durable capacity dimension that rejected the checkpoint.
+        dimension: capacity::ExecutionCapacityDimension,
+    },
+    /// No visible run exists under the supplied scope.
+    NotFound,
+    /// The request did not name the current controller generation.
+    StaleGeneration {
+        /// Current persisted controller generation.
+        current_generation: u64,
+    },
+    /// The activation lost its exact wake fence.
+    StaleWake {
+        /// Current persisted wake epoch.
+        current_wake_epoch: u64,
+        /// Greatest wake epoch already acknowledged by the controller.
+        processed_wake_epoch: u64,
+    },
+    /// The run lifecycle cannot accept this completion.
+    InvalidState,
+}
+
+/// Result of materializing the exact current run-deadline trigger.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RunDeadlineArmOutcome {
+    /// The current generation's immutable deadline trigger is durable.
+    Armed(Box<trigger::ExecutionTriggerWrite>),
+    /// The run has no approved deadline.
+    NoDeadline,
+    /// No visible run exists under the supplied scope.
+    NotFound,
+    /// The supplied generation is no longer current.
+    StaleGeneration {
+        /// Current persisted controller generation.
+        current_generation: u64,
+    },
+    /// The run is terminal and owns no new deadline trigger.
+    Terminal,
 }
 
 /// Result of confirming an awaiting execution run.
@@ -813,146 +977,6 @@ pub enum TaskOutcomeRejection {
     UnsupportedSchemaVersion,
 }
 
-/// Exact amendment identity that caused a compensation-safe replan-stop fence.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ReplanStopReceipt {
-    /// Waiting-replan task whose current outcome triggered amendment evaluation.
-    pub task_id: ExecutionTaskId,
-    /// Exact generation of the waiting-replan task.
-    pub task_generation: u64,
-    /// Plan revision against which the amendment was evaluated.
-    pub base_plan_revision: u64,
-    /// Domain-separated hash of the exact amendment request.
-    pub amendment_hash: ExecutionHash,
-}
-
-/// Durable result of installing the pre-compensation admission fence.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TerminalFenceCommit {
-    /// Run projection with a persisted pending terminal intent.
-    pub run: ExecutionRunRecord,
-    /// Exact nonterminal forward task projections that must settle before undo begins.
-    pub tasks_to_settle: Vec<ExecutionTaskRecord>,
-}
-
-/// Result of fencing new forward admission before cancellation settlement.
-#[derive(Clone, Debug, PartialEq)]
-pub enum TerminalFenceOutcome {
-    /// The terminal intent was persisted and forward admission was fenced.
-    Applied(Box<TerminalFenceCommit>),
-    /// The exact terminal intent and fence already exist.
-    Replayed(Box<TerminalFenceCommit>),
-    /// No visible run exists.
-    NotFound,
-    /// Revision, wake epoch, run state, or prior terminal intent differed.
-    Conflict,
-}
-
-/// Durable handoff after all forward work settled and compensation began.
-#[derive(Clone, Debug, PartialEq)]
-pub struct BeginCompensationCommit {
-    /// Run projection in the nonterminal `compensating` state.
-    pub run: ExecutionRunRecord,
-    /// Registered undo work in strict descending commit sequence.
-    pub registrations: Vec<CompensationRegistrationProjection>,
-}
-
-/// Result of transitioning a fenced run into compensation execution.
-#[derive(Clone, Debug, PartialEq)]
-pub enum BeginCompensationOutcome {
-    /// The run entered compensation.
-    Applied(Box<BeginCompensationCommit>),
-    /// The run was already compensating under the exact pending terminal intent.
-    Replayed(Box<BeginCompensationCommit>),
-    /// No committed effect requires undo; finalize the held terminal intent directly.
-    NoCompensations(Box<ExecutionRunRecord>),
-    /// Forward tasks still require a definitive generation-fenced settlement.
-    ForwardTasksPending(Vec<ExecutionTaskRecord>),
-    /// No visible run exists.
-    NotFound,
-    /// Revision, wake epoch, fence, or run state differed.
-    Conflict,
-}
-
-/// Result of installing a fenced terminal intent without executing undo work.
-#[derive(Clone, Debug, PartialEq)]
-pub enum FencedTerminalFinalizationOutcome {
-    /// The held terminal intent was installed and its fence cleared.
-    Finalized(ExecutionRunRecord),
-    /// The exact terminal state was already installed.
-    Replayed(ExecutionRunRecord),
-    /// A forward ambiguity finalized as compensation failure with manual repair required.
-    ManualRepairRequired(ExecutionRunRecord),
-    /// Forward tasks still require generation-fenced settlement.
-    ForwardTasksPending(Vec<ExecutionTaskRecord>),
-    /// No visible run exists.
-    NotFound,
-    /// Revision, wake epoch, or pending terminal intent differed.
-    Conflict,
-}
-
-/// Complete repository projection used to drive compensation workflows.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ExecutionCompensationSnapshot {
-    /// Current durable run.
-    pub run: ExecutionRunRecord,
-    /// Registrations in descending commit sequence.
-    pub registrations: Vec<CompensationRegistrationProjection>,
-    /// Nonterminal forward tasks that must settle before compensation starts.
-    pub nonterminal_forward_tasks: Vec<ExecutionTaskRecord>,
-    /// Whether automatic compensation progress is blocked on manual repair.
-    pub manual_repair_required: bool,
-}
-
-/// Result of claiming the next strict reverse-order compensation.
-#[derive(Clone, Debug, PartialEq)]
-pub enum CompensationClaimOutcome {
-    /// The highest pending sequence entered the requested running generation.
-    Claimed(CompensationRegistrationProjection),
-    /// The same registration and generation were already claimed.
-    Replayed(CompensationRegistrationProjection),
-    /// Budget admission failed terminally and manual repair is required.
-    BudgetRejected(CompensationRegistrationProjection),
-    /// No visible registration exists.
-    NotFound,
-    /// Another higher sequence, generation, run status, or repair fence blocks this claim.
-    Conflict,
-}
-
-/// Result of recording one generation-fenced compensation attempt outcome.
-#[derive(Clone, Debug, PartialEq)]
-pub enum CompensationOutcomeWrite {
-    /// The attempt completed and the registration settled successfully.
-    Completed(CompensationRegistrationProjection),
-    /// A typed retryable failure advanced attempt and generation and returned to pending.
-    Requeued(CompensationRegistrationProjection),
-    /// A terminal failure persisted and fenced automatic progress for manual repair.
-    Failed(CompensationRegistrationProjection),
-    /// An ambiguous effect persisted and fenced automatic progress for manual repair.
-    UnknownOutcome(CompensationRegistrationProjection),
-    /// The exact outcome was already accepted for this generation.
-    Replayed(CompensationRegistrationProjection),
-    /// No visible registration exists.
-    NotFound,
-    /// The generation, run state, or registration status rejected this outcome.
-    Conflict,
-}
-
-/// Result of installing the pending terminal intent after compensation settles.
-#[derive(Clone, Debug, PartialEq)]
-pub enum CompensationFinalizationOutcome {
-    /// All undo work completed and the original terminal intent was installed.
-    Finalized(ExecutionRunRecord),
-    /// The same final state was already committed.
-    Replayed(ExecutionRunRecord),
-    /// Automatic finalization is blocked by failed or ambiguous undo work.
-    ManualRepairRequired(ExecutionRunRecord),
-    /// No visible run exists.
-    NotFound,
-    /// Wake epoch, active registrations, or terminal intent differed.
-    Conflict,
-}
-
 /// Compiler-validated amendment data persisted under a revision fence.
 #[derive(Clone, Debug)]
 pub struct ValidatedAmendment {
@@ -1076,73 +1100,6 @@ pub struct ExecutionSchedulingSnapshot {
     pub projection: ExecutionProjection,
 }
 
-/// Result of compare-and-set wake acknowledgement.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum WakeAckOutcome {
-    /// The exact current epoch was acknowledged.
-    Acknowledged {
-        /// Newly persisted processed epoch.
-        processed_wake_epoch: u64,
-    },
-    /// The same epoch was already acknowledged.
-    Replayed {
-        /// Persisted processed epoch.
-        processed_wake_epoch: u64,
-    },
-    /// A later scheduling mutation occurred and remains unacknowledged.
-    Changed {
-        /// Current persisted wake epoch.
-        current_wake_epoch: u64,
-    },
-    /// No visible run exists.
-    NotFound,
-}
-
-/// Result of terminal run finalization.
-#[derive(Clone, Debug, PartialEq)]
-pub enum FinalizationOutcome {
-    /// Terminal state and completion evidence were persisted.
-    Finalized(ExecutionRunRecord),
-    /// The same terminal projection was already persisted.
-    Replayed(ExecutionRunRecord),
-    /// No visible run exists.
-    NotFound,
-    /// Revision, status, or completion evaluation did not match.
-    Conflict,
-}
-
-/// Optimistically fenced request to atomically persist one terminal run projection.
-#[derive(Clone, Debug, PartialEq)]
-pub struct RunFinalizationRequest {
-    /// Run to finalize.
-    pub run_uid: Uuid,
-    /// Active plan revision used for completion evaluation.
-    pub expected_revision: u64,
-    /// Wake epoch of the structured projection used for completion evaluation.
-    pub expected_wake_epoch: u64,
-    /// Exact terminal projection selected by the scheduler.
-    pub terminal_projection: TerminalProjection,
-    /// Deterministic completion evaluation over the observed projection.
-    pub completion_evaluation: CompletionEvaluation,
-    /// Exact typed cause and requirement-count replay identity.
-    pub terminal_evidence: ExecutionTerminalEvidence,
-    /// Exact normalized terminal reason selected from typed evidence.
-    pub terminal_reason: ExecutionTerminalReason,
-}
-
-/// Result of idempotently persisting one action-review resolution delivery.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum ActionReviewResolutionWrite {
-    /// The review UID was accepted for the current running generation.
-    Applied,
-    /// The same review UID and generation were already recorded.
-    Replayed,
-    /// The review was audited but its task generation or status was stale.
-    AuditedStale,
-    /// No visible task exists.
-    NotFound,
-}
-
 /// Scoped repository for durable execution runs and logical tasks.
 #[derive(Clone, Debug)]
 pub struct ExecutionRepository {
@@ -1205,20 +1162,52 @@ fn to_u32(value: i32, field: &str) -> Result<u32> {
 }
 
 fn storage_error(error: moa_core::error::MoaError) -> Error {
-    Error::Storage {
-        message: error.to_string(),
+    match error {
+        moa_core::error::MoaError::StorageUnavailable(message) => {
+            Error::StorageUnavailable { message }
+        }
+        terminal => Error::Storage {
+            message: terminal.to_string(),
+        },
     }
 }
 
 fn sqlx_error(error: sqlx::Error) -> Error {
-    Error::Storage {
-        message: error.to_string(),
-    }
+    Error::Database { source: error }
 }
 
 fn row_error(error: sqlx::Error) -> Error {
     Error::InvalidRepositoryData {
         message: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod storage_error_tests {
+    use super::*;
+
+    #[test]
+    fn repository_conversions_keep_retry_and_decode_boundaries_distinct() {
+        // Pins: SQL execution retains concrete SQLx provenance, shared transient
+        // failures remain retryable, and row decoding is deterministic corruption.
+        let direct = sqlx_error(sqlx::Error::PoolTimedOut);
+        assert!(direct.is_retryable_storage());
+        assert!(matches!(
+            direct,
+            Error::Database {
+                source: sqlx::Error::PoolTimedOut
+            }
+        ));
+
+        let scoped = storage_error(moa_core::error::MoaError::StorageUnavailable(
+            "database restarting".to_string(),
+        ));
+        assert!(scoped.is_retryable_storage());
+        assert!(matches!(scoped, Error::StorageUnavailable { .. }));
+
+        let corrupt_row = row_error(sqlx::Error::ColumnNotFound("status".to_string()));
+        assert!(!corrupt_row.is_retryable_storage());
+        assert!(matches!(corrupt_row, Error::InvalidRepositoryData { .. }));
     }
 }
 

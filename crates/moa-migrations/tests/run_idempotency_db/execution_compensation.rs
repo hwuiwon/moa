@@ -145,6 +145,10 @@ async fn seed_execution_run(target: &PgPool) -> TestResult<SeededExecutionRun> {
             "cancel_policy": "retain_effects",
             "input_schema": {},
             "output_schema": {},
+            "input_wait_policy": {
+                "expiry": {"kind": "after", "delay_seconds": 1},
+                "on_expiry": {"kind": "fail_run"}
+            },
             "nodes": [{
                 "id": "output",
                 "requirement_ids": [],
@@ -192,10 +196,10 @@ async fn seed_execution_run(target: &PgPool) -> TestResult<SeededExecutionRun> {
             planning_context_uid, planning_context_hash, owner_user_id, goal_contract, \
             initial_plan, active_plan, initial_plan_hash, active_plan_hash, \
             capability_catalog, authorization_envelope, source_provenance, source_kind, \
-            input, status \
+            input, admitted_identity, status \
          ) VALUES ( \
             $1, $2, $3, 0, $4, $5, 'migration-test', $6, $7, $7, $8, $8, \
-            $9, $10, $11, 'generated_plan', '{}'::JSONB, 'awaiting_confirmation' \
+            $9, $10, $11, 'generated_plan', '{}'::JSONB, $12, 'awaiting_confirmation' \
          )",
     )
     .bind(run_uid)
@@ -228,6 +232,13 @@ async fn seed_execution_run(target: &PgPool) -> TestResult<SeededExecutionRun> {
             "final_plan_hash": plan_hash,
             "repair_attempts": 0
         }
+    }))
+    .bind(json!({
+        "identity_type": "operator",
+        "id": run_uid,
+        "tenant_id": tenant_id,
+        "api_key_id": null,
+        "acting_on_behalf_of": null
     }))
     .execute(target)
     .await?;

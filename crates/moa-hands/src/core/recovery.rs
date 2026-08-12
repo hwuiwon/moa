@@ -14,7 +14,7 @@ use tracing::Instrument;
 use super::dispatch::{
     AuthorizedToolCall, DeferredWorkspaceToolOutput, McpDispatch, WorkspaceCommitMode,
 };
-use super::lifecycle::{hand_id, scope_key, workspace_lease_scope};
+use super::lifecycle::{hand_id, manifest_scope_key, workspace_lease_scope};
 use super::registration::{McpClientRoute, McpRouteGeneration};
 use super::{HandRoute, ToolCallScope, ToolExecution, ToolRouter};
 
@@ -457,7 +457,7 @@ impl ToolRouter {
             ));
         }
         let mut ordered = routes.to_vec();
-        let scope = scope_key(session, worker_id);
+        let scope = manifest_scope_key(session, worker_id);
         let preferred = self
             .hands
             .preferred_hand_routes
@@ -484,7 +484,7 @@ impl ToolRouter {
             .preferred_hand_routes
             .write()
             .await
-            .insert(scope_key(session, worker_id), provider.to_string());
+            .insert(manifest_scope_key(session, worker_id), provider.to_string());
     }
 
     async fn try_fallback_hand_route(
@@ -519,8 +519,8 @@ impl ToolRouter {
             .workspace_scope
             .map(workspace_lease_scope)
             .map_or_else(
-                || scope_key(request.session, None),
-                |lease| scope_key(request.session, Some(lease.as_str())),
+                || manifest_scope_key(request.session, None),
+                |lease| manifest_scope_key(request.session, Some(lease.as_str())),
             );
         let mut preferred = self.hands.preferred_hand_routes.write().await;
         if preferred

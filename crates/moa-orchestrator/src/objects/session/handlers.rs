@@ -2,7 +2,7 @@
 
 use super::execution_runs::{
     accept_execution_input_required, accept_execution_progress, accept_execution_run_started,
-    accept_execution_terminal, admit_execution_template, dispatch_execution_run,
+    accept_execution_terminal, admit_execution_template,
 };
 use super::state::resume::signal_kind_is_resume_eligible;
 use super::*;

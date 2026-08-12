@@ -115,6 +115,32 @@ pub(crate) struct PendingActionReviewRelease {
     pub(crate) release: ActionReviewRelease,
 }
 
+/// Exact tenant action-review row requested by a durable timeout delivery.
+pub(crate) struct ActionReviewTimeoutLookup {
+    /// Tenant that owns the review and supplies the control-plane isolation fence.
+    pub(crate) tenant_id: TenantId,
+    /// Stable review identifier carried by the delayed trigger.
+    pub(crate) review_id: Uuid,
+}
+
+/// Persisted action-review state used to fence one durable timeout delivery.
+pub(crate) struct ActionReviewTimeoutSnapshot {
+    /// Exact owner incarnation stored when the review was created.
+    pub(crate) owner: ActionReviewOwner,
+    /// Current typed review status.
+    pub(crate) status: ActionReviewStatus,
+    /// Whether the persisted expiry is due at the database clock.
+    pub(crate) is_due: bool,
+    /// Whether the owner durably acknowledged review registration.
+    pub(crate) owner_registered: bool,
+    /// Timestamp proving durable execution already claimed a clear decision.
+    pub(crate) execution_requested_at: Option<DateTime<Utc>>,
+    /// Persisted terminal decision timestamp.
+    pub(crate) decided_at: Option<DateTime<Utc>>,
+    /// Timestamp proving conversational owner release delivery completed.
+    pub(crate) owner_release_delivered_at: Option<DateTime<Utc>>,
+}
+
 /// Insert a pending tenant action review, or load the existing idempotent row.
 ///
 /// `review_timeout_secs` sets the row's `expires_at` relative to insertion so
@@ -224,7 +250,7 @@ pub(crate) async fn list_pending_reviews(
         r#"
         SELECT id, tenant_id, storage_partition_id, session_id, worker_id, tool_call_id, tool_name,
                action_class, risk_level, input_summary, envelope, preview, status,
-               requested_by, decided_by, deny_reason, created_at, decided_at
+               requested_by, decided_by, deny_reason, created_at, expires_at, decided_at
         FROM tenant_action_reviews
         WHERE storage_partition_id = $1
           AND status = 'pending'
@@ -448,7 +474,12 @@ pub(crate) async fn mark_owner_registered(
     pool: sqlx::PgPool,
     storage_partition_id: StoragePartitionId,
     review_id: Uuid,
+    expected_owner: Option<&ActionReviewOwner>,
 ) -> Result<(), HandlerError> {
+    let expected_owner = expected_owner
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|error| TerminalError::new(format!("serialize action review owner: {error}")))?;
     let result = sqlx::query(
         r#"
         UPDATE tenant_action_reviews
@@ -456,10 +487,12 @@ pub(crate) async fn mark_owner_registered(
         WHERE storage_partition_id = $1
           AND id = $2
           AND status = 'pending'
+          AND ($3::JSONB IS NULL OR envelope -> 'owner' = $3)
         "#,
     )
     .bind(storage_partition_id.to_string())
     .bind(review_id)
+    .bind(expected_owner)
     .execute(&pool)
     .await
     .map_err(db_error)?;
@@ -555,6 +588,51 @@ pub(crate) async fn timeout_expired_reviews(
         .collect::<Result<Vec<_>, sqlx::Error>>()?;
     tx.commit().await?;
     Ok(timed_out)
+}
+
+/// Loads one exact action-review timeout snapshot under control-plane scope.
+///
+/// Both tenant and review identity are matched before the stored owner is
+/// returned, so the caller can compare the complete owner-generation fence
+/// without crossing the action-review storage boundary.
+pub(crate) async fn load_action_review_timeout_snapshot(
+    pool: &sqlx::PgPool,
+    request: ActionReviewTimeoutLookup,
+) -> Result<Option<ActionReviewTimeoutSnapshot>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    install_control_plane_scope(&mut tx).await?;
+    let row = sqlx::query(
+        r#"
+        SELECT envelope, status, expires_at <= NOW() AS is_due,
+               owner_registered_at IS NOT NULL AS owner_registered,
+               execution_requested_at, decided_at, owner_release_delivered_at
+        FROM tenant_action_reviews
+        WHERE id = $1 AND tenant_id = $2
+        "#,
+    )
+    .bind(request.review_id)
+    .bind(request.tenant_id.0)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    row.map(|row| {
+        let envelope: ActionEnvelope = serde_json::from_value(row.try_get("envelope")?)
+            .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+        let status = row
+            .try_get::<String, _>("status")?
+            .parse::<ActionReviewStatus>()
+            .map_err(|_| sqlx::Error::Decode("unknown action review status".into()))?;
+        Ok(ActionReviewTimeoutSnapshot {
+            owner: envelope.owner,
+            status,
+            is_due: row.try_get("is_due")?,
+            owner_registered: row.try_get("owner_registered")?,
+            execution_requested_at: row.try_get("execution_requested_at")?,
+            decided_at: row.try_get("decided_at")?,
+            owner_release_delivered_at: row.try_get("owner_release_delivered_at")?,
+        })
+    })
+    .transpose()
 }
 
 /// Loads one bounded batch of timed-out conversational owner releases.
@@ -945,7 +1023,7 @@ async fn load_review_state(
         r#"
         SELECT id, tenant_id, storage_partition_id, session_id, worker_id, tool_call_id, tool_name,
                action_class, risk_level, input_summary, envelope, preview, status,
-               requested_by, decided_by, deny_reason, created_at, decided_at,
+               requested_by, decided_by, deny_reason, created_at, expires_at, decided_at,
                owner_registered_at, tool_request
         FROM tenant_action_reviews
         WHERE storage_partition_id = $1 AND id = $2
@@ -1015,6 +1093,7 @@ fn summary_from_row(row: &sqlx::postgres::PgRow) -> Result<ActionReviewSummary, 
         decided_by: row.try_get("decided_by").map_err(db_error)?,
         deny_reason: row.try_get("deny_reason").map_err(db_error)?,
         created_at: row.try_get("created_at").map_err(db_error)?,
+        expires_at: row.try_get("expires_at").map_err(db_error)?,
         decided_at: row.try_get("decided_at").map_err(db_error)?,
     })
 }

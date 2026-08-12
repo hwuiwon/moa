@@ -277,13 +277,13 @@ impl DaytonaHandProvider {
         operation: &moa_core::types::sandbox_workspace::WorkspaceStorageOperation,
         hand: &HandHandle,
         parent_revision: Option<&WorkspaceRevisionRef>,
+        release_compute: bool,
     ) -> Result<WorkspaceStorageOperationResult> {
-        use crate::core::sandbox_workspace::{
-            capacity::{CapacityQuantity, CapacityReservationRequest},
-            checkpoint::{archive::build_checkpoint_archive, store::CheckpointStoreContext},
+        use crate::core::sandbox_workspace::checkpoint::{
+            archive::build_checkpoint_archive, store::CheckpointStoreContext,
         };
         use moa_core::types::sandbox_workspace::{
-            WorkspaceCapacityDimension, WorkspaceConfirmedDisposition, WorkspaceOperationOutcome,
+            WorkspaceConfirmedDisposition, WorkspaceOperationOutcome,
         };
 
         verify_request_resources(operation, Some(hand), None)?;
@@ -342,39 +342,10 @@ impl DaytonaHandProvider {
         .await?;
         let archive = build_checkpoint_archive(staging.path(), limits).await?;
         let logical_bytes = archive.manifest.logical_bytes;
-        let mut quantities = vec![CapacityQuantity {
-            dimension: WorkspaceCapacityDimension::Checkpoints,
-            quantity: 1,
-        }];
-        if logical_bytes > 0 {
-            quantities.push(CapacityQuantity {
-                dimension: WorkspaceCapacityDimension::LogicalBytes,
-                quantity: logical_bytes,
-            });
-        }
-        let capacity_request = CapacityReservationRequest {
-            tenant_id: operation.binding.tenant_id,
-            workspace_id: operation.binding.workspace_id,
-            operation_id: operation.operation_id,
-            provider_account_id: operation.binding.provider_account_id,
-            provider_account_generation: i64::try_from(
-                operation.binding.provider_account_generation,
-            )
-            .map_err(|_| {
-                MoaError::ValidationError("Daytona account generation overflows bigint".to_string())
-            })?,
-            expected_writer_epoch: i64::try_from(operation.binding.writer_epoch).map_err(|_| {
-                MoaError::ValidationError("Daytona writer epoch overflows bigint".to_string())
-            })?,
-            expected_instance_generation: i64::try_from(operation.binding.instance_generation)
-                .map_err(|_| {
-                    MoaError::ValidationError(
-                        "Daytona instance generation overflows bigint".to_string(),
-                    )
-                })?,
-            quantities,
-        };
-        let reservations = dependencies.capacity.reserve(&capacity_request).await?;
+        dependencies
+            .capacity
+            .reserve_checkpoint_publication(operation, logical_bytes)
+            .await?;
         let published = dependencies
             .checkpoint_store
             .publish(
@@ -388,26 +359,15 @@ impl DaytonaHandProvider {
                 archive,
             )
             .await?;
-        let committed = dependencies
-            .capacity
-            .commit_operation_reservations(&capacity_request)
-            .await?;
-        if committed
-            != u64::try_from(reservations.len()).map_err(|_| {
-                MoaError::StorageError("Daytona reservation count overflows u64".to_string())
-            })?
-        {
-            return Err(MoaError::StorageError(
-                "Daytona checkpoint publication lost its exact capacity reservation fence"
-                    .to_string(),
-            ));
-        }
         let checkpoint_publication = WorkspaceCheckpointPublication {
             revision,
             storage: published.storage.clone(),
             manifest_digest: published.manifest_sha256,
             logical_bytes: published.logical_bytes,
         };
+        if release_compute {
+            <Self as HandProvider>::destroy(self, hand).await?;
+        }
         Ok(WorkspaceStorageOperationResult {
             outcome: WorkspaceOperationOutcome::Confirmed,
             confirmed_disposition: Some(WorkspaceConfirmedDisposition::ResourcePresent),
@@ -415,7 +375,11 @@ impl DaytonaHandProvider {
             checkpoint_publication: Some(checkpoint_publication),
             post_commit_state: (operation.kind
                 == moa_core::types::sandbox_workspace::WorkspaceOperationKind::Commit)
-                .then_some(WorkspacePostCommitState::AttachmentRetained),
+                .then_some(if release_compute {
+                    WorkspacePostCommitState::ComputeDestroyed
+                } else {
+                    WorkspacePostCommitState::AttachmentRetained
+                }),
         })
     }
 }
@@ -790,6 +754,7 @@ impl SandboxStorageProvider for DaytonaHandProvider {
             &request.operation,
             &request.hand,
             request.parent_revision.as_ref(),
+            request.release_compute,
         )
         .await
     }

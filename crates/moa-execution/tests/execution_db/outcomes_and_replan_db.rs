@@ -49,6 +49,7 @@ async fn input_resume_starts_a_schedulable_generation_without_a_prior_outcome_db
     let TransitionOutcome::Applied(resumed) = repository
         .resume_task_with_input(
             scope,
+            &ExecutionConfig::default(),
             run.run_uid,
             task.task_id,
             1,
@@ -66,27 +67,15 @@ async fn input_resume_starts_a_schedulable_generation_without_a_prior_outcome_db
     );
     assert_eq!(resumed.outcome_audit.len(), 1);
 
-    let snapshot = repository
-        .load_scheduling_snapshot(scope, run.run_uid)
+    let persisted_run = repository
+        .load_run(scope, run.run_uid)
         .await?
-        .expect("resumed run should remain schedulable");
-    let scheduled = moa_execution::schedule(moa_execution::ScheduleRequest {
-        run_uid: snapshot.run.run_uid,
-        goal: snapshot.run.goal.clone(),
-        plan: snapshot.run.active_plan.clone(),
-        catalog: snapshot.catalog.clone(),
-        run_input: snapshot.run.input.clone(),
-        projection: snapshot.projection,
-        config: moa_config::ExecutionConfig::default(),
-        budget_ledger: snapshot.budget_ledger,
-        now: moa_test_support::fixtures::pg_now(),
-    })?;
-    assert_eq!(
-        scheduled.decision,
-        moa_execution::state::ScheduleDecision::Waiting(vec![
-            moa_execution::state::WaitingReason::RunningTasks,
-        ])
-    );
+        .expect("resumed run should remain visible");
+    let persisted_task = listed_task(&repository, scope, run.run_uid, task.task_id).await?;
+    assert_eq!(persisted_run.status, ExecutionRunStatus::Running);
+    assert_eq!(persisted_task.status, ExecutionTaskStatus::Running);
+    assert_eq!(persisted_task.generation, 2);
+    assert!(persisted_task.current_outcome.is_none());
     Ok(())
 }
 
@@ -149,7 +138,14 @@ async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db
             .expect("waiting run should remain queryable");
         let transition = if kind == "input" {
             repository
-                .resume_task_with_input(scope, run.run_uid, task.task_id, 1, json!({"ok": true}))
+                .resume_task_with_input(
+                    scope,
+                    &ExecutionConfig::default(),
+                    run.run_uid,
+                    task.task_id,
+                    1,
+                    json!({"ok": true}),
+                )
                 .await?
         } else {
             repository
@@ -173,7 +169,14 @@ async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db
         assert_eq!(terminal_run.wake_epoch, before_terminal.wake_epoch + 1);
         let replay = if kind == "input" {
             repository
-                .resume_task_with_input(scope, run.run_uid, task.task_id, 1, json!({"ok": true}))
+                .resume_task_with_input(
+                    scope,
+                    &ExecutionConfig::default(),
+                    run.run_uid,
+                    task.task_id,
+                    1,
+                    json!({"ok": true}),
+                )
                 .await?
         } else {
             repository
@@ -186,7 +189,14 @@ async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db
         );
         let stale = if kind == "input" {
             repository
-                .resume_task_with_input(scope, run.run_uid, task.task_id, 0, json!({"ok": true}))
+                .resume_task_with_input(
+                    scope,
+                    &ExecutionConfig::default(),
+                    run.run_uid,
+                    task.task_id,
+                    0,
+                    json!({"ok": true}),
+                )
                 .await?
         } else {
             repository
@@ -238,7 +248,14 @@ async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db
             .expect("waiting run should remain queryable");
         let transition = if kind == "input" {
             repository
-                .resume_task_with_input(scope, run.run_uid, task.task_id, 1, json!({"ok": true}))
+                .resume_task_with_input(
+                    scope,
+                    &ExecutionConfig::default(),
+                    run.run_uid,
+                    task.task_id,
+                    1,
+                    json!({"ok": true}),
+                )
                 .await?
         } else {
             repository
@@ -262,7 +279,14 @@ async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db
         assert_eq!(terminal_run.wake_epoch, before_terminal.wake_epoch + 1);
         let replay = if kind == "input" {
             repository
-                .resume_task_with_input(scope, run.run_uid, task.task_id, 1, json!({"ok": true}))
+                .resume_task_with_input(
+                    scope,
+                    &ExecutionConfig::default(),
+                    run.run_uid,
+                    task.task_id,
+                    1,
+                    json!({"ok": true}),
+                )
                 .await?
         } else {
             repository
@@ -305,6 +329,7 @@ async fn exact_external_wait_outcome_replay_recovers_committed_handoff_db() -> T
         repository
             .complete_external_wait(
                 scope,
+                &ExecutionConfig::default(),
                 run.run_uid,
                 task.task_id,
                 task.generation,
@@ -317,6 +342,7 @@ async fn exact_external_wait_outcome_replay_recovers_committed_handoff_db() -> T
     let replay = repository
         .complete_external_wait(
             scope,
+            &ExecutionConfig::default(),
             run.run_uid,
             task.task_id,
             task.generation,
@@ -457,6 +483,7 @@ async fn stale_and_terminal_outcomes_are_audited_without_projection_mutation_db(
     let TransitionOutcome::Applied(resumed) = repository
         .resume_task_with_input(
             scope,
+            &ExecutionConfig::default(),
             run.run_uid,
             task.task_id,
             1,
@@ -476,6 +503,7 @@ async fn stale_and_terminal_outcomes_are_audited_without_projection_mutation_db(
         repository
             .resume_task_with_input(
                 scope,
+                &ExecutionConfig::default(),
                 run.run_uid,
                 task.task_id,
                 1,
@@ -489,6 +517,7 @@ async fn stale_and_terminal_outcomes_are_audited_without_projection_mutation_db(
         repository
             .resume_task_with_input(
                 scope,
+                &ExecutionConfig::default(),
                 run.run_uid,
                 task.task_id,
                 1,
@@ -589,32 +618,52 @@ async fn task_outcomes_update_review_state_and_failure_accounting_exactly_db() -
             new_run(tenant_id, None, key, ExecutionRunStatus::Queued, budget(1)),
         )
         .await?;
-        assert!(matches!(
-            repository
-                .transition_run_wait(
-                    scope,
-                    run.run_uid,
-                    ExecutionRunStatus::Queued,
-                    ExecutionRunStatus::Running,
-                )
-                .await?,
-            TransitionOutcome::RunApplied(_)
-        ));
+        let _running =
+            claim_running_controller(&repository, scope, &ExecutionConfig::default(), &run).await?;
         let task = logical_task(run.run_uid, "outcome", key, estimate(1));
         repository
             .materialize_tasks(scope, run.run_uid, 1, vec![task.clone()])
             .await?;
         reserve_and_start(&repository, scope, run.run_uid, task.task_id).await?;
+        let current = repository
+            .load_run(scope, run.run_uid)
+            .await?
+            .expect("outcome fixture run remains visible");
+        let claimed = match repository
+            .claim_controller_wake(
+                scope,
+                current.run_uid,
+                current.controller_generation,
+                current.wake_epoch,
+            )
+            .await?
+        {
+            RunControllerClaimOutcome::Claimed(claimed) => claimed,
+            outcome => panic!("task wake must be claimable: {outcome:?}"),
+        };
         assert!(matches!(
             repository
-                .transition_run_wait(
+                .complete_controller_wake(
                     scope,
-                    run.run_uid,
-                    ExecutionRunStatus::Running,
-                    waiting_status,
+                    &ExecutionConfig::default(),
+                    claimed.run_uid,
+                    RunControllerCompletionRequest {
+                        controller_generation: claimed.controller_generation,
+                        wake_epoch: claimed.wake_epoch,
+                        checkpoint: ExecutionRunActivationCheckpoint {
+                            status: waiting_status,
+                            activation_state: ExecutionActivationState::Idle,
+                            next_wake_at: claimed.next_wake_at,
+                            waiting_since: Some(Utc::now()),
+                            ready_task_count: claimed.ready_task_count,
+                            active_task_count: claimed.active_task_count,
+                        },
+                        continuation_payload: None,
+                        continuation_not_before_at: Utc::now(),
+                    },
                 )
                 .await?,
-            TransitionOutcome::RunApplied(_)
+            RunControllerCompletionOutcome::Applied { .. }
         ));
 
         let TaskOutcomeWrite::Applied {
@@ -631,107 +680,5 @@ async fn task_outcomes_update_review_state_and_failure_accounting_exactly_db() -
         assert_eq!(persisted_task.status, expected_task_status, "{key}");
         assert_eq!(persisted_run.progress_failed_tasks, failed_tasks, "{key}");
     }
-    Ok(())
-}
-
-#[tokio::test]
-async fn action_review_resolution_is_review_uid_idempotent_and_generation_fenced_db() -> TestResult
-{
-    // Pins: outbox replay applies one review UID once, while stale generations
-    // remain auditable without resolving or mutating the current task projection;
-    // a reused identity cannot smuggle in different typed resolution semantics.
-    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
-    let repository = ExecutionRepository::new(test_db.store().pool().clone());
-    let tenant_id = TenantId::new();
-    let scope = ExecutionScope::Tenant { tenant_id };
-    let run = create_run(
-        &repository,
-        scope,
-        new_run(
-            tenant_id,
-            None,
-            "review-resolution",
-            ExecutionRunStatus::Queued,
-            budget(10),
-        ),
-    )
-    .await?;
-    let task = logical_task(run.run_uid, "review", "", estimate(1));
-    repository
-        .materialize_tasks(scope, run.run_uid, 1, vec![task.clone()])
-        .await?;
-    reserve_and_start(&repository, scope, run.run_uid, task.task_id).await?;
-    let stale_review = Uuid::new_v4();
-    let current_review = Uuid::new_v4();
-    let resolution = ExecutionActionReviewResolution::Denied {
-        reason: "operator denied".to_string(),
-    };
-
-    assert_eq!(
-        repository
-            .record_action_review_resolution(
-                scope,
-                run.run_uid,
-                task.task_id,
-                2,
-                stale_review,
-                &resolution,
-            )
-            .await?,
-        ActionReviewResolutionWrite::AuditedStale
-    );
-    assert_eq!(
-        repository
-            .record_action_review_resolution(
-                scope,
-                run.run_uid,
-                task.task_id,
-                1,
-                current_review,
-                &resolution,
-            )
-            .await?,
-        ActionReviewResolutionWrite::Applied
-    );
-    assert_eq!(
-        repository
-            .record_action_review_resolution(
-                scope,
-                run.run_uid,
-                task.task_id,
-                1,
-                current_review,
-                &resolution,
-            )
-            .await?,
-        ActionReviewResolutionWrite::Replayed
-    );
-    let conflicting_resolution = ExecutionActionReviewResolution::Completed {
-        tool_output: json!({"unexpected": true}),
-    };
-    let conflict = repository
-        .record_action_review_resolution(
-            scope,
-            run.run_uid,
-            task.task_id,
-            1,
-            current_review,
-            &conflicting_resolution,
-        )
-        .await
-        .expect_err("same task review identity with a different resolution must fail closed");
-    assert!(
-        matches!(conflict, moa_execution::Error::InvalidRepositoryData { .. }),
-        "task review identity conflict returned the wrong error: {conflict:?}"
-    );
-    let persisted = repository
-        .load_task(scope, run.run_uid, task.task_id)
-        .await?
-        .expect("task should remain visible");
-    assert_eq!(persisted.status, ExecutionTaskStatus::Running);
-    assert_eq!(persisted.generation, 1);
-    assert_eq!(persisted.outcome_audit.len(), 2);
-    assert_eq!(persisted.outcome_audit[0]["accepted"], false);
-    assert_eq!(persisted.outcome_audit[1]["accepted"], true);
     Ok(())
 }

@@ -566,6 +566,22 @@ fn from_iter_applies_every_execution_resource_override() {
         ("MOA_EXECUTION_PLANNER_REPAIR_ATTEMPTS", "2"),
         ("MOA_EXECUTION_REPEATED_FAILURE_LIMIT", "4"),
         ("MOA_EXECUTION_MAX_IN_FLIGHT_TASKS", "96"),
+        ("MOA_EXECUTION_MAXIMUM_HORIZON_SECONDS", "1209600"),
+        ("MOA_EXECUTION_MAXIMUM_ACTIVATION_STEPS", "192"),
+        ("MOA_EXECUTION_DISPATCH_BATCH_SIZE", "48"),
+        ("MOA_EXECUTION_ACTIVE_ATTEMPT_TIMEOUT_SECONDS", "900"),
+        ("MOA_EXECUTION_MAX_TENANT_ACTIVE_RUNS", "120"),
+        ("MOA_EXECUTION_MAX_FLEET_ACTIVE_RUNS", "1200"),
+        ("MOA_EXECUTION_MAX_TENANT_ACTIVE_TASKS", "384"),
+        ("MOA_EXECUTION_MAX_FLEET_ACTIVE_TASKS", "6144"),
+        ("MOA_EXECUTION_MAX_TENANT_PARKED_RUNS", "12000"),
+        ("MOA_EXECUTION_MAX_FLEET_PARKED_RUNS", "120000"),
+        ("MOA_EXECUTION_MAX_TENANT_SCHEDULED_TRIGGERS", "60000"),
+        ("MOA_EXECUTION_MAX_FLEET_SCHEDULED_TRIGGERS", "600000"),
+        ("MOA_EXECUTION_MAX_TENANT_EXTERNAL_JOBS", "1200"),
+        ("MOA_EXECUTION_MAX_FLEET_EXTERNAL_JOBS", "12000"),
+        ("MOA_EXECUTION_TRIGGER_RECONCILIATION_CADENCE_SECONDS", "90"),
+        ("MOA_EXECUTION_TERMINAL_DETAIL_RETENTION_DAYS", "45"),
         ("MOA_EXECUTION_MAX_TASKS", "20000"),
         ("MOA_EXECUTION_MAX_TOKENS", "20000000"),
         ("MOA_EXECUTION_MAX_TOOL_CALLS", "200000"),
@@ -591,6 +607,22 @@ fn from_iter_applies_every_execution_resource_override() {
     assert_eq!(config.execution.planner_repair_attempts, 2);
     assert_eq!(config.execution.repeated_failure_limit, 4);
     assert_eq!(config.execution.max_in_flight_tasks, 96);
+    assert_eq!(config.execution.maximum_horizon_seconds, 1_209_600);
+    assert_eq!(config.execution.maximum_activation_steps, 192);
+    assert_eq!(config.execution.dispatch_batch_size, 48);
+    assert_eq!(config.execution.active_attempt_timeout_seconds, 900);
+    assert_eq!(config.execution.max_tenant_active_runs, 120);
+    assert_eq!(config.execution.max_fleet_active_runs, 1_200);
+    assert_eq!(config.execution.max_tenant_active_tasks, 384);
+    assert_eq!(config.execution.max_fleet_active_tasks, 6_144);
+    assert_eq!(config.execution.max_tenant_parked_runs, 12_000);
+    assert_eq!(config.execution.max_fleet_parked_runs, 120_000);
+    assert_eq!(config.execution.max_tenant_scheduled_triggers, 60_000);
+    assert_eq!(config.execution.max_fleet_scheduled_triggers, 600_000);
+    assert_eq!(config.execution.max_tenant_external_jobs, 1_200);
+    assert_eq!(config.execution.max_fleet_external_jobs, 12_000);
+    assert_eq!(config.execution.trigger_reconciliation_cadence_seconds, 90);
+    assert_eq!(config.execution.terminal_detail_retention_days, 45);
     assert_eq!(config.execution.max_tasks, 20_000);
     assert_eq!(config.execution.max_tokens, 20_000_000);
     assert_eq!(config.execution.max_tool_calls, 200_000);
@@ -614,6 +646,22 @@ fn from_iter_rejects_invalid_values_for_every_execution_override() {
         "MOA_EXECUTION_PLANNER_REPAIR_ATTEMPTS",
         "MOA_EXECUTION_REPEATED_FAILURE_LIMIT",
         "MOA_EXECUTION_MAX_IN_FLIGHT_TASKS",
+        "MOA_EXECUTION_MAXIMUM_HORIZON_SECONDS",
+        "MOA_EXECUTION_MAXIMUM_ACTIVATION_STEPS",
+        "MOA_EXECUTION_DISPATCH_BATCH_SIZE",
+        "MOA_EXECUTION_ACTIVE_ATTEMPT_TIMEOUT_SECONDS",
+        "MOA_EXECUTION_MAX_TENANT_ACTIVE_RUNS",
+        "MOA_EXECUTION_MAX_FLEET_ACTIVE_RUNS",
+        "MOA_EXECUTION_MAX_TENANT_ACTIVE_TASKS",
+        "MOA_EXECUTION_MAX_FLEET_ACTIVE_TASKS",
+        "MOA_EXECUTION_MAX_TENANT_PARKED_RUNS",
+        "MOA_EXECUTION_MAX_FLEET_PARKED_RUNS",
+        "MOA_EXECUTION_MAX_TENANT_SCHEDULED_TRIGGERS",
+        "MOA_EXECUTION_MAX_FLEET_SCHEDULED_TRIGGERS",
+        "MOA_EXECUTION_MAX_TENANT_EXTERNAL_JOBS",
+        "MOA_EXECUTION_MAX_FLEET_EXTERNAL_JOBS",
+        "MOA_EXECUTION_TRIGGER_RECONCILIATION_CADENCE_SECONDS",
+        "MOA_EXECUTION_TERMINAL_DETAIL_RETENTION_DAYS",
         "MOA_EXECUTION_MAX_TASKS",
         "MOA_EXECUTION_MAX_TOKENS",
         "MOA_EXECUTION_MAX_TOOL_CALLS",
@@ -651,6 +699,55 @@ fn execution_max_in_flight_tasks_overlay_rejects_zero() {
         error
             .to_string()
             .contains("execution.max_in_flight_tasks must be greater than zero"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn execution_long_horizon_overlay_rejects_zero_and_inconsistent_limits() {
+    // Pins: bounded activations, recovery cadence, and tenant/fleet admission
+    // cannot be disabled or configured with a narrower fleet than tenant limit.
+    for name in [
+        "MOA_EXECUTION_MAXIMUM_HORIZON_SECONDS",
+        "MOA_EXECUTION_MAXIMUM_ACTIVATION_STEPS",
+        "MOA_EXECUTION_DISPATCH_BATCH_SIZE",
+        "MOA_EXECUTION_ACTIVE_ATTEMPT_TIMEOUT_SECONDS",
+        "MOA_EXECUTION_MAX_TENANT_ACTIVE_RUNS",
+        "MOA_EXECUTION_MAX_FLEET_ACTIVE_RUNS",
+        "MOA_EXECUTION_MAX_TENANT_ACTIVE_TASKS",
+        "MOA_EXECUTION_MAX_FLEET_ACTIVE_TASKS",
+        "MOA_EXECUTION_MAX_TENANT_PARKED_RUNS",
+        "MOA_EXECUTION_MAX_FLEET_PARKED_RUNS",
+        "MOA_EXECUTION_MAX_TENANT_SCHEDULED_TRIGGERS",
+        "MOA_EXECUTION_MAX_FLEET_SCHEDULED_TRIGGERS",
+        "MOA_EXECUTION_MAX_TENANT_EXTERNAL_JOBS",
+        "MOA_EXECUTION_MAX_FLEET_EXTERNAL_JOBS",
+        "MOA_EXECUTION_TRIGGER_RECONCILIATION_CADENCE_SECONDS",
+        "MOA_EXECUTION_TERMINAL_DETAIL_RETENTION_DAYS",
+    ] {
+        let overlay = EnvOverlay::from_iter(env_pairs([(name, "0")]))
+            .expect("zero is syntactically a valid integer");
+        let error = overlay
+            .apply_to(&mut MoaConfig::default())
+            .expect_err("zero long-horizon limit must fail validation");
+        assert!(
+            error.to_string().contains("must be greater than zero"),
+            "unexpected error for {name}: {error}"
+        );
+    }
+
+    let overlay = EnvOverlay::from_iter(env_pairs([
+        ("MOA_EXECUTION_MAX_TENANT_ACTIVE_TASKS", "500"),
+        ("MOA_EXECUTION_MAX_FLEET_ACTIVE_TASKS", "499"),
+    ]))
+    .expect("capacity overlay should deserialize");
+    let error = overlay
+        .apply_to(&mut MoaConfig::default())
+        .expect_err("tenant capacity above the fleet capacity must fail validation");
+    assert!(
+        error.to_string().contains(
+            "execution.max_tenant_active_tasks must not exceed execution.max_fleet_active_tasks"
+        ),
         "unexpected error: {error}"
     );
 }

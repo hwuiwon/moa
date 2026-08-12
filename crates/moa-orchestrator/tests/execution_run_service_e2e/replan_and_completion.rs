@@ -17,7 +17,10 @@ use moa_execution::compiler::{
     CompileExecutionRequest, ValidateAmendmentRequest, compile, validate_amendment,
 };
 use moa_execution::completion::CompletionCheckResult;
-use moa_execution::repository::{ExecutionRepository, ExecutionScope};
+use moa_execution::repository::{
+    ExecutionRepository, ExecutionScope,
+    amendment::{AmendmentProjectionOutcome, AmendmentProjectionRequest},
+};
 use moa_execution::state::{
     ExecutionRunStatus, ExecutionTaskProjection, ExecutionTaskStatus, ExecutionTerminalCause,
     ExecutionTerminalEvidence,
@@ -618,9 +621,9 @@ async fn useful_amendment_preserves_completed_work_service_e2e() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn amendment_retries_after_persisted_epoch_before_wake_ack_service_e2e() -> Result<()> {
+async fn amendment_retries_after_persisted_epoch_before_dispatch_service_e2e() -> Result<()> {
     // Pins: a public amendment interrupted after its revision and wake epoch commit
-    // retries through the joined run wake without applying or resuming the plan twice.
+    // retries through the outbox dispatcher without applying or resuming the plan twice.
     let agent_a = agent_node("agent_a", "AMENDMENT_HANDOFF_AGENT_A");
     let amendment = replacement_amendment(
         1,
@@ -650,7 +653,7 @@ async fn amendment_retries_after_persisted_epoch_before_wake_ack_service_e2e() -
         &fixture,
         &test,
         "amendment-handoff-recovery",
-        "recover a committed amendment before its wake acknowledgement",
+        "recover a committed amendment before its dispatcher handoff",
         None,
         move |_| Ok(useful_replan_contract(agent_a)),
     )
@@ -695,13 +698,13 @@ async fn amendment_retries_after_persisted_epoch_before_wake_ack_service_e2e() -
             .await?;
     assert!(
         !interrupted.is_finished(),
-        "public amendment returned before its joined run wake acknowledgement"
+        "public amendment returned before its dispatcher handoff"
     );
 
     fixture
         .hard_crash_and_restart_orchestrator()
         .await
-        .context("crash in the persisted-amendment/pre-wake acknowledgement window")?;
+        .context("crash in the persisted-amendment/pre-dispatch window")?;
     let recovered = tokio::time::timeout(SERVICE_TIMEOUT, interrupted)
         .await
         .context("amendment request did not retry after orchestrator recovery")???;
@@ -1472,11 +1475,11 @@ async fn execution_eval_amendment_cannot_broaden_authorization_service_e2e() -> 
     let scope = ExecutionScope::Tenant {
         tenant_id: started.run.tenant_id,
     };
-    let snapshot = repository
-        .load_scheduling_snapshot(scope, started.run.run_uid)
+    let persisted_run = repository
+        .load_run(scope, started.run.run_uid)
         .await?
-        .context("load authorization-escalation scheduling snapshot")?;
-    let forbidden_reference = snapshot
+        .context("load authorization-escalation run")?;
+    let forbidden_reference = persisted_run
         .catalog
         .capabilities
         .iter()
@@ -1486,8 +1489,8 @@ async fn execution_eval_amendment_cannot_broaden_authorization_service_e2e() -> 
         })
         .map(|capability| capability.reference.clone())
         .context("fixture catalog omitted forbidden amendment capability")?;
-    let completed_before = snapshot
-        .projection
+    let tasks_before = list_execution_tasks(test.client(), started.run.clone()).await?;
+    let completed_before = tasks_before
         .tasks
         .iter()
         .find(|task| task.node_id == USEFUL_OUTPUT_NODE)
@@ -1508,16 +1511,31 @@ async fn execution_eval_amendment_cannot_broaden_authorization_service_e2e() -> 
         replacement,
         "attempt to broaden active-plan capability authorization",
     );
+    let config = ExecutionConfig::default();
+    let AmendmentProjectionOutcome::Ready(snapshot) = repository
+        .load_amendment_projection_for_session(
+            scope,
+            &config,
+            AmendmentProjectionRequest {
+                run_uid: started.run.run_uid,
+                session_id: started.run.session_id,
+                expected_plan_revision: amendment.base_plan_revision,
+            },
+        )
+        .await?
+    else {
+        bail!("authorization-escalation projection was not ready")
+    };
     let remaining_budget = snapshot.budget_ledger.remaining_limit()?;
     let validated = validate_amendment(ValidateAmendmentRequest {
-        goal: snapshot.run.goal,
-        active_plan: snapshot.run.active_plan,
+        goal: snapshot.run.goal.clone(),
+        active_plan: snapshot.run.active_plan.clone(),
         amendment: amendment.clone(),
-        projection: snapshot.projection,
-        catalog: snapshot.catalog,
-        authorization: snapshot.authorization,
+        projection: snapshot.projection.clone(),
+        catalog: snapshot.run.catalog.clone(),
+        authorization: snapshot.run.authorization.clone(),
         remaining_budget,
-        config: ExecutionConfig::default(),
+        config,
         now: moa_test_support::fixtures::pg_now(),
     });
     assert!(validated.plan.is_none());
@@ -1652,6 +1670,7 @@ where
                 contact_id: None,
                 session_id,
                 originating_user_sequence_num,
+                deadline_at: chrono::Utc::now() + chrono::TimeDelta::days(1),
                 requested_template: None,
             },
         )
@@ -1829,20 +1848,31 @@ async fn assert_valid_amendment(
             contact_id,
         },
     );
-    let snapshot = repository
-        .load_scheduling_snapshot(scope, started.run.run_uid)
+    let config = moa_config::ExecutionConfig::default();
+    let AmendmentProjectionOutcome::Ready(snapshot) = repository
+        .load_amendment_projection_for_session(
+            scope,
+            &config,
+            AmendmentProjectionRequest {
+                run_uid: started.run.run_uid,
+                session_id: started.run.session_id,
+                expected_plan_revision: amendment.base_plan_revision,
+            },
+        )
         .await?
-        .context("load replan validation snapshot")?;
+    else {
+        bail!("replan validation projection was not ready")
+    };
     let remaining_budget = snapshot.budget_ledger.remaining_limit()?;
     let validated = validate_amendment(ValidateAmendmentRequest {
-        goal: snapshot.run.goal,
-        active_plan: snapshot.run.active_plan,
+        goal: snapshot.run.goal.clone(),
+        active_plan: snapshot.run.active_plan.clone(),
         amendment: amendment.clone(),
-        projection: snapshot.projection,
-        catalog: snapshot.catalog,
-        authorization: snapshot.authorization,
+        projection: snapshot.projection.clone(),
+        catalog: snapshot.run.catalog.clone(),
+        authorization: snapshot.run.authorization.clone(),
         remaining_budget,
-        config: moa_config::ExecutionConfig::default(),
+        config,
         now: moa_test_support::fixtures::pg_now(),
     });
     if validated.plan.is_none() {
@@ -2014,6 +2044,12 @@ fn useful_replan_contract(
         },
         ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                    delay_seconds: 86_400,
+                },
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+            },
             input_schema: empty_input_schema(),
             output_schema: output_schema.clone(),
             nodes: vec![
@@ -2266,6 +2302,12 @@ fn map_then_output_plan(spec: MapThenOutputPlan<'_>) -> ExecutionPlanDefinition 
     } = spec;
     ExecutionPlanDefinition {
         cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+        input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+            expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                delay_seconds: 86_400,
+            },
+            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+        },
         input_schema: empty_input_schema(),
         output_schema: output_schema.clone(),
         nodes: vec![
@@ -2335,6 +2377,12 @@ fn missing_deliverable_contract() -> (ExecutionGoalContract, ExecutionPlanDefini
         },
         ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                    delay_seconds: 86_400,
+                },
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+            },
             input_schema: json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -2437,6 +2485,12 @@ fn declared_contradiction_contract() -> (ExecutionGoalContract, ExecutionPlanDef
         },
         ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                    delay_seconds: 86_400,
+                },
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+            },
             input_schema: empty_input_schema(),
             output_schema: report_schema.clone(),
             nodes: vec![
@@ -2540,6 +2594,12 @@ fn injected_content_contract(
         },
         ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                    delay_seconds: 86_400,
+                },
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+            },
             input_schema: empty_input_schema(),
             output_schema: output_schema.clone(),
             nodes: vec![

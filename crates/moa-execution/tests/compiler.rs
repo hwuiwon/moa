@@ -10,8 +10,9 @@ use moa_artifacts::execution_plan::{
     ExecutionBudgetLimit, ExecutionCancelPolicy, ExecutionCompensation, ExecutionCondition,
     ExecutionDeliverable, ExecutionGoalContract, ExecutionNode, ExecutionOperation,
     ExecutionPlanDefinition, ExecutionReducer, ExecutionReference, ExecutionRequirement,
-    ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, MapTask, PlanAmendment,
-    PlanAmendmentOperation, RetryPolicy,
+    ExecutionTaskOutcome, ExecutionTaskResult, ExecutionTemporalTarget, ExecutionUsage,
+    ExecutionWaitExpiryAction, ExecutionWaitPolicy, MapTask, PlanAmendment, PlanAmendmentOperation,
+    RetryPolicy,
 };
 use moa_artifacts::reference::ArtifactRef;
 use moa_config::ExecutionConfig;
@@ -31,8 +32,8 @@ use moa_execution::{
         ExecutionValidationSeverity, ValidateAmendmentRequest, compile, validate_amendment,
     },
     state::{
-        ExecutionNodeStatus, ExecutionProjection, ExecutionTaskId, ExecutionTaskProjection,
-        ExecutionTaskStatus,
+        ExecutionAmendmentProjection, ExecutionNodeStatus, ExecutionProjection, ExecutionTaskId,
+        ExecutionTaskProjection, ExecutionTaskStatus,
     },
 };
 use proptest::{
@@ -210,6 +211,136 @@ fn compile_returns_canonical_hashes_and_exact_retry_estimate() {
             retrieved_bytes: 26,
             tasks: 2,
         }
+    );
+}
+
+#[test]
+fn compile_accepts_wait_until_strictly_between_validation_time_and_run_deadline() {
+    // Pins: a Durable plan may park on one exact timer only inside its approved horizon.
+    let mut request = valid_request();
+    request.plan.nodes[0].operation = ExecutionOperation::WaitUntil {
+        wake: ExecutionTemporalTarget::At {
+            at: Utc
+                .with_ymd_and_hms(2026, 7, 15, 0, 0, 0)
+                .single()
+                .expect("wait timestamp"),
+        },
+        result: json!({ "order_id": "ord-1" }),
+    };
+
+    let outcome = compile(request);
+
+    assert!(outcome.compiled.is_some(), "{:?}", outcome.report.issues);
+    assert!(outcome.report.issues.is_empty());
+}
+
+#[test]
+fn compile_accepts_wait_entry_relative_targets_inside_the_remaining_horizon() {
+    // Pins: reusable relative waits remain relative until their task enters storage-only waiting.
+    let mut request = valid_request();
+    request.plan.input_wait_policy = ExecutionWaitPolicy {
+        expiry: ExecutionTemporalTarget::After {
+            delay_seconds: 7_200,
+        },
+        on_expiry: ExecutionWaitExpiryAction::FailTask,
+    };
+    request.plan.nodes[0].operation = ExecutionOperation::WaitUntil {
+        wake: ExecutionTemporalTarget::After {
+            delay_seconds: 3_600,
+        },
+        result: json!({ "order_id": "ord-1" }),
+    };
+
+    let outcome = compile(request);
+
+    let compiled = outcome
+        .compiled
+        .expect("relative waits inside the run horizon should compile");
+    assert!(matches!(
+        compiled.plan.definition.nodes[0].operation,
+        ExecutionOperation::WaitUntil {
+            wake: ExecutionTemporalTarget::After {
+                delay_seconds: 3_600
+            },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn compile_rejects_missing_expired_and_out_of_horizon_run_deadlines() {
+    // Pins: every Durable run has one future absolute deadline within maximum_horizon.
+    let cases = [
+        (None, "missing_deadline"),
+        (Some(now()), "deadline_exceeded"),
+        (
+            Some(
+                Utc.with_ymd_and_hms(2026, 8, 13, 12, 0, 1)
+                    .single()
+                    .expect("outside horizon"),
+            ),
+            "deadline_out_of_horizon",
+        ),
+    ];
+    for (deadline_at, expected_code) in cases {
+        let mut request = valid_request();
+        request.approved_budget.deadline_at = deadline_at;
+
+        let outcome = compile(request);
+
+        assert!(
+            outcome.compiled.is_none(),
+            "compiler accepted {expected_code}"
+        );
+        assert!(
+            outcome
+                .report
+                .issues
+                .iter()
+                .any(|issue| issue.code == expected_code),
+            "missing {expected_code}: {:?}",
+            outcome.report.issues
+        );
+    }
+}
+
+#[test]
+fn compile_rejects_timer_and_wait_expiry_at_or_after_run_deadline() {
+    // Pins: timers and wait fallbacks always settle before the enclosing run deadline.
+    let deadline = generous_budget()
+        .deadline_at
+        .expect("fixture deadline must exist");
+    let mut timer = valid_request();
+    timer.plan.nodes[0].operation = ExecutionOperation::WaitUntil {
+        wake: ExecutionTemporalTarget::At { at: deadline },
+        result: json!({}),
+    };
+    let timer_outcome = compile(timer);
+    assert!(timer_outcome.compiled.is_none());
+    assert!(
+        timer_outcome
+            .report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "temporal_target_after_deadline")
+    );
+
+    let mut review = valid_request();
+    review.plan.nodes[0].operation = ExecutionOperation::Review {
+        prompt: "Approve the result".to_string(),
+        wait_policy: ExecutionWaitPolicy {
+            expiry: ExecutionTemporalTarget::At { at: deadline },
+            on_expiry: ExecutionWaitExpiryAction::ContinueWith { output: json!({}) },
+        },
+    };
+    let review_outcome = compile(review);
+    assert!(review_outcome.compiled.is_none());
+    assert!(
+        review_outcome
+            .report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "temporal_target_after_deadline")
     );
 }
 
@@ -533,6 +664,72 @@ fn compile_rejects_unpromised_read_non_idempotent_and_unauthorized_compensators(
     let mut unauthorized = compensated_request();
     unauthorized.authorization.capability_refs.pop();
     assert_issue_code(compile(unauthorized), "capability_not_authorized");
+}
+
+#[test]
+fn compile_rejects_hand_and_skill_code_compensators_that_require_sandbox() {
+    // Pins: the compiler cannot admit a rollback contract that the durable compensation runtime
+    // will deterministically reject because no sandbox workspace belongs to compensation.
+    let sandbox_sources = [
+        CapabilitySource::HandTool {
+            name: "orders.rollback".to_string(),
+        },
+        CapabilitySource::SkillCode {
+            skill_ref: ArtifactRef::from_str("skill://orders")
+                .expect("valid skill reference fixture"),
+            revision_uid: Uuid::from_u128(401),
+            entrypoint: "rollback.py".to_string(),
+        },
+    ];
+    for source in sandbox_sources {
+        let mut request = compensated_request();
+        let compensator = &mut request.catalog.capabilities[1];
+        compensator.execution_class = ExecutionClass::Compute;
+        compensator.requires_sandbox = true;
+        compensator.source = source.clone();
+        compensator.policy_context = CapabilityPolicyContext::registered(source);
+        rehash_catalog(&mut request);
+
+        let outcome = compile(request);
+
+        assert_issue_code(outcome.clone(), "sandbox_compensator_unsupported");
+        assert!(outcome.report.issues.iter().any(|issue| {
+            issue.code == "sandbox_compensator_unsupported"
+                && issue.path == "plan.nodes[0].compensation.compensator"
+                && issue
+                    .message
+                    .contains("durable compensation does not support")
+        }));
+    }
+}
+
+#[test]
+fn compile_accepts_idempotent_async_non_sandbox_compensator() {
+    // Pins: asynchronous external rollback remains valid when it is idempotent and explicitly
+    // cataloged as not requiring a sandbox workspace.
+    let mut request = compensated_request();
+    let source = CapabilitySource::McpTool {
+        server: "orders".to_string(),
+        tool_name: "orders.rollback".to_string(),
+        remote_name: "rollback".to_string(),
+    };
+    let compensator = &mut request.catalog.capabilities[1];
+    compensator.async_mode = moa_core::types::tools::ToolAsyncMode::MayReturnExternalJob {
+        provider: "orders-provider".to_string(),
+    };
+    compensator.execution_class = ExecutionClass::External;
+    compensator.requires_sandbox = false;
+    compensator.source = source.clone();
+    compensator.policy_context = CapabilityPolicyContext::registered(source);
+    rehash_catalog(&mut request);
+
+    let outcome = compile(request);
+
+    assert!(
+        outcome.compiled.is_some(),
+        "idempotent non-sandbox async compensator should compile: {:?}",
+        outcome.report.issues
+    );
 }
 
 #[test]
@@ -1153,11 +1350,11 @@ fn amendment_rejects_unknown_reference_path_before_persistence() {
                 node: replacement,
             }],
         },
-        projection: ExecutionProjection {
+        projection: amendment_projection(ExecutionProjection {
             plan_revision: 4,
             node_statuses: BTreeMap::new(),
             tasks: vec![],
-        },
+        }),
         catalog: request.catalog,
         authorization: request.authorization,
         remaining_budget: generous_budget(),
@@ -1182,11 +1379,11 @@ fn amendment_replaces_only_pending_work_with_a_distinct_identity() {
     let mut statuses = BTreeMap::new();
     statuses.insert("lookup".to_string(), ExecutionNodeStatus::Completed);
     statuses.insert("output".to_string(), ExecutionNodeStatus::Pending);
-    let projection = ExecutionProjection {
+    let projection = amendment_projection(ExecutionProjection {
         plan_revision: 4,
         node_statuses: statuses,
         tasks: vec![],
-    };
+    });
     let replacement = ExecutionNode {
         id: "replacement_output".to_string(),
         requirement_ids: vec!["req_one".to_string()],
@@ -1259,11 +1456,11 @@ fn amendment_cannot_remove_compensation_after_forward_work_starts() {
                 node: replacement,
             }],
         },
-        projection: ExecutionProjection {
+        projection: amendment_projection(ExecutionProjection {
             plan_revision: 3,
             node_statuses: BTreeMap::from([("lookup".to_string(), ExecutionNodeStatus::Running)]),
             tasks: vec![task_projection("lookup", ExecutionTaskStatus::Running)],
-        },
+        }),
         catalog: request.catalog,
         authorization: request.authorization,
         remaining_budget: generous_budget(),
@@ -1305,14 +1502,14 @@ fn amendment_validation_retains_remaining_estimate_without_completed_work() {
                 node: replacement,
             }],
         },
-        projection: ExecutionProjection {
+        projection: amendment_projection(ExecutionProjection {
             plan_revision: 4,
             node_statuses: BTreeMap::from([
                 ("lookup".to_string(), ExecutionNodeStatus::Completed),
                 ("output".to_string(), ExecutionNodeStatus::Pending),
             ]),
             tasks: vec![task_projection("lookup", ExecutionTaskStatus::Completed)],
-        },
+        }),
         catalog: request.catalog,
         authorization: request.authorization,
         remaining_budget: ExecutionBudgetLimit {
@@ -1453,11 +1650,11 @@ fn amendment_rejects_references_unused_by_the_active_plan() {
                 },
             ],
         },
-        projection: ExecutionProjection {
+        projection: amendment_projection(ExecutionProjection {
             plan_revision: 3,
             node_statuses: BTreeMap::new(),
             tasks: vec![],
-        },
+        }),
         catalog: request.catalog,
         authorization: request.authorization,
         remaining_budget: generous_budget(),
@@ -1572,11 +1769,11 @@ fn amendment_rejects_removed_or_increased_pending_node_budget() {
                 },
             ],
         },
-        projection: ExecutionProjection {
+        projection: amendment_projection(ExecutionProjection {
             plan_revision: 5,
             node_statuses: BTreeMap::new(),
             tasks: vec![],
-        },
+        }),
         catalog: request.catalog,
         authorization: request.authorization,
         remaining_budget: generous_budget(),
@@ -1674,7 +1871,7 @@ fn waiting_replan_amendment_removes_origin_and_replaces_every_pending_dependent(
     let compiled = compile(request.clone())
         .compiled
         .expect("compile replan fixture");
-    let projection = ExecutionProjection {
+    let projection = amendment_projection(ExecutionProjection {
         plan_revision: 7,
         node_statuses: BTreeMap::from([
             ("seed".to_string(), ExecutionNodeStatus::Completed),
@@ -1682,7 +1879,7 @@ fn waiting_replan_amendment_removes_origin_and_replaces_every_pending_dependent(
             ("output".to_string(), ExecutionNodeStatus::Pending),
         ]),
         tasks: vec![waiting_replan_task("lookup")],
-    };
+    });
     let lookup = compiled
         .plan
         .definition
@@ -1830,11 +2027,11 @@ fn map_replacement_accepts_literal_subset_and_rejects_scope_broadening() {
                 },
             ],
         },
-        projection: ExecutionProjection {
+        projection: amendment_projection(ExecutionProjection {
             plan_revision: 2,
             node_statuses: BTreeMap::new(),
             tasks: vec![],
-        },
+        }),
         catalog: request.catalog,
         authorization: request.authorization,
         remaining_budget: generous_budget(),
@@ -1898,6 +2095,7 @@ fn valid_request() -> CompileExecutionRequest {
         },
         plan: ExecutionPlanDefinition {
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
+            input_wait_policy: default_wait_policy(),
             input_schema: json!({
                 "type": "object",
                 "required": ["order_id"],
@@ -2076,11 +2274,11 @@ fn amendment_validation_for_output(
             evidence: json!({}),
             operations: vec![operation],
         },
-        projection: ExecutionProjection {
+        projection: amendment_projection(ExecutionProjection {
             plan_revision: 9,
             node_statuses,
             tasks: vec![task_projection("output", task_status)],
-        },
+        }),
         catalog: request.catalog,
         authorization: request.authorization,
         remaining_budget: generous_budget(),
@@ -2106,7 +2304,9 @@ fn capability(name: &str) -> ExecutionCapability {
         risk_level: RiskLevel::Low,
         default_effect: ActionPolicyEffect::Allow,
         idempotency_class: IdempotencyClass::Idempotent,
+        async_mode: moa_core::types::tools::ToolAsyncMode::SynchronousOnly,
         execution_class: ExecutionClass::Data,
+        requires_sandbox: false,
         policy_context: CapabilityPolicyContext::registered(source.clone()),
         source,
         estimate: ExecutionEstimate {
@@ -2355,6 +2555,33 @@ fn task_projection(node_id: &str, status: ExecutionTaskStatus) -> ExecutionTaskP
     }
 }
 
+fn amendment_projection(projection: ExecutionProjection) -> ExecutionAmendmentProjection {
+    let mut started_node_ids = projection
+        .node_statuses
+        .iter()
+        .filter(|(_, status)| **status != ExecutionNodeStatus::Pending)
+        .map(|(node_id, _)| node_id.clone())
+        .collect::<BTreeSet<_>>();
+    started_node_ids.extend(
+        projection
+            .tasks
+            .iter()
+            .filter(|task| task.status != ExecutionTaskStatus::Pending)
+            .map(|task| task.node_id.clone()),
+    );
+    let replan_tasks = projection
+        .tasks
+        .into_iter()
+        .filter(|task| task.status == ExecutionTaskStatus::WaitingReplan)
+        .collect();
+    ExecutionAmendmentProjection {
+        plan_revision: projection.plan_revision,
+        node_statuses: projection.node_statuses,
+        started_node_ids,
+        replan_tasks,
+    }
+}
+
 fn generous_budget() -> ExecutionBudgetLimit {
     ExecutionBudgetLimit {
         max_cost_microusd: Some(1_000_000),
@@ -2363,10 +2590,22 @@ fn generous_budget() -> ExecutionBudgetLimit {
         max_tool_calls: Some(1_000),
         max_retrieved_bytes: Some(1_000_000),
         deadline_at: Some(
-            Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0)
+            Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0)
                 .single()
                 .expect("time"),
         ),
+    }
+}
+
+fn default_wait_policy() -> ExecutionWaitPolicy {
+    ExecutionWaitPolicy {
+        expiry: ExecutionTemporalTarget::At {
+            at: Utc
+                .with_ymd_and_hms(2026, 7, 20, 0, 0, 0)
+                .single()
+                .expect("wait expiry"),
+        },
+        on_expiry: ExecutionWaitExpiryAction::FailTask,
     }
 }
 

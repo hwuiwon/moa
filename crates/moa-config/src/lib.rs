@@ -314,61 +314,7 @@ impl MoaConfig {
             u64::from(self.budgets.daily_tenant_cents),
         )?;
 
-        // Execution-run ceilings and the per-turn reservation estimates that
-        // consume them. A zero estimate reserves nothing, so it would let an
-        // unbounded number of turns run inside a bounded run budget.
-        let execution = &self.execution;
-        for (name, value) in [
-            (
-                "execution.repeated_failure_limit",
-                u64::from(execution.repeated_failure_limit),
-            ),
-            (
-                "execution.max_in_flight_tasks",
-                u64::try_from(execution.max_in_flight_tasks).map_err(|_| {
-                    MoaError::ConfigError("execution.max_in_flight_tasks is too large".to_string())
-                })?,
-            ),
-            ("execution.max_tasks", execution.max_tasks),
-            ("execution.max_tokens", execution.max_tokens),
-            ("execution.max_tool_calls", execution.max_tool_calls),
-            (
-                "execution.max_retrieved_bytes",
-                execution.max_retrieved_bytes,
-            ),
-            ("execution.max_cost_microusd", execution.max_cost_microusd),
-            (
-                "execution.agent_turn_cost_microusd",
-                execution.agent_turn_cost_microusd,
-            ),
-            ("execution.agent_turn_tokens", execution.agent_turn_tokens),
-            (
-                "execution.agent_turn_tool_calls",
-                execution.agent_turn_tool_calls,
-            ),
-            (
-                "execution.agent_turn_retrieved_bytes",
-                execution.agent_turn_retrieved_bytes,
-            ),
-            (
-                "execution.verifier_turn_cost_microusd",
-                execution.verifier_turn_cost_microusd,
-            ),
-            (
-                "execution.verifier_turn_tokens",
-                execution.verifier_turn_tokens,
-            ),
-            (
-                "execution.verifier_turn_tool_calls",
-                execution.verifier_turn_tool_calls,
-            ),
-            (
-                "execution.verifier_turn_retrieved_bytes",
-                execution.verifier_turn_retrieved_bytes,
-            ),
-        ] {
-            require_positive_limit(name, value)?;
-        }
+        self.execution.validate()?;
 
         if self.database.uses_builtin_dev_url() {
             // Fails safe (the default targets localhost), so warn rather than reject:
@@ -746,6 +692,52 @@ mod tests {
             ("execution.max_in_flight_tasks", |config| {
                 config.execution.max_in_flight_tasks = 0
             }),
+            ("execution.maximum_horizon_seconds", |config| {
+                config.execution.maximum_horizon_seconds = 0
+            }),
+            ("execution.maximum_activation_steps", |config| {
+                config.execution.maximum_activation_steps = 0
+            }),
+            ("execution.dispatch_batch_size", |config| {
+                config.execution.dispatch_batch_size = 0
+            }),
+            ("execution.active_attempt_timeout_seconds", |config| {
+                config.execution.active_attempt_timeout_seconds = 0
+            }),
+            ("execution.max_tenant_active_runs", |config| {
+                config.execution.max_tenant_active_runs = 0
+            }),
+            ("execution.max_fleet_active_runs", |config| {
+                config.execution.max_fleet_active_runs = 0
+            }),
+            ("execution.max_tenant_active_tasks", |config| {
+                config.execution.max_tenant_active_tasks = 0
+            }),
+            ("execution.max_fleet_active_tasks", |config| {
+                config.execution.max_fleet_active_tasks = 0
+            }),
+            ("execution.max_tenant_parked_runs", |config| {
+                config.execution.max_tenant_parked_runs = 0
+            }),
+            ("execution.max_fleet_parked_runs", |config| {
+                config.execution.max_fleet_parked_runs = 0
+            }),
+            ("execution.max_tenant_scheduled_triggers", |config| {
+                config.execution.max_tenant_scheduled_triggers = 0
+            }),
+            ("execution.max_fleet_scheduled_triggers", |config| {
+                config.execution.max_fleet_scheduled_triggers = 0
+            }),
+            ("execution.max_tenant_external_jobs", |config| {
+                config.execution.max_tenant_external_jobs = 0
+            }),
+            ("execution.max_fleet_external_jobs", |config| {
+                config.execution.max_fleet_external_jobs = 0
+            }),
+            (
+                "execution.trigger_reconciliation_cadence_seconds",
+                |config| config.execution.trigger_reconciliation_cadence_seconds = 0,
+            ),
             ("execution.max_tasks", |config| {
                 config.execution.max_tasks = 0
             }),

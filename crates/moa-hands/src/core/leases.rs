@@ -23,6 +23,8 @@ use sqlx::{PgPool, Row, types::Json};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use super::sandbox_workspace::capacity::release_active_hand_for_reaper_in_transaction;
+
 /// Maximum wall-clock time the platform allows one provider create dispatch.
 pub(super) const PROVISIONING_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Provider visibility grace after create dispatch can no longer complete.
@@ -363,6 +365,28 @@ pub struct HandLeaseActivateRequest<'a> {
     pub attachment: HandLeaseWorkspaceAttachment,
 }
 
+/// Stable keyset cursor for one session's live hand leases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandLeaseSessionCursor {
+    /// Opaque typed-owner key of the last lease returned by the prior page.
+    pub worker_id: String,
+    /// Provider name of the last lease returned by the prior page.
+    pub provider: String,
+}
+
+/// One bounded page of live hand leases for aggregate session teardown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandLeaseSessionPage {
+    /// Live leases ordered by `(worker_id, provider)`.
+    pub leases: Vec<HandLease>,
+    /// Cursor to resume after this page, or `None` when the scan is complete.
+    pub next_cursor: Option<HandLeaseSessionCursor>,
+}
+
+/// Maximum live hand leases returned by one aggregate session page.
+pub const HAND_LEASE_SESSION_PAGE_SIZE: usize = 64;
+const HAND_LEASE_SESSION_QUERY_LIMIT: i64 = HAND_LEASE_SESSION_PAGE_SIZE as i64 + 1;
+
 /// Store contract for durable hand lease coordination.
 ///
 /// Every foreground method requires the verified tenant in addition to the
@@ -392,12 +416,49 @@ pub trait HandLeaseStore: Send + Sync {
         provider: &str,
     ) -> Result<Option<HandLease>>;
 
-    /// Lists all durable leases for a session, across every typed owner scope.
-    async fn list_session(
+    /// Loads one exact owner lease generation by its provider-create identity.
+    async fn get_exact_generation(
         &self,
         tenant_id: TenantId,
         session_id: SessionId,
+        worker_id: &str,
+        provisioning_operation_id: HandProvisioningOperationId,
+        generation: i64,
+    ) -> Result<Option<HandLease>>;
+
+    /// Loads at most two live provider rows for one exact typed owner scope.
+    ///
+    /// Implementations must use the `(tenant_id, session_id, worker_id)` owner
+    /// index prefix and a database-side `LIMIT 2`; the second row detects an
+    /// invalid concurrent replacement without materializing owner history.
+    async fn list_live_owner_candidates(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+        worker_id: &str,
     ) -> Result<Vec<HandLease>>;
+
+    /// Reports whether any non-destroyed provider row exists for an exact owner.
+    async fn has_live_owner(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+        worker_id: &str,
+    ) -> Result<bool>;
+
+    /// Lists one bounded keyset page of live leases for a session.
+    ///
+    /// Rows are ordered by `(worker_id, provider)` and the cursor is exclusive.
+    /// Implementations must use the tenant/session index prefix, fetch at most
+    /// one lookahead row beyond [`HAND_LEASE_SESSION_PAGE_SIZE`], and omit
+    /// already-destroyed history so terminal cleanup stays bounded as a session
+    /// ages.
+    async fn list_live_session_page(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+        cursor: Option<&HandLeaseSessionCursor>,
+    ) -> Result<HandLeaseSessionPage>;
 
     /// Marks a claimed generation active with its durable handle payload.
     ///
@@ -563,6 +624,21 @@ fn attachment_columns(
     })
 }
 
+fn finish_live_session_page(leases: &mut Vec<HandLease>) -> HandLeaseSessionPage {
+    let has_more = leases.len() > HAND_LEASE_SESSION_PAGE_SIZE;
+    leases.truncate(HAND_LEASE_SESSION_PAGE_SIZE);
+    let next_cursor = has_more.then(|| {
+        leases.last().map(|lease| HandLeaseSessionCursor {
+            worker_id: lease.worker_id.clone(),
+            provider: lease.provider.clone(),
+        })
+    });
+    HandLeaseSessionPage {
+        leases: std::mem::take(leases),
+        next_cursor: next_cursor.flatten(),
+    }
+}
+
 #[async_trait]
 impl HandLeaseStore for PostgresHandLeaseStore {
     async fn claim_for_provisioning(
@@ -623,6 +699,7 @@ impl HandLeaseStore for PostgresHandLeaseStore {
                 reap_attempts = 0,
                 reap_not_before = EXCLUDED.reap_not_before
             WHERE moa.hand_leases.tenant_id = EXCLUDED.tenant_id
+              AND moa.hand_leases.handle IS NULL
               AND (
                     moa.hand_leases.status IN ('stale', 'destroyed')
                  OR (
@@ -695,22 +772,56 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         Ok(lease)
     }
 
-    async fn list_session(
+    async fn get_exact_generation(
         &self,
         tenant_id: TenantId,
         session_id: SessionId,
+        worker_id: &str,
+        provisioning_operation_id: HandProvisioningOperationId,
+        generation: i64,
+    ) -> Result<Option<HandLease>> {
+        let mut conn = self.begin(tenant_id).await?;
+        let row = sqlx::query(&format!(
+            r#"
+            SELECT {LEASE_COLUMNS}
+            FROM moa.hand_leases
+            WHERE tenant_id = $1 AND session_id = $2 AND worker_id = $3
+              AND provisioning_operation_id = $4 AND generation = $5
+            "#
+        ))
+        .bind(tenant_id)
+        .bind(session_id)
+        .bind(worker_id)
+        .bind(provisioning_operation_id)
+        .bind(generation)
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        let lease = row.map(|row| hand_lease_from_row(&row)).transpose()?;
+        conn.commit().await?;
+        Ok(lease)
+    }
+
+    async fn list_live_owner_candidates(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+        worker_id: &str,
     ) -> Result<Vec<HandLease>> {
         let mut conn = self.begin(tenant_id).await?;
         let rows = sqlx::query(&format!(
             r#"
             SELECT {LEASE_COLUMNS}
             FROM moa.hand_leases
-            WHERE session_id = $1 AND tenant_id = $2
-            ORDER BY worker_id, provider
+            WHERE tenant_id = $1 AND session_id = $2 AND worker_id = $3
+              AND status <> 'destroyed'
+            ORDER BY provider
+            LIMIT 2
             "#
         ))
-        .bind(session_id)
         .bind(tenant_id)
+        .bind(session_id)
+        .bind(worker_id)
         .fetch_all(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
@@ -721,6 +832,84 @@ impl HandLeaseStore for PostgresHandLeaseStore {
             .collect::<Result<Vec<_>>>()?;
         conn.commit().await?;
         Ok(leases)
+    }
+
+    async fn has_live_owner(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+        worker_id: &str,
+    ) -> Result<bool> {
+        let mut conn = self.begin(tenant_id).await?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM moa.hand_leases \
+             WHERE tenant_id = $1 AND session_id = $2 AND worker_id = $3 \
+               AND status <> 'destroyed')",
+        )
+        .bind(tenant_id)
+        .bind(session_id)
+        .bind(worker_id)
+        .fetch_one(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await?;
+        Ok(exists)
+    }
+
+    async fn list_live_session_page(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+        cursor: Option<&HandLeaseSessionCursor>,
+    ) -> Result<HandLeaseSessionPage> {
+        let mut conn = self.begin(tenant_id).await?;
+        let rows = match cursor {
+            Some(cursor) => {
+                sqlx::query(&format!(
+                    r#"
+                SELECT {LEASE_COLUMNS}
+                FROM moa.hand_leases
+                WHERE tenant_id = $1 AND session_id = $2
+                  AND status <> 'destroyed'
+                  AND (worker_id, provider) > ($3, $4)
+                ORDER BY worker_id, provider
+                LIMIT $5
+                "#
+                ))
+                .bind(tenant_id)
+                .bind(session_id)
+                .bind(&cursor.worker_id)
+                .bind(&cursor.provider)
+                .bind(HAND_LEASE_SESSION_QUERY_LIMIT)
+                .fetch_all(conn.as_mut())
+                .await
+            }
+            None => {
+                sqlx::query(&format!(
+                    r#"
+                SELECT {LEASE_COLUMNS}
+                FROM moa.hand_leases
+                WHERE tenant_id = $1 AND session_id = $2
+                  AND status <> 'destroyed'
+                ORDER BY worker_id, provider
+                LIMIT $3
+                "#
+                ))
+                .bind(tenant_id)
+                .bind(session_id)
+                .bind(HAND_LEASE_SESSION_QUERY_LIMIT)
+                .fetch_all(conn.as_mut())
+                .await
+            }
+        }
+        .map_err(map_sqlx_error)?;
+
+        let mut leases = rows
+            .iter()
+            .map(hand_lease_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        conn.commit().await?;
+        Ok(finish_live_session_page(&mut leases))
     }
 
     async fn activate(&self, request: HandLeaseActivateRequest<'_>) -> Result<bool> {
@@ -1010,6 +1199,19 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         let (workspace_id, writer_epoch, instance_generation, checkpoint_id) =
             attachment_columns(expected.attachment.as_ref());
         let mut conn = self.begin(tenant_id).await?;
+        if expected.attachment.is_some()
+            && !release_active_hand_for_reaper_in_transaction(
+                conn.as_mut(),
+                tenant_id,
+                expected.provisioning_operation_id,
+                expected.generation,
+                claim_token,
+            )
+            .await?
+        {
+            conn.rollback().await?;
+            return Ok(false);
+        }
         let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
@@ -1436,21 +1638,93 @@ impl HandLeaseStore for MemoryHandLeaseStore {
             .cloned())
     }
 
-    async fn list_session(
+    async fn get_exact_generation(
         &self,
         tenant_id: TenantId,
         session_id: SessionId,
+        worker_id: &str,
+        provisioning_operation_id: HandProvisioningOperationId,
+        generation: i64,
+    ) -> Result<Option<HandLease>> {
+        Ok(self
+            .leases
+            .lock()
+            .await
+            .values()
+            .find(|lease| {
+                lease.tenant_id == tenant_id
+                    && lease.session_id == session_id
+                    && lease.worker_id == worker_id
+                    && lease.provisioning_operation_id == provisioning_operation_id
+                    && lease.generation == generation
+            })
+            .cloned())
+    }
+
+    async fn list_live_owner_candidates(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+        worker_id: &str,
     ) -> Result<Vec<HandLease>> {
         let mut leases = self
             .leases
             .lock()
             .await
             .values()
-            .filter(|lease| lease.tenant_id == tenant_id && lease.session_id == session_id)
+            .filter(|lease| {
+                lease.tenant_id == tenant_id
+                    && lease.session_id == session_id
+                    && lease.worker_id == worker_id
+                    && lease.status != HandLeaseStatus::Destroyed
+            })
             .cloned()
             .collect::<Vec<_>>();
         leases.sort_by(|left, right| left.provider.cmp(&right.provider));
+        leases.truncate(2);
         Ok(leases)
+    }
+
+    async fn has_live_owner(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+        worker_id: &str,
+    ) -> Result<bool> {
+        Ok(self.leases.lock().await.values().any(|lease| {
+            lease.tenant_id == tenant_id
+                && lease.session_id == session_id
+                && lease.worker_id == worker_id
+                && lease.status != HandLeaseStatus::Destroyed
+        }))
+    }
+
+    async fn list_live_session_page(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+        cursor: Option<&HandLeaseSessionCursor>,
+    ) -> Result<HandLeaseSessionPage> {
+        let mut leases = self
+            .leases
+            .lock()
+            .await
+            .values()
+            .filter(|lease| {
+                lease.tenant_id == tenant_id
+                    && lease.session_id == session_id
+                    && lease.status != HandLeaseStatus::Destroyed
+                    && cursor.is_none_or(|cursor| {
+                        (&lease.worker_id, &lease.provider) > (&cursor.worker_id, &cursor.provider)
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        leases.sort_by(|left, right| {
+            (&left.worker_id, &left.provider).cmp(&(&right.worker_id, &right.provider))
+        });
+        leases.truncate(HAND_LEASE_SESSION_PAGE_SIZE + 1);
+        Ok(finish_live_session_page(&mut leases))
     }
 
     async fn activate(&self, request: HandLeaseActivateRequest<'_>) -> Result<bool> {
@@ -1730,11 +2004,21 @@ mod tests {
         tenant_id: TenantId,
         policy: &'a HandLeasePolicy,
     ) -> HandLeaseProvisionRequest<'a> {
+        provision_request_for_provider(session_id, worker_id, tenant_id, policy, "local")
+    }
+
+    fn provision_request_for_provider<'a>(
+        session_id: SessionId,
+        worker_id: &'a str,
+        tenant_id: TenantId,
+        policy: &'a HandLeasePolicy,
+        provider: &'a str,
+    ) -> HandLeaseProvisionRequest<'a> {
         HandLeaseProvisionRequest {
             session_id,
             worker_id,
             tenant_id,
-            provider: "local",
+            provider,
             tier: SandboxTier::Local,
             attachment: HandLeaseWorkspaceAttachment::new(SandboxWorkspaceId::new(), 1, 1, None)
                 .expect("test attachment should validate"),
@@ -1799,12 +2083,145 @@ mod tests {
                 .expect("load worker lease")
                 .is_some()
         );
-        // list_session reclaims every scope under the session at once.
         let listed = store
-            .list_session(tenant_id, session_id)
+            .list_live_session_page(tenant_id, session_id, None)
             .await
             .expect("list leases");
-        assert_eq!(listed.len(), 2, "both scopes belong to the session");
+        assert_eq!(
+            listed.leases.len(),
+            2,
+            "both live scopes belong to the session"
+        );
+        assert_eq!(listed.next_cursor, None);
+    }
+
+    #[tokio::test]
+    async fn memory_store_live_session_pages_are_bounded_replayable_and_complete() {
+        // Pins: terminal cleanup of a session with more than one page of live
+        // hands resumes by keyset cursor without materializing destroyed history,
+        // skipping a live lease, or changing a replayed page.
+        let store = MemoryHandLeaseStore::shared();
+        let session_id = SessionId::new();
+        let tenant_id = TenantId::new();
+        let policy = lease_policy(Some(300), Some(3600), "cap-session-page");
+
+        for index in 0..128 {
+            let worker_id = format!("destroyed-owner-{index:03}");
+            let claim = store
+                .claim_for_provisioning(provision_request(
+                    session_id, &worker_id, tenant_id, &policy,
+                ))
+                .await
+                .expect("seed destroyed lease")
+                .expect("destroyed-history owner should claim its own row");
+            assert!(
+                store
+                    .transition_status(tenant_id, &claim, HandLeaseStatus::Destroyed)
+                    .await
+                    .expect("mark historical lease destroyed"),
+                "seeded historical lease should retain its fence"
+            );
+        }
+
+        let live_count = HAND_LEASE_SESSION_PAGE_SIZE + 7;
+        for index in 0..live_count {
+            let worker_id = format!("live-owner-{index:03}");
+            store
+                .claim_for_provisioning(provision_request(
+                    session_id, &worker_id, tenant_id, &policy,
+                ))
+                .await
+                .expect("seed live lease")
+                .expect("live owner should claim its own row");
+        }
+
+        let first = store
+            .list_live_session_page(tenant_id, session_id, None)
+            .await
+            .expect("load first live session page");
+        let replay = store
+            .list_live_session_page(tenant_id, session_id, None)
+            .await
+            .expect("replay first live session page");
+        assert_eq!(first, replay, "the same cursor must replay the same page");
+        assert_eq!(first.leases.len(), HAND_LEASE_SESSION_PAGE_SIZE);
+        let cursor = first
+            .next_cursor
+            .as_ref()
+            .expect("a saturated first page must expose continuation");
+        assert_eq!(
+            first
+                .leases
+                .last()
+                .map(|lease| (&lease.worker_id, &lease.provider)),
+            Some((&cursor.worker_id, &cursor.provider)),
+            "continuation must start after the last returned lease"
+        );
+
+        let second = store
+            .list_live_session_page(tenant_id, session_id, Some(cursor))
+            .await
+            .expect("load final live session page");
+        assert_eq!(second.leases.len(), 7);
+        assert_eq!(second.next_cursor, None);
+
+        let keys = first
+            .leases
+            .iter()
+            .chain(&second.leases)
+            .map(|lease| (lease.worker_id.as_str(), lease.provider.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(keys.len(), live_count);
+        assert!(
+            keys.windows(2).all(|pair| pair[0] < pair[1]),
+            "keyset pages must be strictly ordered without duplicates"
+        );
+        assert!(
+            keys.iter()
+                .all(|(worker_id, _)| worker_id.starts_with("live-owner-")),
+            "destroyed session history must not consume a live cleanup page"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_store_exact_owner_lookup_excludes_unrelated_session_history() {
+        // Pins: owner-scoped teardown observes only the exact compensation scope,
+        // even when the same session carries a large unrelated lease history.
+        let store = MemoryHandLeaseStore::shared();
+        let session_id = SessionId::new();
+        let tenant_id = TenantId::new();
+        let policy = lease_policy(Some(300), Some(3600), "cap-owner-lookup");
+        for index in 0..128 {
+            let worker_id = format!("unrelated-owner-{index}");
+            store
+                .claim_for_provisioning(provision_request(
+                    session_id, &worker_id, tenant_id, &policy,
+                ))
+                .await
+                .expect("seed unrelated lease")
+                .expect("unrelated owner should claim its own row");
+        }
+        let target = "execution_compensation:run-1:compensation-1";
+        for provider in ["local", "daytona", "e2b"] {
+            store
+                .claim_for_provisioning(provision_request_for_provider(
+                    session_id, target, tenant_id, &policy, provider,
+                ))
+                .await
+                .expect("seed target lease")
+                .expect("target owner should claim its own row");
+        }
+
+        let leases = store
+            .list_live_owner_candidates(tenant_id, session_id, target)
+            .await
+            .expect("load exact target owner");
+        assert_eq!(
+            leases.len(),
+            2,
+            "the release probe must not materialize every live replacement"
+        );
+        assert!(leases.iter().all(|lease| lease.worker_id == target));
     }
 
     #[tokio::test]

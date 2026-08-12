@@ -58,7 +58,7 @@ pub(super) fn estimate_plan(
 pub(super) fn estimate_remaining_plan(
     goal: &ExecutionGoalContract,
     plan: &ExecutionPlanDefinition,
-    projection: &ExecutionProjection,
+    projection: &ExecutionAmendmentProjection,
     catalog: &ExecutionCapabilityCatalog,
     config: &ExecutionConfig,
     report: &mut ExecutionValidationReport,
@@ -98,18 +98,6 @@ pub(super) fn estimate_remaining_plan(
         let CompletionCheckKind::AgentVerifier { max_turns, .. } = check.kind else {
             continue;
         };
-        let node_id = format!("@check/{}", check.id);
-        if projection.tasks.iter().any(|task| {
-            task.node_id == node_id
-                && matches!(
-                    task.status,
-                    ExecutionTaskStatus::Completed
-                        | ExecutionTaskStatus::Failed
-                        | ExecutionTaskStatus::Cancelled
-                )
-        }) {
-            continue;
-        }
         match verifier_estimate(config, max_turns)
             .and_then(|estimate| total.checked_add(estimate, "remaining verifier estimate"))
         {
@@ -189,6 +177,7 @@ pub(super) fn estimate_node(
         }),
         ExecutionOperation::Review { .. }
         | ExecutionOperation::WaitSignal { .. }
+        | ExecutionOperation::WaitUntil { .. }
         | ExecutionOperation::Output { .. } => Ok(ExecutionEstimate {
             tasks: 1,
             ..ExecutionEstimate::default()

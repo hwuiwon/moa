@@ -31,14 +31,15 @@ use moa_core::types::identifiers::{
 };
 use moa_hands::PostgresTenantSandboxPolicyStore;
 use moa_hands::core::leases::{
-    HandLeaseActivateRequest, HandLeasePolicy, HandLeaseProvisionRequest, HandLeaseRenewRequest,
-    HandLeaseStatus, HandLeaseStore, HandLeaseWorkspaceAttachment, LeaseHandle,
-    PostgresHandLeaseStore,
+    HAND_LEASE_SESSION_PAGE_SIZE, HandLeaseActivateRequest, HandLeasePolicy,
+    HandLeaseProvisionRequest, HandLeaseRenewRequest, HandLeaseStatus, HandLeaseStore,
+    HandLeaseWorkspaceAttachment, LeaseHandle, PostgresHandLeaseStore,
 };
 use moa_hands::core::reaper::{ExpiredHandLeaseClaims, PostgresExpiredHandLeaseClaims};
 use moa_hands::{TenantSandboxPolicyStore, deployment_sandbox_policy};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use uuid::Uuid;
 
 use super::{database_url, seed_session};
 
@@ -49,6 +50,251 @@ async fn pool() -> PgPool {
         .connect(&database_url())
         .await
         .expect("test Postgres should be reachable")
+}
+
+#[tokio::test]
+async fn exact_owner_lookup_uses_index_under_large_session_history_db() {
+    // Pins: compensation teardown must use the exact owner-key index rather
+    // than fetching and filtering every lease accumulated by the session.
+    let pool = pool().await;
+    let tenant_id = TenantId::new();
+    let session_id = SessionId::new();
+    seed_session(&pool, session_id, tenant_id).await;
+    sqlx::query(
+        "INSERT INTO moa.hand_leases (\
+             session_id, worker_id, tenant_id, provider, tier, handle, status, generation,\
+             provisioning_operation_id, provisioning_deadline_at, created_at, updated_at\
+         ) SELECT $1, 'unrelated-owner-' || series::TEXT, $2, 'local', 'local', NULL,\
+                  'destroyed', 1, gen_random_uuid(), now(), now(), now()\
+           FROM generate_series(1, 2000) AS series",
+    )
+    .bind(session_id)
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("seed unrelated lease history");
+    let target = format!(
+        "execution_compensation:{}:{}",
+        Uuid::now_v7(),
+        Uuid::now_v7()
+    );
+    sqlx::query(
+        "INSERT INTO moa.hand_leases (\
+             session_id, worker_id, tenant_id, provider, tier, handle, status, generation,\
+             provisioning_operation_id, provisioning_deadline_at, created_at, updated_at\
+         ) VALUES ($1, $2, $3, 'local', 'local', NULL, 'stale', 7,\
+                   gen_random_uuid(), now(), now(), now())",
+    )
+    .bind(session_id)
+    .bind(&target)
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("seed exact compensation lease");
+    sqlx::query("ANALYZE moa.hand_leases")
+        .execute(&pool)
+        .await
+        .expect("refresh hand lease planner statistics");
+
+    let leases = PostgresHandLeaseStore::new(pool.clone())
+        .list_live_owner_candidates(tenant_id, session_id, &target)
+        .await
+        .expect("load exact compensation owner");
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0].worker_id, target);
+    assert_eq!(leases[0].generation, 7);
+
+    sqlx::query(
+        "INSERT INTO moa.hand_leases (\
+             session_id, worker_id, tenant_id, provider, tier, handle, status, generation,\
+             provisioning_operation_id, provisioning_deadline_at, created_at, updated_at\
+         ) SELECT $1, $2, $3, provider, 'local', NULL, 'stale', 8,\
+                  gen_random_uuid(), now(), now(), now()\
+           FROM (VALUES ('daytona'), ('e2b')) AS replacements(provider)",
+    )
+    .bind(session_id)
+    .bind(&target)
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("seed multiple invalid live replacements");
+    let store = PostgresHandLeaseStore::new(pool.clone());
+    let bounded = store
+        .list_live_owner_candidates(tenant_id, session_id, &target)
+        .await
+        .expect("load bounded live candidates");
+    assert_eq!(
+        bounded.len(),
+        2,
+        "the release probe must never materialize more than two candidates"
+    );
+    assert!(
+        store
+            .has_live_owner(tenant_id, session_id, &target)
+            .await
+            .expect("check exact live replacement"),
+        "the exact owner replacement probe must observe live ownership"
+    );
+
+    let candidate_plan: serde_json::Value = sqlx::query_scalar(
+        "EXPLAIN (ANALYZE, FORMAT JSON)\
+         SELECT session_id, worker_id, provider FROM moa.hand_leases\
+          WHERE tenant_id = $1 AND session_id = $2 AND worker_id = $3\
+            AND status <> 'destroyed'\
+          ORDER BY provider LIMIT 2",
+    )
+    .bind(tenant_id)
+    .bind(session_id)
+    .bind(&target)
+    .fetch_one(&pool)
+    .await
+    .expect("explain exact owner lookup");
+    let candidate_plan = candidate_plan.to_string();
+    assert!(
+        candidate_plan.contains("hand_leases_tenant_live_owner_idx")
+            || candidate_plan.contains("idx_hand_leases_tenant_owner")
+            || candidate_plan.contains("hand_leases_pkey"),
+        "exact owner lookup must use an owner-key index: {candidate_plan}"
+    );
+    assert!(
+        !candidate_plan.contains("Seq Scan"),
+        "exact owner lookup must not scan unrelated session history: {candidate_plan}"
+    );
+    let exists_plan: serde_json::Value = sqlx::query_scalar(
+        "EXPLAIN (ANALYZE, FORMAT JSON)\
+         SELECT EXISTS (SELECT 1 FROM moa.hand_leases\
+          WHERE tenant_id = $1 AND session_id = $2 AND worker_id = $3\
+            AND status <> 'destroyed')",
+    )
+    .bind(tenant_id)
+    .bind(session_id)
+    .bind(&target)
+    .fetch_one(&pool)
+    .await
+    .expect("explain exact owner existence probe");
+    let exists_plan = exists_plan.to_string();
+    assert!(
+        exists_plan.contains("hand_leases_tenant_live_owner_idx")
+            || exists_plan.contains("idx_hand_leases_tenant_owner")
+            || exists_plan.contains("hand_leases_pkey"),
+        "exact replacement probe must use an owner-key index: {exists_plan}"
+    );
+    assert!(
+        !exists_plan.contains("Seq Scan"),
+        "exact replacement probe must not scan unrelated session history: {exists_plan}"
+    );
+
+    sqlx::query("DELETE FROM moa.hand_leases WHERE session_id = $1")
+        .bind(session_id)
+        .execute(&pool)
+        .await
+        .expect("delete lease history fixture");
+    sqlx::query("DELETE FROM public.session_agent_context WHERE session_id = $1")
+        .bind(session_id)
+        .execute(&pool)
+        .await
+        .expect("delete session agent fixture");
+    sqlx::query("DELETE FROM public.sessions WHERE id = $1")
+        .bind(session_id)
+        .execute(&pool)
+        .await
+        .expect("delete session fixture");
+}
+
+#[tokio::test]
+async fn live_session_paging_is_indexed_bounded_and_replayable_db() {
+    // Pins: terminal teardown pages every live hand through the partial owner
+    // index while destroyed history remains outside both the result and scan.
+    let pool = pool().await;
+    let tenant_id = TenantId::new();
+    let session_id = SessionId::new();
+    seed_session(&pool, session_id, tenant_id).await;
+    sqlx::query(
+        "INSERT INTO moa.hand_leases (\
+             session_id, worker_id, tenant_id, provider, tier, handle, status, generation,\
+             provisioning_operation_id, provisioning_deadline_at, created_at, updated_at\
+         ) SELECT $1, 'destroyed-owner-' || lpad(series::TEXT, 4, '0'), $2,\
+                  'local', 'local', NULL, 'destroyed', 1, gen_random_uuid(), now(), now(), now()\
+           FROM generate_series(1, 2000) AS series",
+    )
+    .bind(session_id)
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("seed destroyed lease history");
+    sqlx::query(
+        "INSERT INTO moa.hand_leases (\
+             session_id, worker_id, tenant_id, provider, tier, handle, status, generation,\
+             provisioning_operation_id, provisioning_deadline_at, created_at, updated_at\
+         ) SELECT $1, 'live-owner-' || lpad(series::TEXT, 4, '0'), $2,\
+                  'local', 'local', NULL, 'stale', 1, gen_random_uuid(), now(), now(), now()\
+           FROM generate_series(1, $3) AS series",
+    )
+    .bind(session_id)
+    .bind(tenant_id)
+    .bind(i64::try_from(HAND_LEASE_SESSION_PAGE_SIZE + 7).expect("page fixture fits i64"))
+    .execute(&pool)
+    .await
+    .expect("seed live lease pages");
+    sqlx::query("ANALYZE moa.hand_leases")
+        .execute(&pool)
+        .await
+        .expect("refresh hand lease planner statistics");
+
+    let store = PostgresHandLeaseStore::new(pool.clone());
+    let first = store
+        .list_live_session_page(tenant_id, session_id, None)
+        .await
+        .expect("load first live session page");
+    let replay = store
+        .list_live_session_page(tenant_id, session_id, None)
+        .await
+        .expect("replay first live session page");
+    assert_eq!(first, replay);
+    assert_eq!(first.leases.len(), HAND_LEASE_SESSION_PAGE_SIZE);
+    let second = store
+        .list_live_session_page(tenant_id, session_id, first.next_cursor.as_ref())
+        .await
+        .expect("load final live session page");
+    assert_eq!(second.leases.len(), 7);
+    assert_eq!(second.next_cursor, None);
+
+    let plan: serde_json::Value = sqlx::query_scalar(
+        "EXPLAIN (ANALYZE, FORMAT JSON)\
+         SELECT session_id, worker_id, provider FROM moa.hand_leases\
+          WHERE tenant_id = $1 AND session_id = $2 AND status <> 'destroyed'\
+          ORDER BY worker_id, provider LIMIT 65",
+    )
+    .bind(tenant_id)
+    .bind(session_id)
+    .fetch_one(&pool)
+    .await
+    .expect("explain bounded live-session lookup");
+    let plan = plan.to_string();
+    assert!(
+        plan.contains("hand_leases_tenant_live_owner_idx"),
+        "live session page must use the partial owner index: {plan}"
+    );
+    assert!(
+        !plan.contains("Seq Scan"),
+        "live session page must not scan destroyed history: {plan}"
+    );
+
+    sqlx::query("DELETE FROM moa.hand_leases WHERE session_id = $1")
+        .bind(session_id)
+        .execute(&pool)
+        .await
+        .expect("delete lease paging fixture");
+    sqlx::query("DELETE FROM public.session_agent_context WHERE session_id = $1")
+        .bind(session_id)
+        .execute(&pool)
+        .await
+        .expect("delete session agent fixture");
+    sqlx::query("DELETE FROM public.sessions WHERE id = $1")
+        .bind(session_id)
+        .execute(&pool)
+        .await
+        .expect("delete session fixture");
 }
 
 async fn seed_workspace(

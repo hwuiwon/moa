@@ -94,6 +94,18 @@ impl PostgresWorkspaceRepository {
         )?;
 
         let mut conn = self.begin(binding.tenant_id).await?;
+        if !checkpoint_capacity_matches(
+            conn.as_mut(),
+            binding,
+            operation_id,
+            operation_kind,
+            publication_fields.logical_bytes,
+        )
+        .await?
+        {
+            conn.rollback().await?;
+            return Ok(false);
+        }
         let checkpoint_affected = sqlx::query(
             r#"
             UPDATE moa.sandbox_workspace_checkpoints AS checkpoint
@@ -182,6 +194,38 @@ impl PostgresWorkspaceRepository {
             conn.rollback().await?;
             return Ok(false);
         }
+        if post_commit_state == WorkspacePostCommitState::ComputeDestroyed {
+            let released = sqlx::query(
+                r#"
+                UPDATE moa.sandbox_capacity_reservations
+                SET reservation_state = 'released', updated_at = now()
+                WHERE tenant_id = $1 AND workspace_id = $2
+                  AND provider_account_id = $3 AND provider_account_generation = $4
+                  AND hand_provisioning_operation_id = $5
+                  AND hand_lease_generation = $6
+                  AND expected_writer_epoch = $7
+                  AND expected_instance_generation = $8
+                  AND resource_dimension = 'active_hands'
+                  AND reservation_state = 'committed'
+                "#,
+            )
+            .bind(binding.tenant_id)
+            .bind(binding.workspace_id)
+            .bind(binding.provider_account_id)
+            .bind(fence.provider_account_generation)
+            .bind(lease.provisioning_operation_id)
+            .bind(lease.generation)
+            .bind(fence.writer_epoch)
+            .bind(fence.instance_generation)
+            .execute(conn.as_mut())
+            .await
+            .map_err(map_sqlx_error)?
+            .rows_affected();
+            if released != 1 {
+                conn.rollback().await?;
+                return Ok(false);
+            }
+        }
 
         let workspace_state = match post_commit_state {
             WorkspacePostCommitState::AttachmentRetained => "active",
@@ -222,6 +266,18 @@ impl PostgresWorkspaceRepository {
         .rows_affected();
         if workspace_affected != 1 {
             conn.rollback().await?;
+            if !self
+                .abandon_checkpoint_after_cas_loss(
+                    binding,
+                    operation_id,
+                    publication.revision.checkpoint_id,
+                )
+                .await?
+            {
+                return Err(MoaError::StorageError(
+                    "checkpoint CAS loss could not release its exact capacity owner".to_string(),
+                ));
+            }
             return Ok(false);
         }
 
@@ -275,6 +331,7 @@ impl PostgresWorkspaceRepository {
               AND reservation.provider_account_generation = operation.provider_account_generation
               AND reservation.expected_writer_epoch = operation.expected_writer_epoch
               AND reservation.expected_instance_generation = operation.expected_instance_generation
+              AND reservation.resource_dimension IN ('checkpoints', 'logical_bytes')
               AND reservation.reservation_state IN ('pending', 'reconciling')
             "#,
         )
@@ -284,6 +341,92 @@ impl PostgresWorkspaceRepository {
         .await
         .map_err(map_sqlx_error)?;
 
+        conn.commit().await?;
+        Ok(true)
+    }
+
+    async fn abandon_checkpoint_after_cas_loss(
+        &self,
+        binding: &WorkspaceBinding,
+        operation_id: WorkspaceOperationId,
+        checkpoint_id: WorkspaceCheckpointId,
+    ) -> Result<bool> {
+        let fence = WorkspaceBindingFence::try_from(binding)?;
+        let mut conn = self.begin(binding.tenant_id).await?;
+        let checkpoint_affected = sqlx::query(
+            r#"
+            UPDATE moa.sandbox_workspace_checkpoints
+            SET lifecycle_state = 'failed'
+            WHERE tenant_id = $1 AND workspace_id = $2
+              AND checkpoint_id = $3 AND operation_id = $4
+              AND source_writer_epoch = $5 AND source_instance_generation = $6
+              AND source_checkpoint_generation = $7
+              AND lifecycle_state = 'creating'
+              AND object_reference IS NULL AND manifest_digest IS NULL
+              AND logical_bytes IS NULL AND verified_at IS NULL
+            "#,
+        )
+        .bind(binding.tenant_id)
+        .bind(binding.workspace_id)
+        .bind(checkpoint_id)
+        .bind(operation_id)
+        .bind(fence.writer_epoch)
+        .bind(fence.instance_generation)
+        .bind(fence.checkpoint_generation)
+        .execute(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+        if checkpoint_affected != 1 {
+            conn.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query(
+            r#"
+            UPDATE moa.sandbox_workspace_operations
+            SET outcome_class = 'unknown', updated_at = now()
+            WHERE tenant_id = $1 AND workspace_id = $2 AND operation_id = $3
+              AND provider_account_id = $4 AND provider_account_generation = $5
+              AND expected_writer_epoch = $6 AND expected_instance_generation = $7
+              AND outcome_class IN ('not_sent', 'unknown')
+            "#,
+        )
+        .bind(binding.tenant_id)
+        .bind(binding.workspace_id)
+        .bind(operation_id)
+        .bind(binding.provider_account_id)
+        .bind(fence.provider_account_generation)
+        .bind(fence.writer_epoch)
+        .bind(fence.instance_generation)
+        .execute(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        let released = sqlx::query(
+            r#"
+            UPDATE moa.sandbox_capacity_reservations
+            SET reservation_state = 'released', updated_at = now()
+            WHERE tenant_id = $1 AND workspace_id = $2 AND operation_id = $3
+              AND provider_account_id = $4 AND provider_account_generation = $5
+              AND expected_writer_epoch = $6 AND expected_instance_generation = $7
+              AND resource_dimension IN ('checkpoints', 'logical_bytes')
+              AND reservation_state IN ('pending', 'reconciling')
+            "#,
+        )
+        .bind(binding.tenant_id)
+        .bind(binding.workspace_id)
+        .bind(operation_id)
+        .bind(binding.provider_account_id)
+        .bind(fence.provider_account_generation)
+        .bind(fence.writer_epoch)
+        .bind(fence.instance_generation)
+        .execute(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+        if released == 0 {
+            conn.rollback().await?;
+            return Ok(false);
+        }
         conn.commit().await?;
         Ok(true)
     }
@@ -449,6 +592,69 @@ impl PostgresWorkspaceRepository {
         conn.commit().await?;
         Ok(checkpoint)
     }
+}
+
+async fn checkpoint_capacity_matches(
+    conn: &mut PgConnection,
+    binding: &WorkspaceBinding,
+    operation_id: WorkspaceOperationId,
+    operation_kind: WorkspaceOperationKind,
+    logical_bytes: i64,
+) -> Result<bool> {
+    sqlx::query_scalar(
+        r#"
+        SELECT
+            count(*) FILTER (
+                WHERE reservation.resource_dimension = 'checkpoints'
+                  AND reservation.quantity = 1
+            ) = 1
+            AND count(*) FILTER (
+                WHERE reservation.resource_dimension = 'logical_bytes'
+                  AND reservation.quantity = $8
+            ) = CASE WHEN $8 = 0 THEN 0 ELSE 1 END
+            AND count(*) = CASE WHEN $8 = 0 THEN 1 ELSE 2 END
+        FROM moa.sandbox_capacity_reservations AS reservation
+        JOIN moa.sandbox_workspace_operations AS operation
+          ON operation.tenant_id = reservation.tenant_id
+         AND operation.workspace_id = reservation.workspace_id
+         AND operation.operation_id = reservation.operation_id
+        WHERE reservation.tenant_id = $1
+          AND reservation.workspace_id = $2
+          AND reservation.operation_id = $3
+          AND reservation.provider_account_id = $4
+          AND reservation.provider_account_generation = $5
+          AND reservation.expected_writer_epoch = $6
+          AND reservation.expected_instance_generation = $7
+          AND reservation.resource_dimension IN ('checkpoints', 'logical_bytes')
+          AND reservation.reservation_state IN ('pending', 'committed', 'reconciling')
+          AND operation.operation_kind = $9
+          AND operation.outcome_class IN ('not_sent', 'unknown')
+        "#,
+    )
+    .bind(binding.tenant_id)
+    .bind(binding.workspace_id)
+    .bind(operation_id)
+    .bind(binding.provider_account_id)
+    .bind(
+        i64::try_from(binding.provider_account_generation).map_err(|_| {
+            MoaError::ValidationError(
+                "workspace provider-account generation overflows Postgres bigint".to_string(),
+            )
+        })?,
+    )
+    .bind(i64::try_from(binding.writer_epoch).map_err(|_| {
+        MoaError::ValidationError("workspace writer epoch overflows Postgres bigint".to_string())
+    })?)
+    .bind(i64::try_from(binding.instance_generation).map_err(|_| {
+        MoaError::ValidationError(
+            "workspace instance generation overflows Postgres bigint".to_string(),
+        )
+    })?)
+    .bind(logical_bytes)
+    .bind(operation_kind.as_str())
+    .fetch_one(conn)
+    .await
+    .map_err(map_sqlx_error)
 }
 const CHECKPOINT_COLUMNS: &str = "checkpoint_id, tenant_id, workspace_id, generation, \
     parent_checkpoint_id, source_writer_epoch, source_instance_generation, operation_id, \

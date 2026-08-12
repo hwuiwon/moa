@@ -1,11 +1,15 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    str::FromStr,
+};
 
 use chrono::{TimeZone, Utc};
 use moa_artifacts::execution_plan::{
     CapabilityReference, CompletionCheck, CompletionCheckKind, ExecutionBudgetLimit,
     ExecutionCancelPolicy, ExecutionCondition, ExecutionGoalContract, ExecutionNode,
     ExecutionOperation, ExecutionPlanDefinition, ExecutionReference, ExecutionRequirement,
-    ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, MapTask, RetryPolicy,
+    ExecutionTaskOutcome, ExecutionTaskResult, ExecutionTemporalTarget, ExecutionUsage,
+    ExecutionWaitExpiryAction, ExecutionWaitPolicy, MapTask, RetryPolicy,
 };
 use moa_config::ExecutionConfig;
 use moa_core::types::{
@@ -20,11 +24,15 @@ use moa_execution::{
     },
     compiler::{CanonicalExecutionPlan, ExecutionValidationReport},
     completion::{CompletionEvaluationRequest, CompletionStatus, evaluate_completion},
-    interpreter::{ScheduleRequest, schedule as schedule_outcome},
+    interpreter::{
+        ReduceMaterializationPageInput, ScheduleRequest, materialize_node_page,
+        resolve_temporal_target, schedule as schedule_outcome,
+    },
     state::{
-        ExecutionNodeStatus, ExecutionProjection, ExecutionTaskId, ExecutionTaskProjection,
-        ExecutionTaskStatus, LogicalTaskKind, ScheduleDecision, TerminalProjection,
-        input_resume_counters, retry_dispatch_counters, supersede_waiting_replan,
+        ExecutionNodeStatus, ExecutionProjection, ExecutionRunStatus, ExecutionTaskId,
+        ExecutionTaskProjection, ExecutionTaskStatus, LogicalTaskKind, ScheduleDecision,
+        TerminalProjection, WaitSettlement, WaitingReason, input_resume_counters,
+        retry_dispatch_counters, run_status_after_task_outcome, supersede_waiting_replan,
         task_status_from_outcome, validate_outcome_generation,
     },
 };
@@ -157,6 +165,196 @@ fn scheduler_materializes_every_ready_map_item_with_stable_typed_keys() {
             }
         );
     }
+}
+
+#[test]
+fn controller_materializes_large_map_in_non_overlapping_cursor_pages() {
+    // Pins: controller-facing materialization selects one named node and returns at most
+    // 1,000 deterministic tasks without constructing the complete large-map task vector.
+    let run_uid = Uuid::from_u128(12);
+    let items = (0_u64..2_500).map(|item| json!(item)).collect::<Vec<_>>();
+    let plan = canonical(vec![node(
+        "inspect",
+        &[],
+        ExecutionOperation::Map {
+            items: Value::Array(items),
+            item_key: "".to_string(),
+            max_items: 2_500,
+            item_output_schema: json!({ "type": "object" }),
+            task: MapTask::Capability {
+                reference: capability(),
+            },
+        },
+    )]);
+    let request = request(run_uid, plan, BTreeMap::new(), Vec::new());
+    let first = materialize_node_page(&request, "inspect", &BTreeMap::new(), 0, 1_000, None)
+        .expect("first map page");
+    let second = materialize_node_page(
+        &request,
+        "inspect",
+        &BTreeMap::new(),
+        first.next_cursor,
+        1_000,
+        None,
+    )
+    .expect("second map page");
+    let third = materialize_node_page(
+        &request,
+        "inspect",
+        &BTreeMap::new(),
+        second.next_cursor,
+        1_000,
+        None,
+    )
+    .expect("third map page");
+    assert_eq!(
+        (first.tasks.len(), second.tasks.len(), third.tasks.len()),
+        (1_000, 1_000, 500)
+    );
+    assert_eq!(
+        (first.next_cursor, second.next_cursor, third.next_cursor),
+        (1_000, 2_000, 2_500)
+    );
+    assert!(!first.source_exhausted);
+    assert!(!second.source_exhausted);
+    assert!(third.source_exhausted);
+    let ids = first
+        .tasks
+        .iter()
+        .chain(&second.tasks)
+        .chain(&third.tasks)
+        .map(|task| task.task_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(ids.len(), 2_500);
+}
+
+#[test]
+fn controller_pages_more_than_twenty_five_hundred_reduce_batches_across_rounds() {
+    // Pins: a persisted round/batch cursor materializes every reducer batch exactly once across
+    // 1,000-task activation bounds, then starts the next round from its own zero-based cursor.
+    let run_uid = Uuid::from_u128(120);
+    let items = (0_u64..5_001).map(|item| json!(item)).collect::<Vec<_>>();
+    let mut reduce = node(
+        "reduce",
+        &[],
+        ExecutionOperation::Reduce {
+            items: Value::Array(items),
+            max_items: 5_001,
+            reducer: moa_artifacts::execution_plan::ExecutionReducer::Capability {
+                reference: capability(),
+            },
+            batch_size: 2,
+        },
+    );
+    reduce.output_schema = json!({});
+    let request = request(
+        run_uid,
+        canonical(vec![reduce]),
+        BTreeMap::new(),
+        Vec::new(),
+    );
+
+    let first = materialize_node_page(
+        &request,
+        "reduce",
+        &BTreeMap::new(),
+        0,
+        1_000,
+        Some(&ReduceMaterializationPageInput {
+            round: 1,
+            batch_cursor: 0,
+            round_input_count: None,
+            page_inputs: Vec::new(),
+        }),
+    )
+    .expect("first reduce page");
+    let second = materialize_node_page(
+        &request,
+        "reduce",
+        &BTreeMap::new(),
+        1_000,
+        1_000,
+        Some(&ReduceMaterializationPageInput {
+            round: 1,
+            batch_cursor: 1_000,
+            round_input_count: Some(5_001),
+            page_inputs: Vec::new(),
+        }),
+    )
+    .expect("second reduce page");
+    let third = materialize_node_page(
+        &request,
+        "reduce",
+        &BTreeMap::new(),
+        2_000,
+        1_000,
+        Some(&ReduceMaterializationPageInput {
+            round: 1,
+            batch_cursor: 2_000,
+            round_input_count: Some(5_001),
+            page_inputs: Vec::new(),
+        }),
+    )
+    .expect("final reduce page");
+    assert_eq!(
+        (first.tasks.len(), second.tasks.len(), third.tasks.len()),
+        (1_000, 1_000, 501)
+    );
+    assert_eq!(
+        (first.next_cursor, second.next_cursor, third.next_cursor),
+        (1_000, 2_000, 2_501)
+    );
+    assert_eq!(first.tasks[0].item_key, "r1:b0");
+    assert_eq!(third.tasks[500].item_key, "r1:b2500");
+    assert!(!first.source_exhausted);
+    assert!(!second.source_exhausted);
+    assert!(third.source_exhausted);
+    assert_eq!(
+        first.reduce_cursor.expect("concrete first-round fence"),
+        moa_execution::ReduceMaterializationCursor {
+            round: 1,
+            batch_cursor: 0,
+            round_input_count: 5_001,
+        }
+    );
+
+    let prior_round_outputs = (0_u64..2_501).map(|value| json!(value)).collect::<Vec<_>>();
+    let round_two_first = materialize_node_page(
+        &request,
+        "reduce",
+        &BTreeMap::new(),
+        2_501,
+        1_000,
+        Some(&ReduceMaterializationPageInput {
+            round: 2,
+            batch_cursor: 0,
+            round_input_count: Some(2_501),
+            page_inputs: prior_round_outputs[..2_000].to_vec(),
+        }),
+    )
+    .expect("first second-round page");
+    let round_two_second = materialize_node_page(
+        &request,
+        "reduce",
+        &BTreeMap::new(),
+        3_501,
+        1_000,
+        Some(&ReduceMaterializationPageInput {
+            round: 2,
+            batch_cursor: 1_000,
+            round_input_count: Some(2_501),
+            page_inputs: prior_round_outputs[2_000..].to_vec(),
+        }),
+    )
+    .expect("final second-round page");
+    assert_eq!(
+        (round_two_first.tasks.len(), round_two_second.tasks.len()),
+        (1_000, 251)
+    );
+    assert_eq!(round_two_first.tasks[0].item_key, "r2:b0");
+    assert_eq!(round_two_second.tasks[250].item_key, "r2:b1250");
+    assert!(!round_two_first.source_exhausted);
+    assert!(round_two_second.source_exhausted);
 }
 
 #[test]
@@ -654,6 +852,189 @@ fn scheduler_returns_no_progress_for_unbacked_nonterminal_state() {
 }
 
 #[test]
+fn scheduler_parks_wait_until_then_settles_exactly_at_the_absolute_target() {
+    // Pins: WaitUntil consumes no executable task slot while early and settles at `at`, not after it.
+    let run_uid = Uuid::from_u128(122);
+    let wake = ExecutionTemporalTarget::At {
+        at: Utc
+            .with_ymd_and_hms(2026, 7, 13, 1, 0, 0)
+            .single()
+            .expect("wake time"),
+    };
+    let plan = canonical(vec![node(
+        "timer",
+        &[],
+        ExecutionOperation::WaitUntil {
+            wake: wake.clone(),
+            result: json!({ "ready": true }),
+        },
+    )]);
+    let statuses = BTreeMap::from([("timer".to_string(), ExecutionNodeStatus::Waiting)]);
+    let task = ExecutionTaskProjection {
+        task_id: ExecutionTaskId::derive(run_uid, "timer", "").expect("timer task id"),
+        node_id: "timer".to_string(),
+        item_key: String::new(),
+        status: ExecutionTaskStatus::WaitingTimer,
+        attempt: 1,
+        generation: 1,
+        input: json!({}),
+        outcome: None,
+    };
+
+    let early = schedule(request(
+        run_uid,
+        plan.clone(),
+        statuses.clone(),
+        vec![task.clone()],
+    ))
+    .expect("timer should park before its target");
+    assert_eq!(
+        early,
+        ScheduleDecision::Waiting(vec![WaitingReason::Timer {
+            task_id: task.task_id,
+            wake: wake.clone(),
+        }])
+    );
+
+    let mut due_request = request(run_uid, plan, statuses, vec![task.clone()]);
+    due_request.now = Utc
+        .with_ymd_and_hms(2026, 7, 13, 1, 0, 0)
+        .single()
+        .expect("due time");
+    let due = schedule(due_request).expect("timer should settle at its target");
+    assert_eq!(
+        due,
+        ScheduleDecision::SettleWait(WaitSettlement::TimerElapsed {
+            task_id: task.task_id,
+            output: json!({ "ready": true }),
+        })
+    );
+}
+
+#[test]
+fn scheduler_selects_input_wait_expiry_and_resolves_relative_targets_at_wait_entry() {
+    // Pins: storage-only waits deterministically settle, while relative timers anchor on entry.
+    let run_uid = Uuid::from_u128(123);
+    let plan = canonical(vec![node(
+        "lookup",
+        &[],
+        ExecutionOperation::Capability {
+            reference: capability(),
+        },
+    )]);
+    let statuses = BTreeMap::from([("lookup".to_string(), ExecutionNodeStatus::Waiting)]);
+    let task = ExecutionTaskProjection {
+        task_id: ExecutionTaskId::derive(run_uid, "lookup", "").expect("input task id"),
+        node_id: "lookup".to_string(),
+        item_key: String::new(),
+        status: ExecutionTaskStatus::WaitingInput,
+        attempt: 1,
+        generation: 1,
+        input: json!({}),
+        outcome: Some(ExecutionTaskOutcome {
+            schema_version: 1,
+            usage: ExecutionUsage {
+                cost_microusd: 0,
+                tokens: 0,
+                tool_calls: 0,
+                retrieved_bytes: 0,
+            },
+            result: ExecutionTaskResult::NeedsInput {
+                question: "Which order?".to_string(),
+                audience: moa_artifacts::execution_plan::InputAudience::User,
+            },
+        }),
+    };
+    let mut expiry_request = request(run_uid, plan, statuses, vec![task.clone()]);
+    expiry_request.now = Utc
+        .with_ymd_and_hms(2026, 7, 13, 12, 0, 0)
+        .single()
+        .expect("expiry time");
+    assert_eq!(
+        schedule(expiry_request).expect("input expiry should settle"),
+        ScheduleDecision::SettleWait(WaitSettlement::WaitExpired {
+            task_id: task.task_id,
+            action: ExecutionWaitExpiryAction::FailTask,
+        })
+    );
+
+    let entered_at = Utc
+        .with_ymd_and_hms(2026, 7, 13, 2, 0, 0)
+        .single()
+        .expect("wait entry");
+    let deadline_at = Utc
+        .with_ymd_and_hms(2026, 7, 13, 4, 0, 0)
+        .single()
+        .expect("run deadline");
+    assert_eq!(
+        resolve_temporal_target(
+            &ExecutionTemporalTarget::After {
+                delay_seconds: 3_600
+            },
+            entered_at,
+            deadline_at,
+        )
+        .expect("relative target should fit"),
+        Utc.with_ymd_and_hms(2026, 7, 13, 3, 0, 0)
+            .single()
+            .expect("resolved due time")
+    );
+    assert!(
+        resolve_temporal_target(
+            &ExecutionTemporalTarget::After {
+                delay_seconds: 7_200
+            },
+            entered_at,
+            deadline_at,
+        )
+        .is_err(),
+        "a relative target at the deadline must fail closed"
+    );
+}
+
+#[test]
+fn long_horizon_statuses_use_canonical_snake_case_labels() {
+    // Pins: persistence and wire projections use one closed label for each new lifecycle state.
+    for (status, label) in [
+        (ExecutionRunStatus::WaitingSignal, "waiting_signal"),
+        (ExecutionRunStatus::WaitingTimer, "waiting_timer"),
+        (ExecutionRunStatus::WaitingExternal, "waiting_external"),
+        (ExecutionRunStatus::PauseRequested, "pause_requested"),
+        (ExecutionRunStatus::Pausing, "pausing"),
+        (ExecutionRunStatus::Paused, "paused"),
+    ] {
+        assert_eq!(status.as_str(), label);
+        assert_eq!(
+            ExecutionRunStatus::from_str(label).expect("run label"),
+            status
+        );
+        assert_eq!(
+            serde_json::to_value(status).expect("serialize run status"),
+            label
+        );
+    }
+    for (status, label) in [
+        (ExecutionTaskStatus::Ready, "ready"),
+        (ExecutionTaskStatus::Dispatching, "dispatching"),
+        (ExecutionTaskStatus::WaitingReview, "waiting_review"),
+        (ExecutionTaskStatus::WaitingSignal, "waiting_signal"),
+        (ExecutionTaskStatus::WaitingTimer, "waiting_timer"),
+        (ExecutionTaskStatus::WaitingExternal, "waiting_external"),
+        (ExecutionTaskStatus::UnknownOutcome, "unknown_outcome"),
+    ] {
+        assert_eq!(status.as_str(), label);
+        assert_eq!(
+            ExecutionTaskStatus::from_str(label).expect("task label"),
+            status
+        );
+        assert_eq!(
+            serde_json::to_value(status).expect("serialize task status"),
+            label
+        );
+    }
+}
+
+#[test]
 fn task_transition_helpers_pin_retry_resume_generation_and_replan_supersession() {
     // Pins: durable redispatch counters and WaitingReplan cancellation follow the exact state machine.
     assert_eq!(
@@ -737,6 +1118,31 @@ fn task_transition_helpers_pin_retry_resume_generation_and_replan_supersession()
         ),
         ExecutionTaskStatus::Cancelled
     );
+    assert_eq!(
+        task_status_from_outcome(
+            &outcome(ExecutionTaskResult::UnknownOutcome {
+                message: "provider outcome is ambiguous".to_string(),
+            }),
+            false,
+        ),
+        ExecutionTaskStatus::UnknownOutcome
+    );
+    let completed = outcome(ExecutionTaskResult::Completed {
+        output: json!({}),
+        citations: vec![],
+    });
+    for waiting in [
+        ExecutionRunStatus::WaitingInput,
+        ExecutionRunStatus::WaitingReview,
+        ExecutionRunStatus::WaitingSignal,
+        ExecutionRunStatus::WaitingTimer,
+        ExecutionRunStatus::WaitingExternal,
+    ] {
+        assert_eq!(
+            run_status_after_task_outcome(waiting, &completed),
+            ExecutionRunStatus::Running
+        );
+    }
 
     let run_uid = Uuid::from_u128(19);
     let waiting = ExecutionTaskProjection {
@@ -895,6 +1301,15 @@ fn canonical(nodes: Vec<ExecutionNode>) -> CanonicalExecutionPlan {
     CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
+            input_wait_policy: ExecutionWaitPolicy {
+                expiry: ExecutionTemporalTarget::At {
+                    at: Utc
+                        .with_ymd_and_hms(2026, 7, 13, 12, 0, 0)
+                        .single()
+                        .expect("input wait expiry"),
+                },
+                on_expiry: ExecutionWaitExpiryAction::FailTask,
+            },
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
             nodes,
@@ -995,7 +1410,9 @@ fn catalog() -> ExecutionCapabilityCatalog {
         risk_level: RiskLevel::Low,
         default_effect: ActionPolicyEffect::Allow,
         idempotency_class: IdempotencyClass::Idempotent,
+        async_mode: moa_core::types::tools::ToolAsyncMode::SynchronousOnly,
         execution_class: ExecutionClass::Data,
+        requires_sandbox: false,
         policy_context: CapabilityPolicyContext::registered(source.clone()),
         source,
         estimate: ExecutionEstimate {

@@ -18,6 +18,10 @@ mod authz_admin_db;
 mod authz_challenges_db;
 #[path = "orchestrator_db/contacts_db.rs"]
 mod contacts_db;
+#[path = "orchestrator_db/execution_dispatch_reconciliation_db.rs"]
+mod execution_dispatch_reconciliation_db;
+#[path = "orchestrator_db/execution_schedule_db.rs"]
+mod execution_schedule_db;
 #[path = "orchestrator_db/execution_service_db.rs"]
 mod execution_service_db;
 #[path = "orchestrator_db/fga_mock.rs"]

@@ -1,71 +1,7 @@
-//! Waiting and terminal scheduler decisions.
+//! Terminal completion and verifier scheduler decisions.
 
+use super::temporal_wait::waiting_reasons;
 use super::*;
-
-pub(super) fn waiting_reasons(
-    request: &ScheduleRequest,
-    dependency_waits: BTreeSet<String>,
-) -> Vec<WaitingReason> {
-    let by_id = request
-        .plan
-        .definition
-        .nodes
-        .iter()
-        .map(|node| (node.id.as_str(), node))
-        .collect::<BTreeMap<_, _>>();
-    let mut waiting = Vec::new();
-    if request.projection.tasks.iter().any(|task| {
-        matches!(
-            task.status,
-            ExecutionTaskStatus::Pending
-                | ExecutionTaskStatus::Reserved
-                | ExecutionTaskStatus::Running
-                | ExecutionTaskStatus::WaitingReplan
-        )
-    }) {
-        waiting.push(WaitingReason::RunningTasks);
-    }
-    for task in &request.projection.tasks {
-        if task.status == ExecutionTaskStatus::WaitingInput
-            && let Some(outcome) = &task.outcome
-            && let ExecutionTaskResult::NeedsInput { question, audience } = &outcome.result
-        {
-            waiting.push(WaitingReason::Input {
-                task_id: task.task_id,
-                audience: audience.clone(),
-                question: question.clone(),
-            });
-        }
-        if request.projection.node_statuses.get(&task.node_id)
-            == Some(&ExecutionNodeStatus::Waiting)
-            && let Some(node) = by_id.get(task.node_id.as_str())
-        {
-            match &node.operation {
-                ExecutionOperation::Review { prompt } => waiting.push(WaitingReason::Review {
-                    task_id: task.task_id,
-                    prompt: prompt.clone(),
-                }),
-                ExecutionOperation::WaitSignal { signal_name } => {
-                    waiting.push(WaitingReason::Signal {
-                        task_id: task.task_id,
-                        signal_name: signal_name.clone(),
-                    });
-                }
-                ExecutionOperation::Capability { .. }
-                | ExecutionOperation::Agent { .. }
-                | ExecutionOperation::Map { .. }
-                | ExecutionOperation::Reduce { .. }
-                | ExecutionOperation::Output { .. } => {}
-            }
-        }
-    }
-    if !dependency_waits.is_empty() {
-        waiting.push(WaitingReason::Dependencies {
-            node_ids: dependency_waits.into_iter().collect(),
-        });
-    }
-    waiting
-}
 
 pub(super) fn schedule_verifiers_or_complete(request: ScheduleRequest) -> Result<ScheduleDecision> {
     let terminal = terminal_output(&request.plan, &request.projection);
@@ -143,6 +79,7 @@ pub(super) fn schedule_verifiers_or_complete(request: ScheduleRequest) -> Result
                 task.status,
                 ExecutionTaskStatus::Completed
                     | ExecutionTaskStatus::Failed
+                    | ExecutionTaskStatus::UnknownOutcome
                     | ExecutionTaskStatus::Cancelled
             )
     }) {
@@ -369,6 +306,7 @@ pub(super) fn operation_capability(operation: &ExecutionOperation) -> Option<Cap
         | ExecutionOperation::Reduce { .. }
         | ExecutionOperation::Review { .. }
         | ExecutionOperation::WaitSignal { .. }
+        | ExecutionOperation::WaitUntil { .. }
         | ExecutionOperation::Output { .. } => None,
     }
 }
@@ -401,6 +339,7 @@ pub(super) const fn is_terminal_task_status(status: ExecutionTaskStatus) -> bool
         ExecutionTaskStatus::Completed
             | ExecutionTaskStatus::Skipped
             | ExecutionTaskStatus::Failed
+            | ExecutionTaskStatus::UnknownOutcome
             | ExecutionTaskStatus::Cancelled
     )
 }

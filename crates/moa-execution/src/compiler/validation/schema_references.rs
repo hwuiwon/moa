@@ -114,6 +114,13 @@ pub(in crate::compiler) fn validate_declared_reference_paths(
                 &output_schemas,
                 report,
             ),
+            ExecutionOperation::WaitUntil { result, .. } => validate_dynamic_reference_paths(
+                &format!("{root}.operation.result"),
+                result,
+                plan,
+                &output_schemas,
+                report,
+            ),
             ExecutionOperation::Capability { .. }
             | ExecutionOperation::Agent { .. }
             | ExecutionOperation::Review { .. }

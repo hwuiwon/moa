@@ -361,14 +361,20 @@ fences provider compute. Siblings never share a writable workspace or hand:
   only when the checkpoint commit barrier published them.
 
 This Worker model remains for conversational delegation in `act`; Worker is not
-an execution-plan node or bulk DAG primitive. A sandbox-using `ExecutionTask`
-gets the same isolation and generation-fenced recovery under its task identity.
-Dynamic map execution materializes every stable logical item deterministically
-after atomic budget reservation,
-but only the positive `execution.max_in_flight_tasks` window owns live attached
-task calls and therefore live task sandboxes. Pending rows remain storage-only;
-provider pacing and governed hand capacity apply independent limits within the
-run-owned window.
+an execution-plan node or bulk DAG primitive. A sandbox-using bounded
+`ExecutionTaskAttempt` gets the same isolation under its persisted logical task
+and generation. Dynamic map execution materializes stable logical items
+deterministically, but only attempts holding tenant/fleet active-attempt and
+`active_hands` reservations may own live compute. Pending, input/review/signal,
+timer, external-job, and paused rows remain storage-only.
+
+Every attempt yield is a compute-release boundary. If the attempt may need its
+filesystem again, it quiesces the writer, publishes and verifies the portable
+checkpoint, releases the exact hand/capacity generation, and destroys provider
+compute before recording the wait or returning. Resume provisions fresh
+compute, restores the committed checkpoint, and reacquires current policy and
+capacity. A parked task retaining an active hand is a correctness and cost
+incident, not an optimization choice.
 
 Before the LLM call for a turn, the context pipeline selects relevant skills.
 The selected trusted sandbox file references are copied into `ToolCallRequest`.
@@ -526,6 +532,7 @@ connection lifecycle, credential vault, management API, and rollout contract.
 - Use parsed command normalization for shell action-policy patterns.
 - Keep generated-code compute ephemeral; persist only the filesystem-only
   mutable root through the governed `SandboxWorkspace` commit barrier.
-- Destroy hands when their worker/execution-task scope
-  stops so stale credentials and processes do not linger; retain or delete the
+- Destroy hands when their worker scope stops or an execution attempt reaches
+  any wait, retry, pause, external-job, compensation, or terminal yield so
+  stale credentials and processes do not linger; retain or delete the
   workspace only through its independent policy and purge lifecycle.

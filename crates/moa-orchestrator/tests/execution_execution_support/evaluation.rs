@@ -1,8 +1,9 @@
 //! Shared redacted execution-eval snapshot collection over production-owned state.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
+use moa_artifacts::execution_plan::ExecutionOperation;
 use moa_core::events::Event;
 use moa_core::types::events_stream::EventRange;
 use moa_eval::execution::{
@@ -10,8 +11,13 @@ use moa_eval::execution::{
     ExecutionSessionEventSummary,
 };
 use moa_execution::{
+    budget::BudgetLedger,
     repository::{
-        ExecutionRepository, ExecutionScope, ExecutionTaskCursor, ExecutionTaskPageRequest,
+        ExecutionRepository, ExecutionRunRecord, ExecutionSchedulingSnapshot, ExecutionScope,
+        ExecutionTaskCursor, ExecutionTaskPageRequest, ExecutionTaskRecord,
+    },
+    state::{
+        ExecutionNodeStatus, ExecutionProjection, ExecutionTaskProjection, ExecutionTaskStatus,
     },
     wire::ExecutionRunRequest,
 };
@@ -29,12 +35,8 @@ pub(crate) async fn collect_execution_eval_snapshot(
     request: &ExecutionRunRequest,
     capability_controller: Option<&FixtureCapabilityController>,
 ) -> Result<ExecutionEvalSnapshot> {
-    let scheduling_snapshot = repository
-        .load_scheduling_snapshot(scope, request.run_uid)
-        .await
-        .context("load repeatable-read execution scheduling snapshot")?
-        .with_context(|| format!("execution run {} is not visible", request.run_uid))?;
-    let task_records = list_all_task_records(repository, scope, request.run_uid).await?;
+    let (scheduling_snapshot, task_records) =
+        load_eval_runtime_state(repository, scope, request.run_uid).await?;
     let audits = load_execution_planning_audits(postgres_url, request.session_id).await?;
     let events = client
         .get_events(request.session_id, EventRange::all())
@@ -62,12 +64,8 @@ pub(crate) async fn collect_repository_execution_eval_snapshot(
     session_id: moa_core::types::identifiers::SessionId,
     run_uid: uuid::Uuid,
 ) -> Result<ExecutionEvalSnapshot> {
-    let scheduling_snapshot = repository
-        .load_scheduling_snapshot(scope, run_uid)
-        .await
-        .context("load repeatable-read repository execution snapshot")?
-        .with_context(|| format!("execution run {run_uid} is not visible"))?;
-    let task_records = list_all_task_records(repository, scope, run_uid).await?;
+    let (scheduling_snapshot, task_records) =
+        load_eval_runtime_state(repository, scope, run_uid).await?;
     let audits = load_execution_planning_audits(postgres_url, session_id).await?;
     ExecutionEvalSnapshot::from_parts(
         scheduling_snapshot,
@@ -76,6 +74,135 @@ pub(crate) async fn collect_repository_execution_eval_snapshot(
         ExecutionHarnessEvidence::default(),
     )
     .context("assemble repository-only execution eval snapshot")
+}
+
+async fn load_eval_runtime_state(
+    repository: &ExecutionRepository,
+    scope: ExecutionScope,
+    run_uid: uuid::Uuid,
+) -> Result<(ExecutionSchedulingSnapshot, Vec<ExecutionTaskRecord>)> {
+    let run = repository
+        .load_run(scope, run_uid)
+        .await
+        .context("load bounded execution run projection")?
+        .with_context(|| format!("execution run {run_uid} is not visible"))?;
+    let task_records = list_all_task_records(repository, scope, run_uid).await?;
+    let snapshot = ExecutionSchedulingSnapshot {
+        catalog: run.catalog.clone(),
+        authorization: run.authorization.clone(),
+        pinned_instruction_skills: run.pinned_instruction_skills.clone(),
+        budget_ledger: BudgetLedger {
+            limit: run.approved_budget.clone(),
+            reserved: run.reserved,
+            consumed: run.consumed,
+            overrun: run.budget_overrun,
+        },
+        projection: scheduling_projection(&run, &task_records),
+        run,
+    };
+    Ok((snapshot, task_records))
+}
+
+fn scheduling_projection(
+    run: &ExecutionRunRecord,
+    tasks: &[ExecutionTaskRecord],
+) -> ExecutionProjection {
+    let task_projections = tasks
+        .iter()
+        .map(|task| ExecutionTaskProjection {
+            task_id: task.task_id,
+            node_id: task.node_id.clone(),
+            item_key: task.item_key.clone(),
+            status: task.status,
+            attempt: task.attempt,
+            generation: task.generation,
+            input: task.input.clone(),
+            outcome: task.current_outcome.clone(),
+        })
+        .collect::<Vec<_>>();
+    let node_statuses = run
+        .active_plan
+        .definition
+        .nodes
+        .iter()
+        .map(|node| {
+            let node_tasks = tasks
+                .iter()
+                .filter(|task| task.node_id == node.id)
+                .collect::<Vec<_>>();
+            (
+                node.id.clone(),
+                persisted_node_status(&node.operation, &node_tasks),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    ExecutionProjection {
+        plan_revision: run.plan_revision,
+        node_statuses,
+        tasks: task_projections,
+    }
+}
+
+fn persisted_node_status(
+    operation: &ExecutionOperation,
+    tasks: &[&ExecutionTaskRecord],
+) -> ExecutionNodeStatus {
+    if tasks.is_empty() {
+        return ExecutionNodeStatus::Pending;
+    }
+    if tasks.iter().any(|task| {
+        matches!(
+            task.status,
+            ExecutionTaskStatus::WaitingInput
+                | ExecutionTaskStatus::WaitingReview
+                | ExecutionTaskStatus::WaitingSignal
+                | ExecutionTaskStatus::WaitingTimer
+                | ExecutionTaskStatus::WaitingExternal
+                | ExecutionTaskStatus::WaitingReplan
+        )
+    }) {
+        return ExecutionNodeStatus::Waiting;
+    }
+    if tasks.iter().any(|task| {
+        matches!(
+            task.status,
+            ExecutionTaskStatus::Pending
+                | ExecutionTaskStatus::Ready
+                | ExecutionTaskStatus::Reserved
+                | ExecutionTaskStatus::Dispatching
+                | ExecutionTaskStatus::Running
+        )
+    }) {
+        return ExecutionNodeStatus::Running;
+    }
+    if tasks.iter().any(|task| {
+        matches!(
+            task.status,
+            ExecutionTaskStatus::Failed | ExecutionTaskStatus::UnknownOutcome
+        )
+    }) {
+        return ExecutionNodeStatus::Failed;
+    }
+    if tasks
+        .iter()
+        .any(|task| task.status == ExecutionTaskStatus::Cancelled)
+    {
+        return ExecutionNodeStatus::Cancelled;
+    }
+    if matches!(
+        operation,
+        ExecutionOperation::Map { .. } | ExecutionOperation::Reduce { .. }
+    ) {
+        return ExecutionNodeStatus::Pending;
+    }
+    if tasks
+        .iter()
+        .all(|task| task.status == ExecutionTaskStatus::Skipped)
+    {
+        ExecutionNodeStatus::Skipped
+    } else {
+        ExecutionNodeStatus::Completed
+    }
 }
 
 async fn list_all_task_records(

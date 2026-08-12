@@ -143,6 +143,60 @@ the archived LSN gap, replacement duration, new PVC and node identities, and an
 exactly-once in-flight invocation result in the change record. The repository
 does not automate destructive cluster or PVC mutation.
 
+### Long-horizon execution recovery objectives
+
+MOA has two supported disaster-recovery paths. Both preserve the same product
+contract: the RPO for a Postgres-committed execution transition and a
+ledgered/idempotent external effect is zero. The database PITR policy therefore
+sets the real product RPO; an organization with a nonzero database backup gap
+must publish that larger value instead. RTO is measured from incident
+declaration until admission reopens after invariant verification.
+
+| Path | Use | RPO evidence | Drill RTO objective |
+|---|---|---|---|
+| Restate snapshot/journal restore | Restate storage is recoverable and its snapshot/archive set is internally complete | Restored Postgres recovery point plus zero unexplained `APPLIED - ARCHIVED` gap at the selected Restate restore point | 60 minutes |
+| Postgres/outbox reconstruction | Restate state is unavailable or journal compatibility cannot be proved | Restored Postgres execution rows, triggers, outbox, external-effect ledgers, and portable checkpoints; no Restate journal is treated as product authority | 4 hours |
+
+For a Restate restore drill:
+
+1. Gate execution admission and capture the exact Postgres recovery point,
+   Restate cluster identity, snapshot pointers, archived LSNs, and deployment
+   inventory.
+2. Restore the complete Restate snapshot/journal set and Postgres to the chosen
+   coordinated point. Never combine independently timed member volumes.
+3. Register the immutable bounded-activation deployment and start the singleton
+   maintenance role.
+4. Verify run/task generations, due triggers, dispatch outbox, external-job
+   unknown outcomes, active capacity reservations, and the parked-zero-hands
+   invariant before reopening admission.
+
+For a Postgres/outbox reconstruction drill:
+
+1. Gate admission and restore Postgres plus portable checkpoint storage; start
+   a new empty Restate cluster rather than importing an unproved journal.
+2. Register the full bounded runtime inventory from the immutable deployment:
+   `ExecutionRunController`, `ExecutionTaskAttempt`,
+   `ExecutionCompensationAttempt`, `ExecutionTrigger`, `ExecutionDispatcher`,
+   fleet-keyed `ExecutionDispatchDrain`, `ExecutionDispatchReconciler`,
+   `ExecutionRetention`, `ExecutionSchedule`, and `DurableTimeout`. The
+   `ExecutionDispatchDrain` virtual object must be registered, and recovery
+   dispatch must address its canonical `fleet` key: it is the sole serialized
+   owner that drains reconstructed Postgres outbox heads and admits ready work
+   against fleet-global capacity.
+3. Start maintenance. It reclaims pending outbox rows, due triggers, stale
+   attempts, external callbacks/reconciliation, and nonterminal run activations
+   from Postgres. Every delivery retains its original idempotency identity and
+   generation.
+4. Reconcile every transmitting or unknown external effect against its durable
+   connector/tool/provider ledger. Never replay an effect merely because its
+   old Restate journal is absent.
+5. Require zero overdue unclaimed triggers, zero outbox dead letters, zero
+   stale active attempts, zero parked tasks with hands, bounded capacity, and a
+   completed representative run before reopening admission.
+
+Record observed RPO and RTO, not only the objective. Missing external-effect
+evidence, an unbounded archive gap, or a generation mismatch fails the drill.
+
 ## Shutdown and placement
 
 Production Restate uses a ten-minute server shutdown timeout and a 660-second
@@ -297,6 +351,40 @@ the identical journal prefix. Otherwise restore the original pinned endpoint
 or cancel through the product path. Forcing deployment removal or killing the
 invocation discards the safest recovery route.
 
+## Destructive long-horizon execution cutover
+
+The V59/V60 execution hard cut does not translate live workflow state. Gate
+execution admission, finish or product-cancel every old execution, and resolve
+every invocation pinned to the exact old deployment before running:
+
+```bash
+scripts/cutover-long-horizon-execution.sh \
+  --database-admin-url postgresql://ADMIN_ROLE@DATABASE_HOST/DATABASE_NAME \
+  --restate-admin-url https://RESTATE_ADMIN_HOST \
+  --restate-ingress-url https://RESTATE_INGRESS_HOST \
+  --old-deployment-id dp_EXACT_OLD_ID \
+  --new-deployment-uri https://IMMUTABLE_NEW_HANDLER_URI \
+  --archive-dir /explicit/precreated/empty/archive/directory
+```
+
+That first pass is read-only and must print zero nonterminal Postgres runs and
+zero nonterminal invocations for the retired services or exact old deployment.
+Review and retain the evidence, then rerun the same explicit target arguments
+with `--confirm-destructive-cutover`. The confirmed pass archives the three
+terminal execution tables, applies the repository-owned migration command, clears and
+purges only `ExecutionRun`, `ExecutionTask`, and `ExecutionCompensation`,
+removes the exact old deployment, registers the new immutable URI, and proves
+that the full bounded execution handler inventory is present and every retired
+service is absent. Inventory verification checks each Restate primitive type,
+keeps every internal delivery surface private, and leaves only the
+tenant-authorized `ExecutionSchedule` public. It never infers a
+database, deployment, or archive target.
+
+Keep admission closed after the script returns. Require the singleton
+fresh durable maintenance reconciliation, zero trigger/outbox dead letters, the parked-zero-hands
+invariant, and one deterministic canary before reopening. Store the archive and
+service inventory with the change record.
+
 ## Hard product status cutover: `paused` to `idle`
 
 Product `idle` means a session is healthy between turns. Restate `paused` means
@@ -311,7 +399,7 @@ Execute the cutover as a maintenance transaction:
    observation, migration-only Job and bootstrap, normal RestateDeployment
    readiness, then edge restoration.
 2. Query `sys_invocation` and wait for active `Session`, `TurnExecution`, worker,
-   `ExecutionRun`, `ExecutionTask`, and `ExecutionCompensation` invocations to
+   and bounded execution controller/attempt/trigger invocations to
    finish. Cancel only through their product owners. The migration Job runs the
    complete current migration chain, so every hard-cut preflight in that chain
    must be satisfied before it starts.

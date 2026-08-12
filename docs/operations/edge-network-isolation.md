@@ -22,9 +22,9 @@ proxying. This switch does not make port 10023 safe to expose.
 ## Compose
 
 Orchestrator handler port 9080 is bound to the compose internal network only.
-The connector credential listener at `moa-orchestrator:10023` is likewise
+The credential-and-provider-callback ingress at `moa-orchestrator:10023` is likewise
 internal-only and has no host port binding. `moa-edge` reaches it through
-`MOA_EDGE_CONNECTOR_CREDENTIAL_UPSTREAM`.
+`MOA_EDGE_INTERNAL_INGRESS_UPSTREAM`.
 Local Compose explicitly sets `MOA_EDGE_CONNECTOR_MANAGEMENT_ENABLED=true` for
 development. Set it false in a local override when testing Checkpoint A.
 The default `docker-compose.yml` is a development stack, not an isolation

@@ -129,6 +129,8 @@ pub enum CompletionCheckKind {
 pub struct ExecutionPlanDefinition {
     /// Explicit policy for effects already committed when the run is cancelled.
     pub cancel_policy: ExecutionCancelPolicy,
+    /// Expiry behavior for runtime input requests returned by executable tasks.
+    pub input_wait_policy: ExecutionWaitPolicy,
     /// JSON Schema for run input.
     pub input_schema: Value,
     /// JSON Schema for terminal output.
@@ -314,7 +316,7 @@ pub enum ExecutionReducer {
     },
 }
 
-/// The seven operations supported by the execution-plan DSL.
+/// The eight operations supported by the execution-plan DSL.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionOperation {
@@ -362,16 +364,68 @@ pub enum ExecutionOperation {
     Review {
         /// Review prompt shown to the tenant reviewer.
         prompt: String,
+        /// Exact expiry and settlement behavior for the review wait.
+        wait_policy: ExecutionWaitPolicy,
     },
     /// Pause for one external or user signal.
     WaitSignal {
         /// Stable signal name awaited by the run.
         signal_name: String,
+        /// Exact expiry and settlement behavior for the signal wait.
+        wait_policy: ExecutionWaitPolicy,
+    },
+    /// Park until an exact or wait-entry-relative time without retaining active compute.
+    WaitUntil {
+        /// Temporal target at which the node becomes ready to continue.
+        wake: ExecutionTemporalTarget,
+        /// Structured result made available when the timer fires.
+        result: Value,
     },
     /// Resolve and validate the plan's terminal output.
     Output {
         /// Static or reference-bound terminal output value.
         value: Value,
+    },
+}
+
+/// Exact expiry policy for a storage-only execution wait.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionWaitPolicy {
+    /// Temporal target at which the unresolved wait expires.
+    pub expiry: ExecutionTemporalTarget,
+    /// Deterministic settlement applied when the wait expires.
+    pub on_expiry: ExecutionWaitExpiryAction,
+}
+
+/// Exact or wait-entry-relative target for a durable execution timer.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionTemporalTarget {
+    /// Exact absolute UTC instant used by one-off generated and compiled plans.
+    At {
+        /// Absolute UTC instant at which the timer becomes due.
+        at: DateTime<Utc>,
+    },
+    /// Positive delay resolved when the owning wait state is entered.
+    After {
+        /// Number of seconds after wait entry at which the timer becomes due.
+        delay_seconds: u64,
+    },
+}
+
+/// Deterministic action applied when an execution wait expires.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionWaitExpiryAction {
+    /// Fail only the waiting logical task.
+    FailTask,
+    /// Fail the complete execution run.
+    FailRun,
+    /// Settle the wait successfully with a declared structured output.
+    ContinueWith {
+        /// Structured output supplied to downstream nodes.
+        output: Value,
     },
 }
 
@@ -647,6 +701,7 @@ impl ExecutionPlanDefinition {
                 | ExecutionOperation::Reduce { .. }
                 | ExecutionOperation::Review { .. }
                 | ExecutionOperation::WaitSignal { .. }
+                | ExecutionOperation::WaitUntil { .. }
                 | ExecutionOperation::Output { .. } => {}
             }
         }

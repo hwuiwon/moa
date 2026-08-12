@@ -62,6 +62,12 @@ struct ReceiverManifestEntry {
     receiver: ReceiverKind,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReceiverHandlerManifestEntry {
+    client: &'static str,
+    operation: &'static str,
+}
+
 macro_rules! sender {
     ($path:literal, $symbol:literal, $helper:expr, $client:literal, $operation:literal) => {
         SenderManifestEntry {
@@ -178,6 +184,27 @@ const SENDERS: &[SenderManifestEntry] = &[
         TRACE_HELPER,
         "WorkerClient",
         "status"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/objects/execution_run_controller/progress.rs",
+        "deliver",
+        IDENTITY_TRACE_HELPER,
+        "SessionClient",
+        "execution_progress"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/objects/execution_run_controller/progress.rs",
+        "deliver",
+        IDENTITY_TRACE_HELPER,
+        "SessionClient",
+        "execution_terminal"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/objects/cron_job.rs",
+        "schedule_next_tick",
+        TRACE_HELPER,
+        "CronJobClient",
+        "tick"
     ),
     sender!(
         "crates/moa-orchestrator/src/objects/session/execution_runs.rs",
@@ -299,13 +326,6 @@ const SENDERS: &[SenderManifestEntry] = &[
         "request_cancel"
     ),
     sender!(
-        "crates/moa-orchestrator/src/objects/session/execution_runs.rs",
-        "dispatch_execution_run",
-        TRACE_HELPER,
-        "ExecutionRunClient",
-        "run"
-    ),
-    sender!(
         "crates/moa-orchestrator/src/objects/session/mod.rs",
         "append_session_event_deduped",
         TRACE_HELPER,
@@ -418,18 +438,11 @@ const SENDERS: &[SenderManifestEntry] = &[
         "run"
     ),
     sender!(
-        "crates/moa-orchestrator/src/services/action_review_dispatcher.rs",
-        "deliver_one",
+        "crates/moa-orchestrator/src/services/action_reviews.rs",
+        "decide",
         TRACE_HELPER,
-        "ExecutionCompensationClient",
-        "resolve_action_review"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/services/action_review_dispatcher.rs",
-        "deliver_one",
-        TRACE_HELPER,
-        "ExecutionTaskClient",
-        "resolve_action_review"
+        "ActionReviewDispatcherClient",
+        "dispatch"
     ),
     sender!(
         "crates/moa-orchestrator/src/services/action_reviews.rs",
@@ -437,6 +450,13 @@ const SENDERS: &[SenderManifestEntry] = &[
         TRACE_HELPER,
         "RestateSessionStoreClient",
         "append_event"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/action_review_dispatcher.rs",
+        "deliver_one",
+        TRACE_HELPER,
+        "ExecutionDispatcherClient",
+        "dispatch"
     ),
     sender!(
         "crates/moa-orchestrator/src/services/action_reviews.rs",
@@ -490,6 +510,20 @@ const SENDERS: &[SenderManifestEntry] = &[
     ),
     sender!(
         "crates/moa-orchestrator/src/services/action_reviews.rs",
+        "release_timed_out_conversational_review",
+        TRACE_HELPER,
+        "SessionClient",
+        "release_action_review"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/action_reviews.rs",
+        "release_timed_out_conversational_review",
+        TRACE_HELPER,
+        "WorkerClient",
+        "release_action_review"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/action_reviews.rs",
         "release_conversational_review",
         TRACE_HELPER,
         "WorkerClient",
@@ -538,46 +572,25 @@ const SENDERS: &[SenderManifestEntry] = &[
         "start_turn"
     ),
     sender!(
-        "crates/moa-orchestrator/src/services/execution/handlers.rs",
-        "apply_amendment",
+        "crates/moa-orchestrator/src/services/durable_timeout.rs",
+        "deliver_action_review_release",
         TRACE_HELPER,
-        "ExecutionTaskClient",
-        "cancel"
+        "RestateSessionStoreClient",
+        "append_event"
     ),
     sender!(
-        "crates/moa-orchestrator/src/services/execution/handlers.rs",
-        "apply_planned_amendment",
+        "crates/moa-orchestrator/src/services/durable_timeout.rs",
+        "deliver_action_review_timeout",
         TRACE_HELPER,
-        "ExecutionTaskClient",
-        "cancel"
+        "ActionReviewDispatcherClient",
+        "dispatch"
     ),
     sender!(
-        "crates/moa-orchestrator/src/services/execution/handlers.rs",
-        "decide_review",
+        "crates/moa-orchestrator/src/services/durable_timeout.rs",
+        "schedule_durable_timeout",
         TRACE_HELPER,
-        "ExecutionTaskClient",
-        "review_decided"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/services/execution/handlers.rs",
-        "deliver_input",
-        TRACE_HELPER,
-        "ExecutionTaskClient",
-        "cancel"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/services/execution/handlers.rs",
-        "deliver_input",
-        TRACE_HELPER,
-        "ExecutionTaskClient",
-        "input_delivered"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/services/execution/handlers.rs",
-        "deliver_signal",
-        TRACE_HELPER,
-        "ExecutionTaskClient",
-        "signal_delivered"
+        "DurableTimeoutClient",
+        "expire"
     ),
     sender!(
         "crates/moa-orchestrator/src/services/execution/handlers.rs",
@@ -587,11 +600,180 @@ const SENDERS: &[SenderManifestEntry] = &[
         "execution_run_started"
     ),
     sender!(
-        "crates/moa-orchestrator/src/services/execution/support.rs",
-        "call_run_wake",
+        "crates/moa-orchestrator/src/services/execution/handlers.rs",
+        "kick_execution_dispatcher",
         TRACE_HELPER,
-        "ExecutionRunClient",
-        "wake"
+        "ExecutionDispatcherClient",
+        "dispatch"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+        "accept_target",
+        TRACE_HELPER,
+        "ExecutionCompensationAttemptClient",
+        "cancel"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+        "accept_target",
+        TRACE_HELPER,
+        "ExecutionCompensationAttemptClient",
+        "run"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+        "accept_batch",
+        TRACE_HELPER,
+        "ExecutionRunControllerClient",
+        "advance"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+        "accept_target",
+        TRACE_HELPER,
+        "ExecutionTaskAttemptClient",
+        "cancel"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+        "accept_target",
+        TRACE_HELPER,
+        "ExecutionTaskAttemptClient",
+        "run"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+        "accept_batch",
+        TRACE_HELPER,
+        "ExecutionTriggerClient",
+        "fire"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+        "accept_target",
+        TRACE_HELPER,
+        "ToolExecutorClient",
+        "cancel_external_job"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+        "reconcile_bounded",
+        TRACE_HELPER,
+        "ExecutionDispatchDrainClient",
+        "drain"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+        "dispatch",
+        TRACE_HELPER,
+        "ExecutionDispatchDrainClient",
+        "drain"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+        "drain",
+        TRACE_HELPER,
+        "ExecutionDispatchDrainClient",
+        "drain"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_retention.rs",
+        "send_next",
+        TRACE_HELPER,
+        "ExecutionRetentionClient",
+        "run"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_schedule.rs",
+        "kick_new_schedule_trigger",
+        TRACE_HELPER,
+        "ExecutionDispatcherClient",
+        "dispatch"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_trigger.rs",
+        "fire",
+        TRACE_HELPER,
+        "ExecutionScheduleClient",
+        "fire_occurrence"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_trigger.rs",
+        "fire",
+        TRACE_HELPER,
+        "ExecutionCompensationAttemptClient",
+        "watchdog"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_trigger.rs",
+        "fire",
+        TRACE_HELPER,
+        "ExecutionTaskAttemptClient",
+        "watchdog"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_trigger.rs",
+        "fire",
+        TRACE_HELPER,
+        "ToolExecutorClient",
+        "reconcile_external_job"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_trigger.rs",
+        "fire",
+        TRACE_HELPER,
+        "ToolExecutorClient",
+        "recover_external_job_start"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/tool_executor.rs",
+        "append_tool_call_event",
+        TRACE_HELPER,
+        "RestateSessionStoreClient",
+        "append_event"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/tool_executor.rs",
+        "append_tool_canary_block_events",
+        TRACE_HELPER,
+        "RestateSessionStoreClient",
+        "append_event",
+        2
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/tool_executor.rs",
+        "append_tool_dispatch_denied_event",
+        TRACE_HELPER,
+        "RestateSessionStoreClient",
+        "append_event"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/tool_executor.rs",
+        "append_tool_error_event",
+        TRACE_HELPER,
+        "RestateSessionStoreClient",
+        "append_event"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/tool_executor.rs",
+        "append_tool_result_event",
+        TRACE_HELPER,
+        "RestateSessionStoreClient",
+        "append_event"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/tool_executor.rs",
+        "finalize_recovered_compensation_external_start",
+        TRACE_HELPER,
+        "ToolExecutorClient",
+        "checkpoint_and_release_execution_hands"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/tool_executor.rs",
+        "release_session_hands",
+        TRACE_HELPER,
+        "ToolExecutorClient",
+        "release_session_hands"
     ),
     sender!(
         "crates/moa-orchestrator/src/services/artifact_release.rs",
@@ -645,20 +827,6 @@ const SENDERS: &[SenderManifestEntry] = &[
     sender!(
         "crates/moa-orchestrator/src/services/llm_gateway.rs",
         "cancel_completion_owner",
-        TRACE_HELPER,
-        "LLMGatewayClient",
-        "cancel_owner"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/services/llm_gateway.rs",
-        "cancel_completion_owner_from_service",
-        TRACE_HELPER,
-        "LLMGatewayClient",
-        "cancel_owner"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/services/llm_gateway.rs",
-        "cancel_completion_owner_from_workflow",
         TRACE_HELPER,
         "LLMGatewayClient",
         "cancel_owner"
@@ -755,6 +923,13 @@ const SENDERS: &[SenderManifestEntry] = &[
         "migrate_status_idle"
     ),
     sender!(
+        "crates/moa-orchestrator/src/services/tool_executor.rs",
+        "recover_external_job_start",
+        TRACE_HELPER,
+        "ExecutionDispatcherClient",
+        "dispatch"
+    ),
+    sender!(
         "crates/moa-orchestrator/src/tool_invocation/governed.rs",
         "append_session_event",
         TRACE_HELPER,
@@ -819,109 +994,88 @@ const SENDERS: &[SenderManifestEntry] = &[
         "mark_consolidation_started"
     ),
     sender!(
-        "crates/moa-orchestrator/src/workflows/execution_compensation.rs",
-        "cleanup_compensation_hands",
+        "crates/moa-orchestrator/src/workflows/execution_compensation_attempt.rs",
+        "kick_dispatcher",
+        TRACE_HELPER,
+        "ExecutionDispatcherClient",
+        "dispatch"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/execution_compensation_attempt.rs",
+        "kick_dispatcher_shared",
+        TRACE_HELPER,
+        "ExecutionDispatcherClient",
+        "dispatch"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/execution_compensation_attempt/external.rs",
+        "yield_external_job",
         TRACE_HELPER,
         "ToolExecutorClient",
-        "release_execution_compensation_hands"
+        "checkpoint_and_release_execution_hands"
     ),
     sender!(
-        "crates/moa-orchestrator/src/workflows/execution_run.rs",
-        "complete",
-        TRACE_HELPER,
-        "LLMGatewayClient",
-        "complete"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/execution_run.rs",
-        "deliver_session_projection",
-        TRACE_HELPER,
-        "SessionClient",
-        "execution_input_required"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/execution_run.rs",
-        "deliver_session_projection",
-        TRACE_HELPER,
-        "SessionClient",
-        "execution_progress"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/execution_run.rs",
-        "deliver_session_projection",
-        TRACE_HELPER,
-        "SessionClient",
-        "execution_terminal"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/execution_run.rs",
-        "plan_and_apply_waiting_replan",
-        TRACE_HELPER,
-        "ExecutionClient",
-        "apply_planned_amendment"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/execution_run.rs",
-        "run",
-        TRACE_HELPER,
-        "ExecutionCompensationClient",
-        "run"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/execution_run.rs",
-        "run",
-        TRACE_HELPER,
-        "ExecutionTaskClient",
-        "run"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/execution_run.rs",
-        "signal_task_cancellation",
-        TRACE_HELPER,
-        "ExecutionTaskClient",
-        "cancel"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/execution_task.rs",
-        "cleanup_task_hands",
-        TRACE_HELPER,
-        "ToolExecutorClient",
-        "release_execution_task_hands"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/execution_task.rs",
-        "execute_agent",
-        TRACE_HELPER,
-        "LLMGatewayClient",
-        "complete"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/execution_task.rs",
-        "invoke_capability_tool",
+        "crates/moa-orchestrator/src/workflows/execution_compensation_attempt/yielding.rs",
+        "park_compensation_review",
         TRACE_HELPER,
         "ActionReviewsClient",
-        "settle_execution_owner_review"
+        "acknowledge_execution_owner_review"
     ),
     sender!(
-        "crates/moa-orchestrator/src/workflows/execution_task.rs",
-        "record_execution_task_transition",
+        "crates/moa-orchestrator/src/workflows/execution_compensation_attempt/yielding.rs",
+        "release_and_settle_compensation_shared",
         TRACE_HELPER,
-        "SecurityEventsClient",
-        "record_circuit_transition"
+        "ToolExecutorClient",
+        "checkpoint_and_release_execution_hands"
     ),
     sender!(
-        "crates/moa-orchestrator/src/workflows/execution_task.rs",
-        "record_execution_task_transition",
+        "crates/moa-orchestrator/src/workflows/execution_compensation_attempt/yielding.rs",
+        "release_compensation_hands_workflow",
         TRACE_HELPER,
-        "RestateSessionStoreClient",
-        "append_event"
+        "ToolExecutorClient",
+        "checkpoint_and_release_execution_hands"
     ),
     sender!(
-        "crates/moa-orchestrator/src/workflows/execution_task.rs",
-        "send_run_wake",
+        "crates/moa-orchestrator/src/workflows/execution_task_attempt.rs",
+        "kick_dispatcher",
         TRACE_HELPER,
-        "ExecutionRunClient",
-        "wake"
+        "ExecutionDispatcherClient",
+        "dispatch"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/execution_task_attempt.rs",
+        "kick_dispatcher_shared",
+        TRACE_HELPER,
+        "ExecutionDispatcherClient",
+        "dispatch"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/execution_task_attempt/active.rs",
+        "execute_agent_turn",
+        TRACE_HELPER,
+        "LLMGatewayClient",
+        "complete_bounded"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/execution_task_attempt/yielding.rs",
+        "checkpoint_task_hands_shared",
+        TRACE_HELPER,
+        "ToolExecutorClient",
+        "checkpoint_and_release_execution_hands"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/execution_task_attempt/yielding.rs",
+        "checkpoint_task_hands_workflow",
+        TRACE_HELPER,
+        "ToolExecutorClient",
+        "checkpoint_and_release_execution_hands"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/execution_task_attempt/yielding.rs",
+        "park_review",
+        TRACE_HELPER,
+        "ActionReviewsClient",
+        "acknowledge_execution_owner_review"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/experiment_cancel.rs",
@@ -1419,6 +1573,14 @@ const SENDERS: &[SenderManifestEntry] = &[
 
 const RECEIVERS: &[ReceiverManifestEntry] = &[
     ReceiverManifestEntry {
+        client: "ActionReviewDispatcherClient",
+        receiver: ReceiverKind::MoaHandler {
+            path: "crates/moa-orchestrator/src/services/action_review_dispatcher.rs",
+            symbol: "*",
+            adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
+        },
+    },
+    ReceiverManifestEntry {
         client: "ActionPolicyClient",
         receiver: ReceiverKind::MoaHandler {
             path: "crates/moa-orchestrator/src/services/action_policy.rs",
@@ -1467,25 +1629,73 @@ const RECEIVERS: &[ReceiverManifestEntry] = &[
         },
     },
     ReceiverManifestEntry {
-        client: "ExecutionCompensationClient",
+        client: "ExecutionCompensationAttemptClient",
         receiver: ReceiverKind::MoaHandler {
-            path: "crates/moa-orchestrator/src/workflows/execution_compensation.rs",
+            path: "crates/moa-orchestrator/src/workflows/execution_compensation_attempt.rs",
             symbol: "*",
             adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
         },
     },
     ReceiverManifestEntry {
-        client: "ExecutionRunClient",
+        client: "ExecutionDispatcherClient",
         receiver: ReceiverKind::MoaHandler {
-            path: "crates/moa-orchestrator/src/workflows/execution_run.rs",
+            path: "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
             symbol: "*",
             adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
         },
     },
     ReceiverManifestEntry {
-        client: "ExecutionTaskClient",
+        client: "ExecutionDispatchDrainClient",
         receiver: ReceiverKind::MoaHandler {
-            path: "crates/moa-orchestrator/src/workflows/execution_task.rs",
+            path: "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+            symbol: "*",
+            adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
+        },
+    },
+    ReceiverManifestEntry {
+        client: "ExecutionDispatchReconcilerClient",
+        receiver: ReceiverKind::MoaHandler {
+            path: "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+            symbol: "*",
+            adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
+        },
+    },
+    ReceiverManifestEntry {
+        client: "ExecutionRetentionClient",
+        receiver: ReceiverKind::MoaHandler {
+            path: "crates/moa-orchestrator/src/services/execution_retention.rs",
+            symbol: "*",
+            adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
+        },
+    },
+    ReceiverManifestEntry {
+        client: "ExecutionRunControllerClient",
+        receiver: ReceiverKind::MoaHandler {
+            path: "crates/moa-orchestrator/src/objects/execution_run_controller.rs",
+            symbol: "*",
+            adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
+        },
+    },
+    ReceiverManifestEntry {
+        client: "ExecutionScheduleClient",
+        receiver: ReceiverKind::MoaHandler {
+            path: "crates/moa-orchestrator/src/services/execution_schedule.rs",
+            symbol: "*",
+            adoption_symbol: "prepare_handler",
+        },
+    },
+    ReceiverManifestEntry {
+        client: "ExecutionTaskAttemptClient",
+        receiver: ReceiverKind::MoaHandler {
+            path: "crates/moa-orchestrator/src/workflows/execution_task_attempt.rs",
+            symbol: "*",
+            adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
+        },
+    },
+    ReceiverManifestEntry {
+        client: "ExecutionTriggerClient",
+        receiver: ReceiverKind::MoaHandler {
+            path: "crates/moa-orchestrator/src/services/execution_trigger.rs",
             symbol: "*",
             adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
         },
@@ -1534,6 +1744,14 @@ const RECEIVERS: &[ReceiverManifestEntry] = &[
         client: "LLMGatewayClient",
         receiver: ReceiverKind::MoaHandler {
             path: "crates/moa-orchestrator/src/services/llm_gateway.rs",
+            symbol: "*",
+            adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
+        },
+    },
+    ReceiverManifestEntry {
+        client: "DurableTimeoutClient",
+        receiver: ReceiverKind::MoaHandler {
+            path: "crates/moa-orchestrator/src/services/durable_timeout.rs",
             symbol: "*",
             adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
         },
@@ -1637,6 +1855,99 @@ const RECEIVERS: &[ReceiverManifestEntry] = &[
         receiver: ReceiverKind::RestateRuntime {
             endpoint_kind: "restate_ingress_proxy",
         },
+    },
+];
+
+// Receiver-only handlers are explicit because shared workflow methods and
+// externally invoked operational services can have no in-process producer.
+const REQUIRED_RECEIVER_HANDLERS: &[ReceiverHandlerManifestEntry] = &[
+    ReceiverHandlerManifestEntry {
+        client: "DurableTimeoutClient",
+        operation: "expire",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionCompensationAttemptClient",
+        operation: "cancel",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionCompensationAttemptClient",
+        operation: "run",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionCompensationAttemptClient",
+        operation: "watchdog",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionDispatcherClient",
+        operation: "dispatch",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionDispatchDrainClient",
+        operation: "drain",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionDispatchReconcilerClient",
+        operation: "reconcile",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionRunControllerClient",
+        operation: "advance",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionRetentionClient",
+        operation: "run",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionScheduleClient",
+        operation: "cancel",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionScheduleClient",
+        operation: "create",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionScheduleClient",
+        operation: "fire_occurrence",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionScheduleClient",
+        operation: "list",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionScheduleClient",
+        operation: "pause",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionScheduleClient",
+        operation: "resume",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionScheduleClient",
+        operation: "status",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionScheduleClient",
+        operation: "update",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionTaskAttemptClient",
+        operation: "cancel",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionTaskAttemptClient",
+        operation: "run",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionTaskAttemptClient",
+        operation: "watchdog",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "ExecutionTriggerClient",
+        operation: "fire",
+    },
+    ReceiverHandlerManifestEntry {
+        client: "SessionRetentionClient",
+        operation: "run",
     },
 ];
 
@@ -1761,7 +2072,13 @@ pub(crate) fn audit(root: &Path) -> Result<Vec<ManifestDiagnostic>> {
             fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         sources.insert(relative, source);
     }
-    Ok(audit_sources(&sources, SENDERS, RAW_SENDERS, RECEIVERS))
+    Ok(audit_sources(
+        &sources,
+        SENDERS,
+        RAW_SENDERS,
+        RECEIVERS,
+        REQUIRED_RECEIVER_HANDLERS,
+    ))
 }
 
 fn audit_sources(
@@ -1769,6 +2086,7 @@ fn audit_sources(
     manifest: &[SenderManifestEntry],
     raw_manifest: &[SenderManifestEntry],
     receivers: &[ReceiverManifestEntry],
+    required_receiver_handlers: &[ReceiverHandlerManifestEntry],
 ) -> Vec<ManifestDiagnostic> {
     let mut diagnostics = Vec::new();
     let mut discovered = Vec::new();
@@ -1779,7 +2097,14 @@ fn audit_sources(
     compare_manifest(&discovered, manifest, &mut diagnostics);
     audit_discovered_raw_senders(sources, raw_manifest, &mut diagnostics);
     audit_raw_manifest(sources, raw_manifest, &mut diagnostics);
-    audit_receiver_manifest(sources, manifest, raw_manifest, receivers, &mut diagnostics);
+    audit_receiver_manifest(
+        sources,
+        manifest,
+        raw_manifest,
+        receivers,
+        required_receiver_handlers,
+        &mut diagnostics,
+    );
     audit_identity_helper_delegation(sources, &mut diagnostics);
     diagnostics
         .sort_by(|left, right| (&left.path, &left.detail).cmp(&(&right.path, &right.detail)));
@@ -1932,12 +2257,14 @@ fn audit_receiver_manifest(
     manifest: &[SenderManifestEntry],
     raw_manifest: &[SenderManifestEntry],
     receivers: &[ReceiverManifestEntry],
+    required_receiver_handlers: &[ReceiverHandlerManifestEntry],
     diagnostics: &mut Vec<ManifestDiagnostic>,
 ) {
     let used_clients = manifest
         .iter()
         .chain(raw_manifest)
         .map(|entry| entry.client)
+        .chain(required_receiver_handlers.iter().map(|entry| entry.client))
         .collect::<BTreeSet<_>>();
     for client in used_clients {
         let Some(receiver) = receivers.iter().find(|receiver| receiver.client == client) else {
@@ -1979,6 +2306,12 @@ fn audit_receiver_manifest(
             .chain(raw_manifest)
             .filter(|entry| entry.client == client)
             .map(|entry| entry.operation)
+            .chain(
+                required_receiver_handlers
+                    .iter()
+                    .filter(|entry| entry.client == client)
+                    .map(|entry| entry.operation),
+            )
             .collect::<BTreeSet<_>>();
         for operation in operations {
             let receiver_symbol = if symbol == "*" { operation } else { symbol };
@@ -2332,12 +2665,18 @@ struct Function<'a> {
 }
 
 fn functions(source: &str) -> Vec<Function<'_>> {
-    let production_end = source.find("\n#[cfg(test)]").unwrap_or(source.len());
-    let source = &source[..production_end];
+    let test_modules = cfg_test_module_ranges(source);
     let mut functions = Vec::new();
     let mut cursor = 0usize;
     while let Some(fn_offset) = find_fn_token(&source[cursor..]) {
         let fn_start = cursor + fn_offset;
+        if let Some((_, end)) = test_modules
+            .iter()
+            .find(|(start, end)| *start <= fn_start && fn_start < *end)
+        {
+            cursor = *end;
+            continue;
+        }
         let name_start = fn_start + 3;
         let name_end = source[name_start..]
             .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
@@ -2361,6 +2700,35 @@ fn functions(source: &str) -> Vec<Function<'_>> {
         cursor = close + 1;
     }
     functions
+}
+
+fn cfg_test_module_ranges(source: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(relative) = source[cursor..].find("#[cfg(test)]") {
+        let start = cursor + relative;
+        let after_attribute = start + "#[cfg(test)]".len();
+        let whitespace = source[after_attribute..]
+            .find(|character: char| !character.is_whitespace())
+            .unwrap_or(source.len() - after_attribute);
+        let mod_start = after_attribute + whitespace;
+        if !source[mod_start..].starts_with("mod ") {
+            cursor = after_attribute;
+            continue;
+        }
+        let Some(terminator_relative) = source[mod_start..].find(['{', ';']) else {
+            break;
+        };
+        let terminator = mod_start + terminator_relative;
+        let end = if source.as_bytes()[terminator] == b'{' {
+            matching_delimiter(source, terminator, '{', '}').map_or(source.len(), |close| close + 1)
+        } else {
+            terminator + 1
+        };
+        ranges.push((start, end));
+        cursor = end;
+    }
+    ranges
 }
 
 fn find_fn_token(source: &str) -> Option<usize> {
@@ -2464,10 +2832,10 @@ mod tests {
     }
 
     const FIXTURE_RECEIVER: ReceiverManifestEntry = ReceiverManifestEntry {
-        client: "ExecutionRunClient",
+        client: "ExecutionRunControllerClient",
         receiver: ReceiverKind::MoaHandler {
             path: "receiver.rs",
-            symbol: "run",
+            symbol: "advance",
             adoption_symbol: "adopt_incoming_trace_parent",
         },
     };
@@ -2480,28 +2848,29 @@ mod tests {
             "sender.rs",
             "dispatch",
             TRACE_HELPER,
-            "ExecutionRunClient",
-            "run"
+            "ExecutionRunControllerClient",
+            "advance"
         )];
         let diagnostics = audit_sources(
             &sources(&[
                 (
                     "sender.rs",
-                    "async fn dispatch(ctx: &Context<'_>) { ctx.workflow_client::<ExecutionRunClient>(\"run\").run(()).send(); }",
+                    "async fn dispatch(ctx: &Context<'_>) { ctx.object_client::<ExecutionRunControllerClient>(\"run\").advance(()).send(); }",
                 ),
                 (
                     "receiver.rs",
-                    "async fn run(ctx: WorkflowContext<'_>) { adopt_incoming_trace_parent(&ctx); annotate_restate_handler_span(\"ExecutionRun\", \"run\"); }",
+                    "async fn advance(ctx: ObjectContext<'_>) { adopt_incoming_trace_parent(&ctx); annotate_restate_handler_span(\"ExecutionRunController\", \"advance\"); }",
                 ),
             ]),
             &manifest,
             &[],
             &[FIXTURE_RECEIVER],
+            &[],
         );
 
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.detail()
-                == "sender.rs::dispatch: generated Restate sender must use `replay_safe_request` for client=ExecutionRunClient operation=run; found no approved trace wrapper"
+                == "sender.rs::dispatch: generated Restate sender must use `replay_safe_request` for client=ExecutionRunControllerClient operation=advance; found no approved trace wrapper"
         }), "unexpected diagnostics: {diagnostics:#?}");
     }
 
@@ -2512,22 +2881,23 @@ mod tests {
             "sender.rs",
             "dispatch",
             TRACE_HELPER,
-            "ExecutionRunClient",
-            "run"
+            "ExecutionRunControllerClient",
+            "advance"
         )];
         let diagnostics = audit_sources(
             &sources(&[(
                 "sender.rs",
-                "async fn dispatch(ctx: &Context<'_>) { replay_safe_request(ctx.workflow_client::<ExecutionRunClient>(\"run\").run(())).send(); }",
+                "async fn dispatch(ctx: &Context<'_>) { replay_safe_request(ctx.object_client::<ExecutionRunControllerClient>(\"run\").advance(())).send(); }",
             )]),
             &manifest,
             &[],
             &[FIXTURE_RECEIVER],
+            &[],
         );
 
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.detail()
-                == "receiver.rs::run: receiver for client=ExecutionRunClient is missing"
+                == "receiver.rs::advance: receiver for client=ExecutionRunControllerClient is missing"
         }));
     }
 
@@ -2539,29 +2909,377 @@ mod tests {
             "sender.rs",
             "dispatch",
             TRACE_HELPER,
-            "ExecutionRunClient",
-            "run"
+            "ExecutionRunControllerClient",
+            "advance"
         )];
         let diagnostics = audit_sources(
             &sources(&[
                 (
                     "sender.rs",
-                    "async fn dispatch(ctx: &Context<'_>) { replay_safe_request(ctx.workflow_client::<ExecutionRunClient>(\"run\").run(())).send(); }",
+                    "async fn dispatch(ctx: &Context<'_>) { replay_safe_request(ctx.object_client::<ExecutionRunControllerClient>(\"run\").advance(())).send(); }",
                 ),
                 (
                     "receiver.rs",
-                    "async fn run(ctx: WorkflowContext<'_>) { let _span = tracing::info_span!(\"run\"); adopt_incoming_trace_parent(&ctx); }",
+                    "async fn advance(ctx: ObjectContext<'_>) { let _span = tracing::info_span!(\"advance\"); adopt_incoming_trace_parent(&ctx); }",
                 ),
             ]),
             &manifest,
             &[],
             &[FIXTURE_RECEIVER],
+            &[],
         );
 
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.detail()
-                == "receiver.rs::run: receiver creates its handler span before `adopt_incoming_trace_parent` for client=ExecutionRunClient operation=run"
+                == "receiver.rs::advance: receiver creates its handler span before `adopt_incoming_trace_parent` for client=ExecutionRunControllerClient operation=advance"
         }));
+    }
+
+    #[test]
+    fn generated_sender_discovery_keeps_production_after_an_early_test_module() {
+        // Pins: placing an out-of-line test module near the top of a production
+        // owner cannot hide later generated-client dispatches from the audit.
+        let discovered = discover_generated_senders(
+            "controller.rs",
+            r#"
+                #[cfg(test)]
+                mod inline_tests {
+                    async fn hidden(ctx: &Context<'_>) {
+                        ctx.service_client::<ExecutionTriggerClient>()
+                            .fire(())
+                            .send();
+                    }
+                }
+
+                #[cfg(test)]
+                mod tests;
+
+                async fn advance(ctx: &Context<'_>) {
+                    replay_safe_request(
+                        ctx.object_client::<ExecutionRunControllerClient>("run")
+                            .advance(()),
+                    )
+                    .call()
+                    .await;
+                }
+            "#,
+        );
+
+        assert_eq!(discovered.len(), 1, "discovered senders: {discovered:#?}");
+        let sender = &discovered[0];
+        assert_eq!(sender.path, "controller.rs");
+        assert_eq!(sender.symbol, "advance");
+        assert_eq!(sender.helper, Some(TRACE_HELPER));
+        assert_eq!(sender.client, "ExecutionRunControllerClient");
+        assert_eq!(sender.operation, "advance");
+    }
+
+    #[test]
+    fn checked_in_manifest_pins_long_horizon_producer_identities() {
+        // Pins: every bounded activation, durable trigger, dispatch, cancellation,
+        // and timeout producer remains attributable to its exact owning function.
+        for (path, symbol, helper, client, operation) in [
+            (
+                "crates/moa-orchestrator/src/objects/execution_run_controller/progress.rs",
+                "deliver",
+                IDENTITY_TRACE_HELPER,
+                "SessionClient",
+                "execution_progress",
+            ),
+            (
+                "crates/moa-orchestrator/src/services/durable_timeout.rs",
+                "schedule_durable_timeout",
+                TRACE_HELPER,
+                "DurableTimeoutClient",
+                "expire",
+            ),
+            (
+                "crates/moa-orchestrator/src/services/execution/handlers.rs",
+                "kick_execution_dispatcher",
+                TRACE_HELPER,
+                "ExecutionDispatcherClient",
+                "dispatch",
+            ),
+            (
+                "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+                "accept_batch",
+                TRACE_HELPER,
+                "ExecutionRunControllerClient",
+                "advance",
+            ),
+            (
+                "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+                "accept_target",
+                TRACE_HELPER,
+                "ExecutionTaskAttemptClient",
+                "run",
+            ),
+            (
+                "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+                "accept_target",
+                TRACE_HELPER,
+                "ExecutionTaskAttemptClient",
+                "cancel",
+            ),
+            (
+                "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+                "accept_target",
+                TRACE_HELPER,
+                "ExecutionCompensationAttemptClient",
+                "run",
+            ),
+            (
+                "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+                "accept_target",
+                TRACE_HELPER,
+                "ExecutionCompensationAttemptClient",
+                "cancel",
+            ),
+            (
+                "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+                "reconcile_bounded",
+                TRACE_HELPER,
+                "ExecutionDispatchDrainClient",
+                "drain",
+            ),
+            (
+                "crates/moa-orchestrator/src/services/execution_retention.rs",
+                "send_next",
+                TRACE_HELPER,
+                "ExecutionRetentionClient",
+                "run",
+            ),
+            (
+                "crates/moa-orchestrator/src/services/execution_schedule.rs",
+                "kick_new_schedule_trigger",
+                TRACE_HELPER,
+                "ExecutionDispatcherClient",
+                "dispatch",
+            ),
+            (
+                "crates/moa-orchestrator/src/services/execution_trigger.rs",
+                "fire",
+                TRACE_HELPER,
+                "ExecutionScheduleClient",
+                "fire_occurrence",
+            ),
+        ] {
+            assert!(
+                SENDERS.iter().any(|entry| {
+                    entry.path == path
+                        && entry.symbol == symbol
+                        && entry.helper == helper
+                        && entry.client == client
+                        && entry.operation == operation
+                        && entry.expected_count == 1
+                }),
+                "missing producer {path}::{symbol} -> {client}/{operation} via {helper}"
+            );
+        }
+    }
+
+    #[test]
+    fn checked_in_manifest_pins_bounded_session_hand_release_self_continuation() {
+        // Pins: incomplete session teardown self-schedules through the exact ToolExecutor
+        // handler with replay-safe trace propagation; it cannot disappear into an untraced
+        // raw send or drift to a different receiver implementation.
+        let matching = SENDERS
+            .iter()
+            .filter(|entry| {
+                entry.path == "crates/moa-orchestrator/src/services/tool_executor.rs"
+                    && entry.symbol == "release_session_hands"
+                    && entry.client == "ToolExecutorClient"
+                    && entry.operation == "release_session_hands"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].helper, TRACE_HELPER);
+        assert_eq!(matching[0].expected_count, 1);
+        assert!(RECEIVERS.iter().any(|entry| {
+            entry.client == "ToolExecutorClient"
+                && entry.receiver
+                    == ReceiverKind::MoaHandler {
+                        path: "crates/moa-orchestrator/src/services/tool_executor.rs",
+                        symbol: "*",
+                        adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
+                    }
+        }));
+    }
+
+    #[test]
+    fn checked_in_manifest_rejects_retired_execution_workflow_clients() {
+        // Pins: the hard cutover cannot silently restore lifetime-spanning run, task, or
+        // compensation workflows as trace-manifest senders or receivers.
+        const RETIRED_CLIENTS: [&str; 3] = [
+            "ExecutionRunClient",
+            "ExecutionTaskClient",
+            "ExecutionCompensationClient",
+        ];
+        assert!(
+            SENDERS
+                .iter()
+                .all(|entry| !RETIRED_CLIENTS.contains(&entry.client)),
+            "sender manifest restored a retired execution workflow client"
+        );
+        assert!(
+            RECEIVERS
+                .iter()
+                .all(|entry| !RETIRED_CLIENTS.contains(&entry.client)),
+            "receiver manifest restored a retired execution workflow client"
+        );
+    }
+
+    #[test]
+    fn checked_in_manifest_pins_long_horizon_receivers_and_shared_handlers() {
+        // Pins: receiver-only operational and shared workflow handlers remain in
+        // the trace contract even when no Rust producer currently calls them.
+        assert_eq!(
+            REQUIRED_RECEIVER_HANDLERS,
+            &[
+                ReceiverHandlerManifestEntry {
+                    client: "DurableTimeoutClient",
+                    operation: "expire",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionCompensationAttemptClient",
+                    operation: "cancel",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionCompensationAttemptClient",
+                    operation: "run",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionCompensationAttemptClient",
+                    operation: "watchdog",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionDispatcherClient",
+                    operation: "dispatch",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionDispatchDrainClient",
+                    operation: "drain",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionDispatchReconcilerClient",
+                    operation: "reconcile",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionRunControllerClient",
+                    operation: "advance",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionRetentionClient",
+                    operation: "run",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionScheduleClient",
+                    operation: "cancel",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionScheduleClient",
+                    operation: "create",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionScheduleClient",
+                    operation: "fire_occurrence",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionScheduleClient",
+                    operation: "list",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionScheduleClient",
+                    operation: "pause",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionScheduleClient",
+                    operation: "resume",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionScheduleClient",
+                    operation: "status",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionScheduleClient",
+                    operation: "update",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionTaskAttemptClient",
+                    operation: "cancel",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionTaskAttemptClient",
+                    operation: "run",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionTaskAttemptClient",
+                    operation: "watchdog",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "ExecutionTriggerClient",
+                    operation: "fire",
+                },
+                ReceiverHandlerManifestEntry {
+                    client: "SessionRetentionClient",
+                    operation: "run",
+                },
+            ]
+        );
+
+        for (client, path) in [
+            (
+                "DurableTimeoutClient",
+                "crates/moa-orchestrator/src/services/durable_timeout.rs",
+            ),
+            (
+                "ExecutionCompensationAttemptClient",
+                "crates/moa-orchestrator/src/workflows/execution_compensation_attempt.rs",
+            ),
+            (
+                "ExecutionDispatcherClient",
+                "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+            ),
+            (
+                "ExecutionDispatchReconcilerClient",
+                "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
+            ),
+            (
+                "ExecutionRunControllerClient",
+                "crates/moa-orchestrator/src/objects/execution_run_controller.rs",
+            ),
+            (
+                "ExecutionRetentionClient",
+                "crates/moa-orchestrator/src/services/execution_retention.rs",
+            ),
+            (
+                "ExecutionScheduleClient",
+                "crates/moa-orchestrator/src/services/execution_schedule.rs",
+            ),
+            (
+                "ExecutionTaskAttemptClient",
+                "crates/moa-orchestrator/src/workflows/execution_task_attempt.rs",
+            ),
+            (
+                "ExecutionTriggerClient",
+                "crates/moa-orchestrator/src/services/execution_trigger.rs",
+            ),
+            (
+                "SessionRetentionClient",
+                "crates/moa-orchestrator/src/workflows/session_retention.rs",
+            ),
+        ] {
+            assert!(
+                RECEIVERS.iter().any(|entry| {
+                    entry.client == client
+                        && matches!(
+                            entry.receiver,
+                            ReceiverKind::MoaHandler { path: actual, .. } if actual == path
+                        )
+                }),
+                "missing receiver mapping for {client} at {path}"
+            );
+        }
     }
 
     #[test]

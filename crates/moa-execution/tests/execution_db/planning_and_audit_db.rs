@@ -480,6 +480,18 @@ async fn confirmation_is_plan_hash_bound_and_exact_replay_only_db() -> TestResul
     assert_eq!(confirmed.approved_budget, approved);
     assert!(confirmed.confirmed_at.is_some());
     assert_eq!(confirmed.confirmed_plan_hash, Some(run.active_plan_hash));
+    assert_eq!(confirmed.wake_epoch, 1);
+    let confirmation_dispatch: (i64, String, String) = sqlx::query_as(
+        "SELECT wake_epoch, dispatch_kind, state FROM moa.execution_dispatch_outbox \
+         WHERE run_uid = $1",
+    )
+    .bind(run.run_uid)
+    .fetch_one(test_db.store().pool())
+    .await?;
+    assert_eq!(
+        confirmation_dispatch,
+        (1, "run_activation".into(), "pending".into())
+    );
     let queued_at = confirmed
         .queued_at
         .expect("successful confirmation sets the queue timestamp");
@@ -496,6 +508,12 @@ async fn confirmation_is_plan_hash_bound_and_exact_replay_only_db() -> TestResul
         replay,
         ConfirmationOutcome::AlreadyConfirmed(ref replay) if replay.queued_at == Some(queued_at)
     ));
+    let confirmation_dispatch_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM moa.execution_dispatch_outbox WHERE run_uid = $1")
+            .bind(run.run_uid)
+            .fetch_one(test_db.store().pool())
+            .await?;
+    assert_eq!(confirmation_dispatch_count, 1);
     assert_eq!(
         repository
             .confirm_run(scope, run.run_uid, &run.active_plan_hash, budget(6))
@@ -589,22 +607,24 @@ async fn confirmation_is_plan_hash_bound_and_exact_replay_only_db() -> TestResul
         "execution run queued timestamp is immutable",
     );
 
-    let snapshot = repository
-        .load_scheduling_snapshot(scope, run.run_uid)
+    let current = repository
+        .load_run(scope, run.run_uid)
         .await?
         .expect("confirmation test run remains visible before fencing");
-    let terminal_evidence = moa_execution::completion::cancellation_terminal_evidence(
-        &snapshot.run.goal,
-        &snapshot.run.active_plan,
-        &snapshot.projection,
-    )?;
+    let terminal_evidence =
+        moa_execution::completion::cancellation_terminal_evidence_from_completed_nodes(
+            &current.goal,
+            &current.active_plan,
+            &std::collections::BTreeSet::<String>::new(),
+        )?;
     assert!(matches!(
         repository
-            .fence_run_for_terminal(
+            .fence_completion_terminal_and_enqueue_settlement(
+                &ExecutionConfig::default(),
                 scope,
                 run.run_uid,
-                run.plan_revision,
-                snapshot.run.wake_epoch,
+                current.controller_generation,
+                current.wake_epoch,
                 PendingExecutionTerminal {
                     status: ExecutionRunStatus::Cancelled,
                     reason: ExecutionTerminalReason::Cancelled,
@@ -614,9 +634,11 @@ async fn confirmation_is_plan_hash_bound_and_exact_replay_only_db() -> TestResul
                     terminal_gaps: Vec::new(),
                     cancellation_reason: Some("confirmation test terminalization".to_string()),
                 },
+                moa_test_support::fixtures::pg_now(),
+                1,
             )
             .await?,
-        TerminalFenceOutcome::Applied(_)
+        moa_execution::repository::terminal::PendingTerminalAdvanceOutcome::Applied(_)
     ));
     assert_eq!(
         repository
@@ -692,20 +714,50 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
     let amendment_digest = validated.amendment_hash;
     assert_eq!(
         repository
-            .append_amendment(scope, run.run_uid, 2, validated.clone())
+            .append_amendment(
+                scope,
+                &ExecutionConfig::default(),
+                run.run_uid,
+                2,
+                validated.clone(),
+            )
             .await?,
         AmendmentWrite::Conflict
     );
     let AmendmentWrite::Applied(amended) = repository
-        .append_amendment(scope, run.run_uid, 1, validated.clone())
+        .append_amendment(
+            scope,
+            &ExecutionConfig::default(),
+            run.run_uid,
+            1,
+            validated.clone(),
+        )
         .await?
     else {
         panic!("expected applied amendment");
     };
     assert_eq!(amended.task_ids_to_release, vec![task.task_id]);
     let applied_wake_epoch = amended.run.wake_epoch;
+    let amendment_dispatch: (i64, String) = sqlx::query_as(
+        "SELECT wake_epoch, payload->>'reason' FROM moa.execution_dispatch_outbox \
+         WHERE run_uid = $1 AND wake_epoch = $2",
+    )
+    .bind(run.run_uid)
+    .bind(i64::try_from(applied_wake_epoch)?)
+    .fetch_one(test_db.store().pool())
+    .await?;
+    assert_eq!(
+        amendment_dispatch,
+        (i64::try_from(applied_wake_epoch)?, "plan_amended".into())
+    );
     let AmendmentWrite::Replayed(replayed) = repository
-        .append_amendment(scope, run.run_uid, 1, validated)
+        .append_amendment(
+            scope,
+            &ExecutionConfig::default(),
+            run.run_uid,
+            1,
+            validated,
+        )
         .await?
     else {
         panic!("exact amendment replay must recover its committed handoff");
@@ -713,7 +765,7 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
     assert_eq!(replayed.run.wake_epoch, applied_wake_epoch);
     assert_eq!(replayed.task_ids_to_release, vec![task.task_id]);
     let AmendmentReplayOutcome::Replayed(recovered) = repository
-        .recover_amendment_handoff(scope, run.run_uid, 1, &amendment_digest)
+        .recover_amendment_handoff(scope, run.run_uid, run.session_id, 1, &amendment_digest)
         .await?
     else {
         panic!(
@@ -724,7 +776,13 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
     assert_eq!(recovered.task_ids_to_release, vec![task.task_id]);
     assert_eq!(
         repository
-            .recover_amendment_handoff(scope, run.run_uid, 1, &ExecutionHash::from_bytes([99; 32]),)
+            .recover_amendment_handoff(
+                scope,
+                run.run_uid,
+                run.session_id,
+                1,
+                &ExecutionHash::from_bytes([99; 32]),
+            )
             .await?,
         AmendmentReplayOutcome::Conflict
     );
@@ -822,158 +880,5 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
             "failed outcome-audit replacement must roll back the whole task row"
         );
     }
-    Ok(())
-}
-
-#[tokio::test]
-async fn replan_stop_fence_recovers_exact_amendment_after_terminal_db() -> TestResult {
-    // Pins: an amendment-driven terminal fence records exact retry identity without releasing a
-    // task workflow that the compensation driver already owns and settles.
-    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
-    let repository = ExecutionRepository::new(test_db.store().pool().clone());
-    let tenant_id = TenantId::new();
-    let scope = ExecutionScope::Tenant { tenant_id };
-    let created = create_run(
-        &repository,
-        scope,
-        new_run(
-            tenant_id,
-            None,
-            "replan-stop-receipt",
-            ExecutionRunStatus::AwaitingConfirmation,
-            budget(10),
-        ),
-    )
-    .await?;
-    let ConfirmationOutcome::Confirmed(run) = repository
-        .confirm_run(
-            scope,
-            created.run_uid,
-            &created.active_plan_hash,
-            created.approved_budget,
-        )
-        .await?
-    else {
-        panic!("replan-stop receipt fixture must begin from a confirmed plan");
-    };
-    let task = logical_task(run.run_uid, "replan", "", estimate(1));
-    repository
-        .materialize_tasks(scope, run.run_uid, 1, vec![task.clone()])
-        .await?;
-    reserve_and_start(&repository, scope, run.run_uid, task.task_id).await?;
-    assert!(matches!(
-        repository
-            .record_task_outcome(scope, run.run_uid, task.task_id, 1, needs_replan(1))
-            .await?,
-        TaskOutcomeWrite::Applied { .. }
-    ));
-    let waiting = repository
-        .load_run(scope, run.run_uid)
-        .await?
-        .expect("waiting-replan run remains visible");
-    let amendment_hash = ExecutionHash::from_bytes([42; 32]);
-    let pending_terminal = PendingExecutionTerminal {
-        status: ExecutionRunStatus::Blocked,
-        reason: ExecutionTerminalReason::DuplicateAmendment,
-        terminal_evidence: moa_execution::state::ExecutionTerminalEvidence {
-            cause: ExecutionTerminalCause::ReplanStop {
-                reason: ReplanStopReason::DuplicateAmendment,
-            },
-            satisfied_requirement_count: 0,
-            requirement_count: 1,
-        },
-        output: None,
-        completion_check_results: Vec::new(),
-        terminal_gaps: vec!["duplicate amendment".to_string()],
-        cancellation_reason: None,
-    };
-    let receipt = ReplanStopReceipt {
-        task_id: task.task_id,
-        task_generation: 1,
-        base_plan_revision: 1,
-        amendment_hash,
-    };
-    let TerminalFenceOutcome::Applied(fence) = repository
-        .fence_replan_stop(
-            scope,
-            run.run_uid,
-            1,
-            waiting.wake_epoch,
-            pending_terminal.clone(),
-            receipt,
-        )
-        .await?
-    else {
-        panic!("first replan-stop fence must apply");
-    };
-    assert!(matches!(
-        repository
-            .fence_replan_stop(
-                scope,
-                run.run_uid,
-                1,
-                waiting.wake_epoch,
-                pending_terminal,
-                receipt,
-            )
-            .await?,
-        TerminalFenceOutcome::Replayed(_)
-    ));
-    let AmendmentReplayOutcome::Replayed(replayed) = repository
-        .recover_amendment_handoff(scope, run.run_uid, 1, &amendment_hash)
-        .await?
-    else {
-        panic!("exact fenced replan stop must replay");
-    };
-    assert!(replayed.task_ids_to_release.is_empty());
-    assert_eq!(
-        repository
-            .recover_amendment_handoff(scope, run.run_uid, 1, &ExecutionHash::from_bytes([43; 32]))
-            .await?,
-        AmendmentReplayOutcome::Conflict
-    );
-
-    assert!(matches!(
-        repository
-            .record_task_outcome(
-                scope,
-                run.run_uid,
-                task.task_id,
-                1,
-                ExecutionTaskOutcome {
-                    schema_version: 1,
-                    usage: usage(1),
-                    result: ExecutionTaskResult::Cancelled {
-                        reason: "replan stop fenced".to_string(),
-                    },
-                },
-            )
-            .await?,
-        TaskOutcomeWrite::Applied { .. }
-    ));
-    let settled = repository
-        .load_run(scope, run.run_uid)
-        .await?
-        .expect("settled replan-stop run remains visible");
-    assert!(matches!(
-        repository
-            .finalize_fenced_terminal(scope, run.run_uid, 1, settled.wake_epoch)
-            .await?,
-        FencedTerminalFinalizationOutcome::Finalized(_)
-    ));
-    let AmendmentReplayOutcome::Replayed(replayed) = repository
-        .recover_amendment_handoff(scope, run.run_uid, 1, &amendment_hash)
-        .await?
-    else {
-        panic!("exact replan-stop receipt must survive terminal finalization");
-    };
-    assert!(replayed.task_ids_to_release.is_empty());
-    assert_eq!(
-        repository
-            .recover_amendment_handoff(scope, run.run_uid, 1, &ExecutionHash::from_bytes([43; 32]))
-            .await?,
-        AmendmentReplayOutcome::Conflict
-    );
-    assert_eq!(fence.run.plan_revision, 1);
     Ok(())
 }

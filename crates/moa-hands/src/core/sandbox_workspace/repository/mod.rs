@@ -9,14 +9,16 @@ use moa_core::{
     error::{MoaError, Result},
     types::{
         identifiers::{
-            ExecutionRunScopeId, ExecutionTaskScopeId, ProviderAccountId, SandboxWorkspaceId,
-            SessionId, TenantId, WorkspaceCheckpointId, WorkspaceOperationId,
+            ExecutionCompensationScopeId, ExecutionRunScopeId, ExecutionTaskScopeId,
+            HandProvisioningOperationId, ProviderAccountId, SandboxWorkspaceId, SessionId,
+            TenantId, WorkspaceCheckpointId, WorkspaceOperationId,
         },
         memory::RlsContext,
         sandbox_workspace::{
-            DurabilityClass, ProviderStorageKind, SandboxWorkspaceScope, SandboxWorkspaceState,
-            WorkspaceBinding, WorkspaceCheckpointPublication, WorkspaceCheckpointState,
-            WorkspaceOperationKind, WorkspacePostCommitState,
+            DurabilityClass, ExecutionHandReleaseOwner, ExecutionHandReleaseReceipt,
+            ProviderStorageKind, SandboxWorkspaceScope, SandboxWorkspaceState, WorkspaceBinding,
+            WorkspaceCheckpointPublication, WorkspaceCheckpointState, WorkspaceOperationKind,
+            WorkspacePostCommitState,
         },
     },
 };
@@ -31,9 +33,11 @@ use super::{
     },
     failpoints,
     model::{
-        ActivateHydratedWorkspaceRequest, CreateWorkspaceRequest, SandboxWorkspace, WorkspaceGrant,
-        WorkspaceGrantRelation, WorkspaceGrantSubjectType, WorkspaceProviderAccount,
-        WorkspaceTransition, WorkspaceWriterClaim,
+        AbsentTaskHandReleaseIntent, ActivateHydratedWorkspaceRequest,
+        CompensationHandReleaseClaim, CompensationHandReleaseIntent, CreateWorkspaceRequest,
+        SandboxWorkspace, TaskHandReleaseIntent, WorkspaceGrant, WorkspaceGrantRelation,
+        WorkspaceGrantSubjectType, WorkspaceProviderAccount, WorkspaceTransition,
+        WorkspaceWriterClaim,
     },
     operations::ClaimedWorkspaceOperation,
 };

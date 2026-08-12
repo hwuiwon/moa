@@ -11,13 +11,15 @@ use moa_core::types::{
         MemoryLimit, SandboxPolicySnapshot, SandboxProfile, SandboxTier,
     },
     identifiers::{
-        ExecutionRunScopeId, ExecutionTaskScopeId, ProviderAccountId, SandboxWorkspaceId,
-        SessionId, TenantId, WorkspaceCheckpointId, WorkspaceOperationId,
+        ExecutionCompensationScopeId, ExecutionRunScopeId, ExecutionTaskScopeId,
+        HandProvisioningOperationId, ProviderAccountId, SandboxWorkspaceId, SessionId, TenantId,
+        WorkspaceCheckpointId, WorkspaceOperationId,
     },
     sandbox_workspace::{
-        DurabilityClass, ProviderStorageKind, ProviderStorageRef, SandboxWorkspaceScope,
-        SandboxWorkspaceState, WorkspaceBinding, WorkspaceCheckpointPublication,
-        WorkspaceOperationKind, WorkspacePostCommitState, WorkspaceRevisionRef,
+        DurabilityClass, ExecutionHandReleaseOwner, ExecutionHandReleaseReceipt,
+        ProviderStorageKind, ProviderStorageRef, SandboxWorkspaceScope, SandboxWorkspaceState,
+        WorkspaceBinding, WorkspaceCheckpointPublication, WorkspaceOperationKind,
+        WorkspacePostCommitState, WorkspaceRevisionRef, WorkspaceStorageOperation,
     },
 };
 use moa_hands::core::{
@@ -26,10 +28,12 @@ use moa_hands::core::{
         HandLeaseWorkspaceAttachment, LeaseHandle, PostgresHandLeaseStore,
     },
     sandbox_workspace::{
+        capacity::{ActiveHandCapacityRequest, PostgresWorkspaceCapacityRepository},
         checkpoint::model::{CreateCheckpointRequest, PublishCheckpointCommitRequest},
         model::{
-            ActivateHydratedWorkspaceRequest, CreateWorkspaceRequest, SandboxWorkspace,
-            WorkspaceTransition, WorkspaceWriterClaim,
+            AbsentTaskHandReleaseIntent, ActivateHydratedWorkspaceRequest,
+            CompensationHandReleaseIntent, CreateWorkspaceRequest, SandboxWorkspace,
+            TaskHandReleaseIntent, WorkspaceTransition, WorkspaceWriterClaim,
         },
         operations::{
             AbsenceObservation, PostgresWorkspaceOperationRepository, WorkspaceOperationIntent,
@@ -56,6 +60,161 @@ async fn seed_account(pool: &sqlx::PgPool, account_id: ProviderAccountId) {
     .execute(pool)
     .await
     .expect("seed provider account");
+}
+
+async fn seed_cancelling_compensation(
+    pool: &sqlx::PgPool,
+    tenant_id: TenantId,
+    session_id: SessionId,
+) -> (
+    ExecutionRunScopeId,
+    ExecutionTaskScopeId,
+    ExecutionCompensationScopeId,
+) {
+    let planning_context_uid = uuid::Uuid::now_v7();
+    let run_id = ExecutionRunScopeId::new();
+    let task_id = ExecutionTaskScopeId::new();
+    let compensation_id = ExecutionCompensationScopeId::new();
+    let plan_hash = "1".repeat(64);
+    let context_hash = "2".repeat(64);
+    let plan = serde_json::json!({
+        "definition": {
+            "cancel_policy": "retain_effects",
+            "input_schema": {},
+            "output_schema": {},
+            "input_wait_policy": {
+                "expiry": {"kind": "after", "delay_seconds": 1},
+                "on_expiry": {"kind": "fail_run"}
+            },
+            "nodes": [{
+                "id": "output", "requirement_ids": [], "depends_on": [], "when": null,
+                "input": {}, "output_schema": {},
+                "operation": {"kind": "output", "value": {}},
+                "compensation": null,
+                "retry": {"max_attempts": 1, "initial_backoff_ms": 1, "max_backoff_ms": 1},
+                "budget": null
+            }]
+        },
+        "plan_hash": plan_hash,
+        "catalog_hash": "0".repeat(64),
+        "estimate": {"cost_microusd": 0, "tokens": 0, "tool_calls": 0,
+                     "retrieved_bytes": 0, "tasks": 1},
+        "report": {"issues": []}
+    });
+    sqlx::query(
+        "INSERT INTO moa.execution_planning_context (\
+             planning_context_uid, tenant_id, session_id, originating_user_sequence_num,\
+             originating_user_event_hash, owner_user_id, planning_context_hash, snapshot\
+         ) VALUES ($1, $2, $3, 0, $4, 'hands-release-test', $4, '{}'::JSONB)",
+    )
+    .bind(planning_context_uid)
+    .bind(tenant_id)
+    .bind(session_id)
+    .bind(&context_hash)
+    .execute(pool)
+    .await
+    .expect("seed execution planning context");
+    sqlx::query(
+        "INSERT INTO moa.execution_run (\
+             run_uid, tenant_id, session_id, originating_user_sequence_num,\
+             planning_context_uid, planning_context_hash, owner_user_id, goal_contract,\
+             initial_plan, active_plan, initial_plan_hash, active_plan_hash,\
+             capability_catalog, authorization_envelope, source_provenance, source_kind,\
+             input, admitted_identity, status\
+         ) VALUES ($1, $2, $3, 0, $4, $5, 'hands-release-test', $6, $7, $7, $8, $8,\
+                   $9, $10, $11, 'generated_plan', '{}'::JSONB, $12, 'queued')",
+    )
+    .bind(run_id)
+    .bind(tenant_id)
+    .bind(session_id)
+    .bind(planning_context_uid)
+    .bind(&context_hash)
+    .bind(serde_json::json!({
+        "objective": "release", "requirements": [], "deliverables": [],
+        "coverage": [], "constraints": [], "completion_checks": []
+    }))
+    .bind(&plan)
+    .bind(&plan_hash)
+    .bind(serde_json::json!({"capabilities": [], "catalog_hash": "0".repeat(64)}))
+    .bind(serde_json::json!({"capability_refs": [], "skill_refs": []}))
+    .bind(serde_json::json!({
+        "kind": "generated_plan",
+        "planner": {"model": "hands-release-test", "prompt_version": "test",
+                    "candidate_hash": "3".repeat(64), "compiler_report_hash": "4".repeat(64),
+                    "final_plan_hash": plan_hash, "repair_attempts": 0}
+    }))
+    .bind(serde_json::json!({
+        "identity_type": "operator", "id": run_id, "tenant_id": tenant_id,
+        "api_key_id": null, "acting_on_behalf_of": null
+    }))
+    .execute(pool)
+    .await
+    .expect("seed execution run");
+    sqlx::query(
+        "INSERT INTO moa.execution_task (\
+             task_id, run_uid, tenant_id, node_id, item_key, plan_revision, status, input,\
+             task_kind, retry_policy, estimate_cost_microusd, estimate_tokens, estimate_tasks,\
+             estimate_tool_calls, estimate_retrieved_bytes\
+         ) VALUES ($1, $2, $3, 'forward', 'forward', 1, 'completed', '{}',\
+                   '{\"kind\":\"output\",\"value\":null}',\
+                   '{\"max_attempts\":2,\"initial_backoff_ms\":1,\"max_backoff_ms\":1}',\
+                   0, 0, 1, 0, 0)",
+    )
+    .bind(task_id)
+    .bind(run_id)
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("seed forward task");
+    sqlx::query(
+        "INSERT INTO moa.execution_compensation (\
+             compensation_id, run_uid, forward_task_id, tenant_id, registered_sequence,\
+             forward_generation, compensator, mapped_input, status, started_at,\
+             attempt_state, attempt_started_at, attempt_deadline_at, release_intent\
+         ) VALUES ($1, $2, $3, $4, 1, 1, $5, '{}', 'running', now(),\
+                   'cancelling', now(), now() + interval '10 minutes', 'pause')",
+    )
+    .bind(compensation_id)
+    .bind(run_id)
+    .bind(task_id)
+    .bind(tenant_id)
+    .bind(serde_json::json!({
+        "compensator": {"name": "test.undo", "version": "contract"},
+        "input_mapping": {"bindings": []}
+    }))
+    .execute(pool)
+    .await
+    .expect("seed cancelling compensation");
+    (run_id, task_id, compensation_id)
+}
+
+async fn seed_cancelling_task(
+    pool: &sqlx::PgPool,
+    tenant_id: TenantId,
+    run_id: ExecutionRunScopeId,
+    node_id: &str,
+) -> ExecutionTaskScopeId {
+    let task_id = ExecutionTaskScopeId::new();
+    sqlx::query(
+        "INSERT INTO moa.execution_task (\
+             task_id, run_uid, tenant_id, node_id, item_key, plan_revision, status, input,\
+             task_kind, retry_policy, estimate_cost_microusd, estimate_tokens, estimate_tasks,\
+             estimate_tool_calls, estimate_retrieved_bytes, reserved_tasks, reserved_at,\
+             started_at, attempt_state, attempt_started_at, attempt_deadline_at\
+         ) VALUES ($1, $2, $3, $4, $4, 1, 'running', '{}',\
+                   '{\"kind\":\"output\",\"value\":null}',\
+                   '{\"max_attempts\":2,\"initial_backoff_ms\":1,\"max_backoff_ms\":1}',\
+                   0, 0, 1, 0, 0, 1, now(), now(), 'cancelling', now(),\
+                   now() + interval '10 minutes')",
+    )
+    .bind(task_id)
+    .bind(run_id)
+    .bind(tenant_id)
+    .bind(node_id)
+    .execute(pool)
+    .await
+    .expect("seed cancelling execution task");
+    task_id
 }
 
 fn lease_policy() -> HandLeasePolicy {
@@ -107,7 +266,7 @@ async fn activate_hydrated_workspace(
     session_id: SessionId,
     worker_id: &str,
     workspace: &SandboxWorkspace,
-) {
+) -> ActiveHandCapacityRequest {
     let leases = PostgresHandLeaseStore::new(pool.clone());
     let attachment = HandLeaseWorkspaceAttachment::new(
         workspace.workspace_id,
@@ -139,6 +298,21 @@ async fn activate_hydrated_workspace(
         ))),
     );
     let workspaces = PostgresWorkspaceRepository::new(pool.clone());
+    let capacity = PostgresWorkspaceCapacityRepository::new(pool.clone());
+    let active_capacity = ActiveHandCapacityRequest {
+        tenant_id: workspace.tenant_id,
+        workspace_id: workspace.workspace_id,
+        provider_account_id: workspace.provider_account_id,
+        provider_account_generation: workspace.provider_account_generation,
+        provisioning_operation_id: provisioning.provisioning_operation_id,
+        hand_lease_generation: provisioning.generation,
+        expected_writer_epoch: workspace.writer_epoch,
+        expected_instance_generation: workspace.instance_generation,
+    };
+    capacity
+        .reserve_active_hand(&active_capacity)
+        .await
+        .expect("reserve exact active hand before provider creation");
     assert!(
         workspaces
             .activate_hydrated(ActivateHydratedWorkspaceRequest {
@@ -149,6 +323,12 @@ async fn activate_hydrated_workspace(
             .await
             .expect("atomically activate exact hydrated lease and workspace")
     );
+    assert!(
+        capacity
+            .commit_active_hand(&active_capacity)
+            .await
+            .expect("commit exact active hand after activation")
+    );
     let active_lease = leases
         .get(workspace.tenant_id, session_id, worker_id, "local")
         .await
@@ -156,6 +336,7 @@ async fn activate_hydrated_workspace(
         .expect("activated hand lease exists");
     assert_eq!(active_lease.status, HandLeaseStatus::Active);
     assert_eq!(active_lease.attachment, provisioning.attachment);
+    active_capacity
 }
 
 fn create_request(
@@ -179,7 +360,509 @@ fn create_request(
 }
 
 #[tokio::test]
-#[ignore = "requires a fresh V58 compose Postgres via MOA_DATABASE_URL"]
+#[ignore = "requires a fresh V60 compose Postgres via MOA_DATABASE_URL"]
+async fn cancelling_task_without_owned_compute_gets_exact_absence_receipt_db() {
+    // Pins: a sandbox-capable task denied before provisioning still obtains a
+    // durable exact-attempt absence receipt, while a live lease cannot be hidden
+    // behind that no-workspace path.
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url())
+        .await
+        .expect("test Postgres should be reachable");
+    let tenant_id = TenantId::new();
+    let session_id = SessionId::new();
+    seed_session(&pool, session_id, tenant_id).await;
+    let (run_id, _, _) = seed_cancelling_compensation(&pool, tenant_id, session_id).await;
+    let task_id = seed_cancelling_task(&pool, tenant_id, run_id, "never-provisioned").await;
+    let repository = PostgresWorkspaceRepository::new(pool.clone());
+    let intent = AbsentTaskHandReleaseIntent {
+        receipt_id: uuid::Uuid::now_v7(),
+        tenant_id,
+        run_id,
+        task_id,
+        logical_generation: 1,
+        attempt_generation: 1,
+        verified_at: Utc::now(),
+    };
+    let receipt = repository
+        .record_absent_task_execution_hand_release_receipt(intent)
+        .await
+        .expect("record exact no-owned-compute receipt");
+    assert_eq!(
+        receipt.owner,
+        ExecutionHandReleaseOwner::Task {
+            task_id,
+            logical_generation: 1,
+        }
+    );
+    assert_eq!(receipt.attempt_generation, 1);
+    assert_eq!(
+        (
+            receipt.workspace_id,
+            receipt.hand_provisioning_operation_id,
+            receipt.checkpoint_id,
+        ),
+        (None, None, None),
+        "database-verified absence must not fabricate provider ownership"
+    );
+    assert_eq!(
+        repository
+            .get_task_execution_hand_release_receipt(tenant_id, run_id, task_id, 1, 1)
+            .await
+            .expect("replay exact absence receipt"),
+        Some(receipt)
+    );
+
+    let live_task_id = seed_cancelling_task(&pool, tenant_id, run_id, "live-owner").await;
+    let live_scope = format!("execution:{run_id}:{live_task_id}");
+    sqlx::query(
+        "INSERT INTO moa.hand_leases (\
+             session_id, worker_id, tenant_id, provider, tier, handle, status, generation,\
+             provisioning_operation_id, provisioning_deadline_at, created_at, updated_at\
+         ) VALUES ($1, $2, $3, 'local', 'local', NULL, 'stale', 1,\
+                   gen_random_uuid(), now(), now(), now())",
+    )
+    .bind(session_id)
+    .bind(&live_scope)
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("seed live exact task owner");
+    assert!(
+        repository
+            .record_absent_task_execution_hand_release_receipt(AbsentTaskHandReleaseIntent {
+                receipt_id: uuid::Uuid::now_v7(),
+                tenant_id,
+                run_id,
+                task_id: live_task_id,
+                logical_generation: 1,
+                attempt_generation: 1,
+                verified_at: Utc::now(),
+            })
+            .await
+            .is_err(),
+        "a live exact owner must block the task absence proof"
+    );
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres for an isolated current-schema test database"]
+async fn checkpointed_task_destroy_records_exact_release_receipt_db() {
+    // Pins: after the portable checkpoint CAS destroys an execution-task hand,
+    // the final receipt CAS recognizes the available checkpoint row and makes
+    // the exact task-attempt release replayable.
+    let test_db = moa_test_support::postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated current-schema Postgres");
+    let pool = test_db.store().pool().clone();
+    let tenant_id = TenantId::new();
+    let session_id = SessionId::new();
+    let account_id = ProviderAccountId::new();
+    let workspace_id = SandboxWorkspaceId::new();
+    seed_session(&pool, session_id, tenant_id).await;
+    seed_account(&pool, account_id).await;
+    let (run_id, _, _) = seed_cancelling_compensation(&pool, tenant_id, session_id).await;
+    let task_id = seed_cancelling_task(&pool, tenant_id, run_id, "checkpointed-release").await;
+    let worker_id = format!("execution:{run_id}:{task_id}");
+    let workspace_scope = SandboxWorkspaceScope::ExecutionTask { run_id, task_id };
+    let workspaces = PostgresWorkspaceRepository::new(pool.clone());
+    let operations = PostgresWorkspaceOperationRepository::new(pool.clone());
+    workspaces
+        .create(&CreateWorkspaceRequest {
+            workspace_id,
+            tenant_id,
+            scope: workspace_scope,
+            provider: "local".to_string(),
+            provider_account_id: account_id,
+            provider_account_generation: 1,
+            durability_class: DurabilityClass::PortableFilesystem,
+            retention_deadline_at: None,
+        })
+        .await
+        .expect("create task workspace");
+    assert!(
+        workspaces
+            .transition(WorkspaceTransition {
+                tenant_id,
+                workspace_id,
+                from: SandboxWorkspaceState::Creating,
+                to: SandboxWorkspaceState::Ready,
+                writer_epoch: 0,
+                instance_generation: 0,
+            })
+            .await
+            .expect("make task workspace ready")
+    );
+    let restoring = workspaces
+        .claim_writer(WorkspaceWriterClaim {
+            tenant_id,
+            workspace_id,
+            expected_state: SandboxWorkspaceState::Ready,
+            expected_writer_epoch: 0,
+            expected_instance_generation: 0,
+        })
+        .await
+        .expect("claim task workspace writer")
+        .expect("task workspace writer claim succeeds");
+    activate_hydrated_workspace(&pool, session_id, &worker_id, &restoring).await;
+    let active = workspaces
+        .get(tenant_id, workspace_id)
+        .await
+        .expect("load active task workspace")
+        .expect("active task workspace exists");
+    let leases = PostgresHandLeaseStore::new(pool.clone());
+    let active_lease = leases
+        .get(tenant_id, session_id, &worker_id, "local")
+        .await
+        .expect("load active task lease")
+        .expect("active task lease exists");
+    let receipt_id = uuid::Uuid::now_v7();
+    let (persisted_receipt_id, claim_token, requested_at) = workspaces
+        .begin_task_execution_hand_release(TaskHandReleaseIntent {
+            receipt_id,
+            run_id,
+            task_id,
+            logical_generation: 1,
+            attempt_generation: 1,
+            deadline_at: Utc::now() + ChronoDuration::minutes(5),
+            recovery_claim_expires_at: Utc::now() + ChronoDuration::minutes(5),
+            workspace: &active,
+            lease: &active_lease,
+        })
+        .await
+        .expect("persist task release intent before provider work");
+    assert_eq!(persisted_receipt_id, receipt_id);
+
+    for (from, to) in [
+        (
+            SandboxWorkspaceState::Active,
+            SandboxWorkspaceState::Quiescing,
+        ),
+        (
+            SandboxWorkspaceState::Quiescing,
+            SandboxWorkspaceState::Committing,
+        ),
+    ] {
+        assert!(
+            workspaces
+                .transition(WorkspaceTransition {
+                    tenant_id,
+                    workspace_id,
+                    from,
+                    to,
+                    writer_epoch: active.writer_epoch,
+                    instance_generation: active.instance_generation,
+                })
+                .await
+                .expect("enter task release checkpoint barrier")
+        );
+    }
+    let operation_id = WorkspaceOperationId::new();
+    let checkpoint_id = WorkspaceCheckpointId(operation_id.0);
+    let now = Utc::now();
+    operations
+        .persist_intent(&WorkspaceOperationIntent {
+            operation_id,
+            tenant_id,
+            workspace_id,
+            provider_account_id: account_id,
+            provider_account_generation: 1,
+            kind: WorkspaceOperationKind::Commit,
+            request_hash: "sha256:task-release".to_string(),
+            expected_writer_epoch: active.writer_epoch,
+            expected_instance_generation: active.instance_generation,
+            expected_checkpoint_generation: active.checkpoint_generation,
+            deadline_at: now + ChronoDuration::minutes(5),
+            reconcile_not_before: now + ChronoDuration::minutes(6),
+        })
+        .await
+        .expect("persist task release checkpoint intent");
+    workspaces
+        .create_checkpoint(CreateCheckpointRequest {
+            checkpoint_id,
+            tenant_id,
+            workspace_id,
+            parent_checkpoint_id: None,
+            operation_id,
+            expected_writer_epoch: active.writer_epoch,
+            expected_instance_generation: active.instance_generation,
+            expected_checkpoint_generation: active.checkpoint_generation,
+        })
+        .await
+        .expect("create task release checkpoint row")
+        .expect("task release checkpoint fences match");
+    let active_binding = binding(&active);
+    let storage_operation = WorkspaceStorageOperation {
+        operation_id,
+        kind: WorkspaceOperationKind::Commit,
+        binding: active_binding.clone(),
+        deadline: now + ChronoDuration::minutes(5),
+        request_hash: "sha256:task-release".to_string(),
+    };
+    PostgresWorkspaceCapacityRepository::new(pool.clone())
+        .reserve_checkpoint_publication(&storage_operation, 0)
+        .await
+        .expect("reserve task release checkpoint before publication");
+    let publication = WorkspaceCheckpointPublication {
+        revision: WorkspaceRevisionRef {
+            checkpoint_id,
+            generation: 1,
+            format_version: 1,
+        },
+        storage: ProviderStorageRef {
+            provider_account_id: account_id,
+            provider_account_generation: 1,
+            kind: ProviderStorageKind::PortableCheckpoint,
+            resource_id: format!("object://{checkpoint_id}"),
+            workspace_locator: None,
+        },
+        manifest_digest: "sha256:task-release-manifest".to_string(),
+        logical_bytes: 0,
+    };
+    assert!(
+        workspaces
+            .publish_checkpoint_commit(PublishCheckpointCommitRequest {
+                binding: &active_binding,
+                operation_id,
+                publication: &publication,
+                post_commit_state: WorkspacePostCommitState::ComputeDestroyed,
+                lease: &active_lease,
+            })
+            .await
+            .expect("atomically publish task release checkpoint and destroy lease")
+    );
+    let receipt = ExecutionHandReleaseReceipt {
+        receipt_id,
+        tenant_id,
+        run_id,
+        owner: ExecutionHandReleaseOwner::Task {
+            task_id,
+            logical_generation: 1,
+        },
+        attempt_generation: 1,
+        workspace_id: Some(workspace_id),
+        writer_epoch: Some(u64::try_from(active.writer_epoch).expect("valid writer epoch")),
+        instance_generation: Some(
+            u64::try_from(active.instance_generation).expect("valid instance generation"),
+        ),
+        hand_provisioning_operation_id: Some(active_lease.provisioning_operation_id),
+        hand_lease_generation: Some(
+            u64::try_from(active_lease.generation).expect("valid hand lease generation"),
+        ),
+        checkpoint_id: Some(checkpoint_id),
+        checkpoint_generation: Some(1),
+        checkpoint_manifest_digest: Some(publication.manifest_digest.clone()),
+        checkpoint_logical_bytes: Some(0),
+        requested_at,
+        released_at: Utc::now(),
+    };
+    let finalized = workspaces
+        .record_task_execution_hand_release_receipt(&receipt, claim_token)
+        .await
+        .expect("available checkpoint must finalize the task release receipt");
+    assert_eq!(finalized, receipt);
+    assert_eq!(
+        workspaces
+            .get_task_execution_hand_release_receipt(tenant_id, run_id, task_id, 1, 1)
+            .await
+            .expect("replay finalized task release receipt"),
+        Some(receipt)
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh V60 compose Postgres via MOA_DATABASE_URL"]
+async fn compensation_release_recovers_persisted_destroyed_identity_after_deadline_db() {
+    // Pins: a crash after provider teardown but before receipt finalization reuses
+    // the pending receipt's exact lease identity after the provider-I/O deadline;
+    // deleting that exact destroyed row remains fail-closed.
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url())
+        .await
+        .expect("test Postgres should be reachable");
+    let tenant_id = TenantId::new();
+    let session_id = SessionId::new();
+    seed_session(&pool, session_id, tenant_id).await;
+    let (run_id, _task_id, compensation_id) =
+        seed_cancelling_compensation(&pool, tenant_id, session_id).await;
+    let hand_scope = format!("execution_compensation:{run_id}:{compensation_id}");
+    let provisioning_operation_id = HandProvisioningOperationId::new();
+    let generation = 7_i64;
+    let lease_handle = LeaseHandle::new(
+        provisioning_operation_id,
+        HandHandle::local(PathBuf::from(format!("/tmp/{provisioning_operation_id}"))),
+    );
+    sqlx::query(
+        "INSERT INTO moa.hand_leases (\
+             session_id, worker_id, tenant_id, provider, tier, handle, status, generation,\
+             provisioning_operation_id, provisioning_deadline_at, created_at, updated_at\
+         ) VALUES ($1, $2, $3, 'local', 'local', $4, 'stale', $5, $6, now(), now(), now())",
+    )
+    .bind(session_id)
+    .bind(&hand_scope)
+    .bind(tenant_id)
+    .bind(sqlx::types::Json(&lease_handle))
+    .bind(generation)
+    .bind(provisioning_operation_id)
+    .execute(&pool)
+    .await
+    .expect("seed stale compensation lease");
+    let leases = PostgresHandLeaseStore::new(pool.clone());
+    let initial_lease = leases
+        .get(tenant_id, session_id, &hand_scope, "local")
+        .await
+        .expect("load exact compensation lease")
+        .expect("seeded compensation lease exists");
+    let repository = PostgresWorkspaceRepository::new(pool.clone());
+    let receipt_id = uuid::Uuid::now_v7();
+    let deadline_at = Utc::now() + ChronoDuration::minutes(1);
+    repository
+        .begin_compensation_execution_hand_release(CompensationHandReleaseIntent {
+            receipt_id,
+            tenant_id,
+            session_id,
+            run_id,
+            compensation_id,
+            logical_generation: 1,
+            attempt_generation: 1,
+            hand_scope: &hand_scope,
+            lease: Some(&initial_lease),
+            deadline_at,
+            recovery_claim_expires_at: deadline_at,
+        })
+        .await
+        .expect("persist exact compensation release intent");
+    let destroy_claim = leases
+        .claim_for_destroy(tenant_id, &initial_lease, Duration::from_secs(30))
+        .await
+        .expect("claim exact lease destroy")
+        .expect("stale lease is destroyable");
+    assert!(
+        leases
+            .finalize_destroy(tenant_id, &initial_lease, destroy_claim)
+            .await
+            .expect("finalize exact lease destroy")
+    );
+    sqlx::query(
+        "UPDATE moa.sandbox_execution_hand_release_receipts\
+         SET requested_at = now() - interval '10 minutes',\
+             deadline_at = now() - interval '5 minutes',\
+             claim_expires_at = now() - interval '6 minutes'\
+         WHERE receipt_id = $1",
+    )
+    .bind(receipt_id)
+    .execute(&pool)
+    .await
+    .expect("advance pending release beyond its provider deadline");
+    let claim = repository
+        .claim_pending_compensation_execution_hand_release(
+            tenant_id,
+            run_id,
+            compensation_id,
+            1,
+            1,
+            Utc::now() + ChronoDuration::minutes(5),
+        )
+        .await
+        .expect("renew storage-only recovery claim")
+        .expect("expired pending release is reclaimable");
+    assert_eq!(claim.receipt_id, receipt_id);
+    assert_eq!(
+        claim.hand_provisioning_operation_id,
+        Some(provisioning_operation_id)
+    );
+    assert_eq!(claim.hand_lease_generation, Some(generation));
+    let destroyed = leases
+        .get_exact_generation(
+            tenant_id,
+            session_id,
+            &hand_scope,
+            provisioning_operation_id,
+            generation,
+        )
+        .await
+        .expect("load exact destroyed generation")
+        .expect("destroyed generation remains durable");
+    assert_eq!(destroyed.status, HandLeaseStatus::Destroyed);
+    assert!(destroyed.handle.is_none());
+
+    sqlx::query(
+        "DELETE FROM moa.hand_leases WHERE tenant_id = $1 AND session_id = $2\
+         AND worker_id = $3 AND provisioning_operation_id = $4 AND generation = $5",
+    )
+    .bind(tenant_id)
+    .bind(session_id)
+    .bind(&hand_scope)
+    .bind(provisioning_operation_id)
+    .bind(generation)
+    .execute(&pool)
+    .await
+    .expect("simulate corrupt missing exact lease row");
+    let release_receipt = ExecutionHandReleaseReceipt {
+        receipt_id,
+        tenant_id,
+        run_id,
+        owner: ExecutionHandReleaseOwner::Compensation {
+            compensation_id,
+            logical_generation: 1,
+        },
+        attempt_generation: 1,
+        workspace_id: None,
+        writer_epoch: None,
+        instance_generation: None,
+        hand_provisioning_operation_id: Some(provisioning_operation_id),
+        hand_lease_generation: Some(u64::try_from(generation).expect("positive generation")),
+        checkpoint_id: None,
+        checkpoint_generation: None,
+        checkpoint_manifest_digest: None,
+        checkpoint_logical_bytes: None,
+        requested_at: claim.requested_at,
+        released_at: Utc::now(),
+    };
+    assert!(
+        repository
+            .record_compensation_execution_hand_release_receipt(
+                &release_receipt,
+                session_id,
+                &hand_scope,
+                claim.claim_token,
+            )
+            .await
+            .is_err(),
+        "missing exact destroyed lease evidence must not finalize absence"
+    );
+    sqlx::query(
+        "INSERT INTO moa.hand_leases (\
+             session_id, worker_id, tenant_id, provider, tier, handle, status, generation,\
+             provisioning_operation_id, provisioning_deadline_at, created_at, updated_at\
+         ) VALUES ($1, $2, $3, 'local', 'local', NULL, 'destroyed', $4, $5, now(), now(), now())",
+    )
+    .bind(session_id)
+    .bind(&hand_scope)
+    .bind(tenant_id)
+    .bind(generation)
+    .bind(provisioning_operation_id)
+    .execute(&pool)
+    .await
+    .expect("restore exact destroyed evidence");
+    let finalized = repository
+        .record_compensation_execution_hand_release_receipt(
+            &release_receipt,
+            session_id,
+            &hand_scope,
+            claim.claim_token,
+        )
+        .await
+        .expect("finalize recovered exact receipt");
+    assert_eq!(finalized, release_receipt);
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh V60 compose Postgres via MOA_DATABASE_URL"]
 async fn workspace_writer_and_reconciliation_callbacks_are_generation_fenced_db() {
     // Pins: competing writers have one CAS winner, and changed inventory cannot
     // satisfy the two-separated-empty absence proof.
@@ -242,7 +925,8 @@ async fn workspace_writer_and_reconciliation_callbacks_are_generation_fenced_db(
         (restoring.writer_epoch, restoring.instance_generation),
         (1, 1)
     );
-    activate_hydrated_workspace(&pool, session_id, &worker_id, &restoring).await;
+    let active_capacity =
+        activate_hydrated_workspace(&pool, session_id, &worker_id, &restoring).await;
     let active = workspaces
         .get(tenant_id, workspace_id)
         .await
@@ -250,6 +934,50 @@ async fn workspace_writer_and_reconciliation_callbacks_are_generation_fenced_db(
         .expect("activated workspace exists");
     assert_eq!(active.state, SandboxWorkspaceState::Active);
     assert_eq!((active.writer_epoch, active.instance_generation), (1, 1));
+
+    let reaper_claim = uuid::Uuid::now_v7();
+    sqlx::query(
+        r#"
+        UPDATE moa.hand_leases
+        SET status = 'reaping', reap_claim_token = $2,
+            reap_claim_expires_at = now() + interval '30 seconds'
+        WHERE session_id = $1
+        "#,
+    )
+    .bind(session_id)
+    .bind(reaper_claim)
+    .execute(&pool)
+    .await
+    .expect("establish exact durable reaper ownership");
+    let capacity = PostgresWorkspaceCapacityRepository::new(pool.clone());
+    let mut stale_capacity = active_capacity;
+    stale_capacity.hand_lease_generation += 1;
+    assert!(
+        !capacity
+            .release_active_hand_to_reaper(&stale_capacity, reaper_claim)
+            .await
+            .expect("stale generation is a fenced miss")
+    );
+    assert!(
+        !capacity
+            .release_active_hand_to_reaper(&active_capacity, uuid::Uuid::now_v7())
+            .await
+            .expect("wrong reaper token is a fenced miss")
+    );
+    assert!(
+        capacity
+            .release_active_hand_to_reaper(&active_capacity, reaper_claim)
+            .await
+            .expect("exact live reaper claim releases active compute capacity")
+    );
+    let active_capacity_state = sqlx::query_scalar::<_, String>(
+        "SELECT reservation_state FROM moa.sandbox_capacity_reservations WHERE hand_provisioning_operation_id = $1",
+    )
+    .bind(active_capacity.provisioning_operation_id)
+    .fetch_one(&pool)
+    .await
+    .expect("load released active capacity row");
+    assert_eq!(active_capacity_state, "released");
 
     assert!(
         !workspaces
@@ -331,6 +1059,11 @@ async fn workspace_writer_and_reconciliation_callbacks_are_generation_fenced_db(
         AbsenceObservation::First
     );
 
+    sqlx::query("DELETE FROM moa.sandbox_capacity_reservations WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(&pool)
+        .await
+        .expect("clean workspace capacity reservations");
     sqlx::query("DELETE FROM moa.sandbox_workspace_operations WHERE operation_id = $1")
         .bind(operation_id)
         .execute(&pool)
@@ -360,7 +1093,7 @@ async fn workspace_writer_and_reconciliation_callbacks_are_generation_fenced_db(
 }
 
 #[tokio::test]
-#[ignore = "requires a fresh V58 compose Postgres via MOA_DATABASE_URL"]
+#[ignore = "requires a fresh V60 compose Postgres via MOA_DATABASE_URL"]
 async fn checkpoint_metadata_is_created_before_bytes_and_remains_immutable_db() {
     // Pins: checkpoint bytes cannot exist as a published revision without an
     // earlier exact operation row, and the atomic production publication path
@@ -406,7 +1139,8 @@ async fn checkpoint_metadata_is_created_before_bytes_and_remains_immutable_db() 
         .expect("claim writer")
         .expect("writer claim succeeds");
     assert_eq!(restoring.state, SandboxWorkspaceState::Restoring);
-    activate_hydrated_workspace(&pool, session_id, &worker_id, &restoring).await;
+    let _active_capacity =
+        activate_hydrated_workspace(&pool, session_id, &worker_id, &restoring).await;
     let active = workspaces
         .get(tenant_id, workspace_id)
         .await
@@ -538,6 +1272,35 @@ async fn checkpoint_metadata_is_created_before_bytes_and_remains_immutable_db() 
         manifest_digest: "sha256:manifest-one".to_string(),
         logical_bytes: 17,
     };
+    let storage_operation = WorkspaceStorageOperation {
+        operation_id,
+        kind: WorkspaceOperationKind::Checkpoint,
+        binding: active_binding.clone(),
+        deadline: now + ChronoDuration::seconds(30),
+        request_hash: "sha256:checkpoint-one".to_string(),
+    };
+    PostgresWorkspaceCapacityRepository::new(pool.clone())
+        .reserve_checkpoint_publication(&storage_operation, publication.logical_bytes)
+        .await
+        .expect("reserve provider-independent checkpoint count and bytes before upload");
+    // Pins: an upload/verification failure leaves only an indexed, bounded
+    // pending reservation that maintenance can reclaim at the operation deadline.
+    let pending_expiries = sqlx::query_scalar::<_, chrono::DateTime<Utc>>(
+        r#"
+        SELECT expires_at
+        FROM moa.sandbox_capacity_reservations
+        WHERE tenant_id = $1 AND operation_id = $2
+          AND resource_dimension IN ('checkpoints', 'logical_bytes')
+          AND reservation_state = 'pending'
+        ORDER BY resource_dimension
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(operation_id)
+    .fetch_all(&pool)
+    .await
+    .expect("load reclaimable pre-upload reservations");
+    assert_eq!(pending_expiries, vec![storage_operation.deadline; 2]);
     assert!(
         workspaces
             .publish_workspace_checkpoint(PublishCheckpointCommitRequest {
@@ -569,6 +1332,11 @@ async fn checkpoint_metadata_is_created_before_bytes_and_remains_immutable_db() 
     .await
     .expect("detach checkpoint head for fixture cleanup");
 
+    sqlx::query("DELETE FROM moa.sandbox_capacity_reservations WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(&pool)
+        .await
+        .expect("clean workspace, hand, and checkpoint capacity reservations");
     sqlx::query("DELETE FROM moa.hand_leases WHERE session_id = $1")
         .bind(session_id)
         .execute(&pool)

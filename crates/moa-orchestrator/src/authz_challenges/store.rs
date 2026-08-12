@@ -3,8 +3,43 @@
 use chrono::{DateTime, Utc};
 use moa_auth_providers::builtin_authz::BuiltinApprovalRow;
 use restate_sdk::prelude::{HandlerError, TerminalError};
+use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
+
+/// Exact builtin challenge requested by timeout scheduling or delivery.
+pub(crate) struct BuiltinChallengeTimeoutLookup {
+    /// Stable challenge row identifier.
+    pub(crate) challenge_id: Uuid,
+    /// Exact awakeable identifying this persisted challenge incarnation.
+    pub(crate) awakeable_id: String,
+}
+
+/// Remaining database-clock delay before one builtin challenge expires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct BuiltinChallengeTimeoutDelay {
+    /// Non-negative delay from the database clock, rounded down to milliseconds.
+    pub(crate) delay_millis: u64,
+}
+
+/// Durable store outcome after applying and claiming one builtin timeout.
+pub(crate) enum BuiltinChallengeTimeoutClaim {
+    /// The row no longer matches the delayed challenge incarnation.
+    Stale,
+    /// Resolution is complete or another exact lease already owns delivery.
+    AlreadyDelivered,
+    /// The caller owns the exact terminal resolution lease.
+    Resolve {
+        /// Stable challenge row identifier.
+        challenge_id: Uuid,
+        /// Exact persisted awakeable identifier.
+        awakeable_id: String,
+        /// Lease token fencing delivery acknowledgement.
+        resolve_claim_token: Uuid,
+        /// Whether this transaction changed the row from pending to timeout.
+        newly_timed_out: bool,
+    },
+}
 
 /// Terminal builtin challenge that still needs awakeable delivery.
 #[derive(Debug, Clone)]
@@ -121,6 +156,120 @@ pub(crate) async fn update_builtin_challenge_decision(
     .fetch_one(&mut **tx)
     .await
     .map_err(|error| TerminalError::new(format!("update authz challenge: {error}")).into())
+}
+
+/// Loads the remaining timeout delay for one exact pending challenge.
+///
+/// The calculation uses the database clock that owns `expires_at`; a missing,
+/// terminal, or replacement incarnation returns `None` and is not scheduled.
+pub(crate) async fn load_builtin_challenge_timeout_delay(
+    pool: &sqlx::PgPool,
+    request: &BuiltinChallengeTimeoutLookup,
+) -> Result<Option<BuiltinChallengeTimeoutDelay>, sqlx::Error> {
+    let delay_millis = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT GREATEST(
+            FLOOR(EXTRACT(EPOCH FROM (expires_at - NOW())) * 1000),
+            0
+        )::BIGINT
+        FROM builtin_pending_approvals
+        WHERE id = $1 AND awakeable_id = $2 AND status = 'pending'
+        "#,
+    )
+    .bind(request.challenge_id)
+    .bind(&request.awakeable_id)
+    .fetch_optional(pool)
+    .await?;
+    delay_millis
+        .map(|delay_millis| {
+            u64::try_from(delay_millis)
+                .map(|delay_millis| BuiltinChallengeTimeoutDelay { delay_millis })
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))
+        })
+        .transpose()
+}
+
+/// Applies and claims one exact delayed builtin challenge timeout atomically.
+///
+/// The pending-to-timeout transition, resolution lease claim, and persisted
+/// state inspection share one transaction so replays and competing reapers
+/// observe a single durable delivery owner.
+pub(crate) async fn apply_builtin_challenge_timeout(
+    pool: &sqlx::PgPool,
+    request: &BuiltinChallengeTimeoutLookup,
+) -> Result<BuiltinChallengeTimeoutClaim, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let newly_timed_out = sqlx::query(
+        r#"
+        UPDATE builtin_pending_approvals
+        SET status = 'timeout',
+            decided_at = NOW()
+        WHERE id = $1
+          AND awakeable_id = $2
+          AND status = 'pending'
+          AND expires_at <= NOW()
+          AND resolved_at IS NULL
+        "#,
+    )
+    .bind(request.challenge_id)
+    .bind(&request.awakeable_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+
+    let resolve_claim_token = Uuid::new_v4();
+    let claimed: Option<(Uuid, String, Uuid)> = sqlx::query_as(
+        r#"
+        UPDATE builtin_pending_approvals
+        SET resolve_claim_token = $3,
+            resolve_claim_expires_at = NOW() + INTERVAL '2 minutes'
+        WHERE id = $1
+          AND awakeable_id = $2
+          AND status = 'timeout'
+          AND resolved_at IS NULL
+          AND (
+            resolve_claim_expires_at IS NULL
+            OR resolve_claim_expires_at <= NOW()
+          )
+        RETURNING id, awakeable_id, resolve_claim_token
+        "#,
+    )
+    .bind(request.challenge_id)
+    .bind(&request.awakeable_id)
+    .bind(resolve_claim_token)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let state: Option<(String, Option<DateTime<Utc>>, Option<Uuid>)> = sqlx::query_as(
+        r#"
+        SELECT status, resolved_at, resolve_claim_token
+        FROM builtin_pending_approvals
+        WHERE id = $1 AND awakeable_id = $2
+        "#,
+    )
+    .bind(request.challenge_id)
+    .bind(&request.awakeable_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    if let Some((challenge_id, awakeable_id, resolve_claim_token)) = claimed {
+        return Ok(BuiltinChallengeTimeoutClaim::Resolve {
+            challenge_id,
+            awakeable_id,
+            resolve_claim_token,
+            newly_timed_out,
+        });
+    }
+    match state {
+        Some((status, resolved_at, claim))
+            if status == "timeout" && (resolved_at.is_some() || claim.is_some()) =>
+        {
+            Ok(BuiltinChallengeTimeoutClaim::AlreadyDelivered)
+        }
+        _ => Ok(BuiltinChallengeTimeoutClaim::Stale),
+    }
 }
 
 /// Result of one reaper sweep over builtin approvals.

@@ -7,15 +7,40 @@ use super::capability_catalog::{
 use super::support::{execution_error, execution_scope, invalid_execution_request};
 use super::*;
 
+/// Complete bounded input for one immutable planning-context assembly.
+pub(super) struct PlanningContextInput {
+    /// Shared runtime database pool.
+    pub(super) pool: sqlx::PgPool,
+    /// Session-scoped capability registrations.
+    pub(super) registrations: Vec<(ToolDefinition, ToolExecution)>,
+    /// Validated execution policy.
+    pub(super) config: ExecutionConfig,
+    /// Authoritative parent session metadata.
+    pub(super) parent: moa_core::types::session::SessionMeta,
+    /// Effective user that owns the planning request.
+    pub(super) owner_user_id: moa_core::types::identifiers::UserId,
+    /// Exact persisted user event that originated planning.
+    pub(super) originating_event: Event,
+    /// Durable admission timestamp from the originating event.
+    pub(super) planning_admitted_at: chrono::DateTime<Utc>,
+    /// Caller request already authorized by the service boundary.
+    pub(super) request: ExecutionPlanningContextRequest,
+}
+
+/// Builds and persists one caller-authorized immutable planning context.
 pub(super) async fn planning_context_inner(
-    pool: sqlx::PgPool,
-    registrations: Vec<(ToolDefinition, ToolExecution)>,
-    config: ExecutionConfig,
-    parent: moa_core::types::session::SessionMeta,
-    owner_user_id: moa_core::types::identifiers::UserId,
-    originating_event: Event,
-    request: ExecutionPlanningContextRequest,
+    input: PlanningContextInput,
 ) -> Result<ExecutionPlanningContextResponse, HandlerError> {
+    let PlanningContextInput {
+        pool,
+        registrations,
+        config,
+        parent,
+        owner_user_id,
+        originating_event,
+        planning_admitted_at,
+        request,
+    } = input;
     let registrations = registrations
         .into_iter()
         .filter_map(|registration| {
@@ -104,6 +129,12 @@ pub(super) async fn planning_context_inner(
         &originating_event,
     )
     .map_err(execution_error)?;
+    let deadline_at = capped_planning_deadline(
+        planning_admitted_at,
+        request.deadline_at,
+        config.maximum_horizon_seconds,
+    )
+    .map_err(invalid_execution_request)?;
     let snapshot = ExecutionPlanningContextSnapshot {
         schema_version: 1,
         tenant_id: request.tenant_id,
@@ -122,7 +153,7 @@ pub(super) async fn planning_context_inner(
             max_tasks: Some(config.max_tasks),
             max_tool_calls: Some(config.max_tool_calls),
             max_retrieved_bytes: Some(config.max_retrieved_bytes),
-            deadline_at: None,
+            deadline_at: Some(deadline_at),
         },
     };
     let hash = planning_context_hash(&snapshot).map_err(execution_error)?;
@@ -157,6 +188,26 @@ pub(super) async fn planning_context_inner(
         )
         .into()),
     }
+}
+
+/// Returns the admitted absolute deadline bounded by caller authority and configured horizon.
+pub(super) fn capped_planning_deadline(
+    planning_admitted_at: chrono::DateTime<Utc>,
+    authorized_deadline_at: chrono::DateTime<Utc>,
+    maximum_horizon_seconds: u64,
+) -> Result<chrono::DateTime<Utc>, &'static str> {
+    let horizon_seconds = i64::try_from(maximum_horizon_seconds)
+        .map_err(|_| "execution maximum horizon does not fit the timestamp range")?;
+    let horizon = chrono::TimeDelta::try_seconds(horizon_seconds)
+        .ok_or("execution maximum horizon does not fit the timestamp range")?;
+    let maximum_deadline = planning_admitted_at
+        .checked_add_signed(horizon)
+        .ok_or("execution maximum horizon exceeds the timestamp range")?;
+    let deadline_at = authorized_deadline_at.min(maximum_deadline);
+    if deadline_at <= planning_admitted_at {
+        return Err("execution planning deadline must be later than admission time");
+    }
+    Ok(deadline_at)
 }
 
 #[derive(Debug)]

@@ -224,12 +224,14 @@
       "additionalProperties": false,
       "required": [
         "cancel_policy",
+        "input_wait_policy",
         "input_schema",
         "output_schema",
         "nodes"
       ],
       "properties": {
         "cancel_policy": { "$ref": "#/$defs/ExecutionCancelPolicy" },
+        "input_wait_policy": { "$ref": "#/$defs/ExecutionWaitPolicy" },
         "input_schema": {},
         "output_schema": {},
         "nodes": {
@@ -464,19 +466,31 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "prompt"],
+          "required": ["kind", "prompt", "wait_policy"],
           "properties": {
             "kind": { "const": "review" },
-            "prompt": { "type": "string" }
+            "prompt": { "type": "string" },
+            "wait_policy": { "$ref": "#/$defs/ExecutionWaitPolicy" }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "signal_name"],
+          "required": ["kind", "signal_name", "wait_policy"],
           "properties": {
             "kind": { "const": "wait_signal" },
-            "signal_name": { "type": "string" }
+            "signal_name": { "type": "string" },
+            "wait_policy": { "$ref": "#/$defs/ExecutionWaitPolicy" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "wake", "result"],
+          "properties": {
+            "kind": { "const": "wait_until" },
+            "wake": { "$ref": "#/$defs/ExecutionTemporalTarget" },
+            "result": {}
           }
         },
         {
@@ -486,6 +500,70 @@
           "properties": {
             "kind": { "const": "output" },
             "value": {}
+          }
+        }
+      ]
+    },
+    "ExecutionWaitPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expiry", "on_expiry"],
+      "properties": {
+        "expiry": { "$ref": "#/$defs/ExecutionTemporalTarget" },
+        "on_expiry": { "$ref": "#/$defs/ExecutionWaitExpiryAction" }
+      }
+    },
+    "ExecutionTemporalTarget": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "at"],
+          "properties": {
+            "kind": { "const": "at" },
+            "at": { "type": "string", "format": "date-time" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "delay_seconds"],
+          "properties": {
+            "kind": { "const": "after" },
+            "delay_seconds": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 1
+            }
+          }
+        }
+      ]
+    },
+    "ExecutionWaitExpiryAction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "const": "fail_task" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "const": "fail_run" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "output"],
+          "properties": {
+            "kind": { "const": "continue_with" },
+            "output": {}
           }
         }
       ]

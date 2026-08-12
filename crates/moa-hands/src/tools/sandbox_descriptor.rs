@@ -129,6 +129,7 @@ impl SandboxToolDescriptor {
             schema: (self.schema)(),
             policy: self.policy.clone(),
             idempotency_class: self.idempotency_class,
+            async_mode: moa_core::types::tools::ToolAsyncMode::SynchronousOnly,
             rollback: None,
             max_output_tokens,
         }

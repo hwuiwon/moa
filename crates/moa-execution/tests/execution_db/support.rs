@@ -3,11 +3,12 @@
 pub(crate) use chrono::{Duration, Utc};
 pub(crate) use moa_artifacts::execution_plan::{
     ExecutionBudgetLimit, ExecutionCancelPolicy, ExecutionCitation, ExecutionFailureClass,
-    ExecutionGoalContract, ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage,
-    PlanAmendment, RetryPolicy,
+    ExecutionGoalContract, ExecutionTaskOutcome, ExecutionTaskResult, ExecutionTemporalTarget,
+    ExecutionUsage, ExecutionWaitExpiryAction, ExecutionWaitPolicy, PlanAmendment, RetryPolicy,
 };
+pub(crate) use moa_config::ExecutionConfig;
 pub(crate) use moa_core::canonical_json::canonical_json_bytes;
-pub(crate) use moa_core::events::ExecutionTaskResultsRef;
+pub(crate) use moa_core::traits::{Identity, IdentityType};
 pub(crate) use moa_core::types::{
     contact::ContactId,
     execution_planning::{
@@ -30,22 +31,25 @@ pub(crate) use moa_execution::{
         terminal_evidence_from_evaluation,
     },
     replan::{ReplanStopReason, failure_fingerprint},
+    repository::audit::{
+        CompileAuditWriteOutcome, NewExecutionPlanningContext, PlannerCallAuditWriteOutcome,
+        PlanningContextWriteOutcome, RouteAuditWriteOutcome,
+    },
+    repository::run::RunAdmissionOutcome,
+    repository::terminal::{FinalizationOutcome, RunFinalizationRequest},
     repository::{
-        ActionReviewResolutionWrite, AmendmentReplayOutcome, AmendmentWrite,
-        CompileAuditWriteOutcome, ConfirmationConflict, ConfirmationOutcome,
-        ExecutionNodeMaterialization, ExecutionRepository, ExecutionRunPageRequest, ExecutionScope,
-        ExecutionTaskPageRequest, ExecutionTaskRecord, FencedTerminalFinalizationOutcome,
-        FinalizationOutcome, MaterializationOutcome, NewExecutionPlanningContext, NewExecutionRun,
-        PlannerCallAuditWriteOutcome, PlanningContextWriteOutcome, ReplanStopReceipt,
-        ReservationOutcome, ReservationRejection, RouteAuditWriteOutcome, RunFinalizationRequest,
-        TaskOutcomeRejection, TaskOutcomeWrite, TerminalFenceOutcome, TransitionOutcome,
-        ValidatedAmendment, WakeAckOutcome,
+        AmendmentReplayOutcome, AmendmentWrite, ConfirmationConflict, ConfirmationOutcome,
+        ExecutionActivationState, ExecutionAttemptState, ExecutionNodeMaterialization,
+        ExecutionRepository, ExecutionRunActivationCheckpoint, ExecutionRunRecord, ExecutionScope,
+        ExecutionTaskPageRequest, ExecutionTaskRecord, MaterializationOutcome, NewExecutionRun,
+        ReservationOutcome, ReservationRejection, RunActivationWriteOutcome,
+        RunControllerClaimOutcome, RunControllerCompletionOutcome, RunControllerCompletionRequest,
+        TaskOutcomeRejection, TaskOutcomeWrite, TransitionOutcome, ValidatedAmendment,
     },
     state::{
-        ExecutionLimitStop, ExecutionRunStatus, ExecutionSourceKind, ExecutionTaskId,
-        ExecutionTaskStatus, ExecutionTerminalCause, ExecutionTerminalReason,
-        FailureFingerprintInput, LogicalTask, LogicalTaskKind, PendingExecutionTerminal,
-        TerminalProjection,
+        ExecutionRunStatus, ExecutionSourceKind, ExecutionTaskId, ExecutionTaskStatus,
+        ExecutionTerminalCause, ExecutionTerminalReason, FailureFingerprintInput, LogicalTask,
+        LogicalTaskKind, PendingExecutionTerminal, TerminalProjection,
     },
     wire::{
         ExecutionActionReviewResolution, ExecutionPlanningContextSnapshot,
@@ -58,6 +62,74 @@ pub(crate) use uuid::Uuid;
 
 /// Shared fallible result for concurrent database contract tests.
 pub(crate) type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+/// Advances a newly admitted run through one bounded controller continuation.
+pub(crate) async fn claim_running_controller(
+    repository: &ExecutionRepository,
+    scope: ExecutionScope,
+    config: &ExecutionConfig,
+    run: &ExecutionRunRecord,
+) -> Result<ExecutionRunRecord, moa_execution::Error> {
+    let claimed = match repository
+        .claim_controller_wake(
+            scope,
+            run.run_uid,
+            run.controller_generation,
+            run.wake_epoch,
+        )
+        .await?
+    {
+        RunControllerClaimOutcome::Claimed(claimed) => claimed,
+        outcome => {
+            return Err(moa_execution::Error::InvalidRepositoryData {
+                message: format!("initial controller wake was not claimable: {outcome:?}"),
+            });
+        }
+    };
+    let continued = match repository
+        .complete_controller_wake(
+            scope,
+            config,
+            claimed.run_uid,
+            RunControllerCompletionRequest {
+                controller_generation: claimed.controller_generation,
+                wake_epoch: claimed.wake_epoch,
+                checkpoint: ExecutionRunActivationCheckpoint {
+                    status: ExecutionRunStatus::Running,
+                    activation_state: ExecutionActivationState::Queued,
+                    next_wake_at: claimed.next_wake_at,
+                    waiting_since: None,
+                    ready_task_count: claimed.ready_task_count,
+                    active_task_count: claimed.active_task_count,
+                },
+                continuation_payload: Some(json!({"reason": "test_controller_continuation"})),
+                continuation_not_before_at: Utc::now(),
+            },
+        )
+        .await?
+    {
+        RunControllerCompletionOutcome::Applied { run, .. } => *run,
+        outcome => {
+            return Err(moa_execution::Error::InvalidRepositoryData {
+                message: format!("initial controller continuation was not committed: {outcome:?}"),
+            });
+        }
+    };
+    match repository
+        .claim_controller_wake(
+            scope,
+            continued.run_uid,
+            continued.controller_generation,
+            continued.wake_epoch,
+        )
+        .await?
+    {
+        RunControllerClaimOutcome::Claimed(running) => Ok(running),
+        outcome => Err(moa_execution::Error::InvalidRepositoryData {
+            message: format!("continued controller wake was not claimable: {outcome:?}"),
+        }),
+    }
+}
 
 /// Asserts complete, non-overlapping pagination for one run's expected tasks.
 pub(crate) async fn assert_task_pages(
@@ -137,13 +209,23 @@ pub(crate) fn run_transition_allowed(source: &str, target: &str) -> bool {
         "awaiting_confirmation" => matches!(target, "queued" | "cancelled"),
         "queued" => matches!(
             target,
-            "running" | "compensating" | "blocked" | "unsupported" | "failed" | "cancelled"
+            "running"
+                | "pause_requested"
+                | "compensating"
+                | "blocked"
+                | "unsupported"
+                | "failed"
+                | "cancelled"
         ),
         "running" => matches!(
             target,
             "waiting_input"
                 | "waiting_review"
+                | "waiting_signal"
+                | "waiting_timer"
+                | "waiting_external"
                 | "waiting_replan"
+                | "pause_requested"
                 | "compensating"
                 | "completed"
                 | "partial"
@@ -152,9 +234,11 @@ pub(crate) fn run_transition_allowed(source: &str, target: &str) -> bool {
                 | "failed"
                 | "cancelled"
         ),
-        "waiting_input" | "waiting_review" | "waiting_replan" => matches!(
+        "waiting_input" | "waiting_review" | "waiting_signal" | "waiting_timer"
+        | "waiting_external" | "waiting_replan" => matches!(
             target,
             "running"
+                | "pause_requested"
                 | "compensating"
                 | "partial"
                 | "blocked"
@@ -162,6 +246,9 @@ pub(crate) fn run_transition_allowed(source: &str, target: &str) -> bool {
                 | "failed"
                 | "cancelled"
         ),
+        "pause_requested" => matches!(target, "pausing" | "paused" | "running" | "cancelled"),
+        "pausing" => matches!(target, "paused" | "failed" | "cancelled"),
+        "paused" => matches!(target, "queued" | "cancelled"),
         "compensating" => matches!(
             target,
             "completed" | "partial" | "blocked" | "unsupported" | "failed" | "cancelled"
@@ -178,7 +265,13 @@ pub(crate) fn run_setup_path(status: &str) -> &'static [&'static str] {
         "running" => &["running"],
         "waiting_input" => &["running", "waiting_input"],
         "waiting_review" => &["running", "waiting_review"],
+        "waiting_signal" => &["running", "waiting_signal"],
+        "waiting_timer" => &["running", "waiting_timer"],
+        "waiting_external" => &["running", "waiting_external"],
         "waiting_replan" => &["running", "waiting_replan"],
+        "pause_requested" => &["running", "pause_requested"],
+        "pausing" => &["running", "pause_requested", "pausing"],
+        "paused" => &["running", "pause_requested", "paused"],
         "compensating" => &["running", "compensating"],
         "completed" => &["running", "completed"],
         "partial" => &["running", "partial"],
@@ -253,15 +346,33 @@ pub(crate) async fn set_run_status_path(
 /// Returns whether the durable task contract permits one status transition.
 pub(crate) fn task_transition_allowed(source: &str, target: &str) -> bool {
     match source {
-        "pending" => matches!(target, "reserved" | "skipped" | "cancelled"),
-        "reserved" => matches!(target, "running" | "cancelled"),
+        "pending" => matches!(target, "ready" | "reserved" | "skipped" | "cancelled"),
+        "ready" => matches!(target, "dispatching" | "reserved" | "cancelled"),
+        "reserved" => matches!(target, "dispatching" | "running" | "cancelled"),
+        "dispatching" => matches!(target, "running" | "ready" | "failed" | "cancelled"),
         "running" => matches!(
             target,
-            "waiting_input" | "waiting_replan" | "completed" | "failed" | "cancelled"
+            "ready"
+                | "waiting_input"
+                | "waiting_review"
+                | "waiting_signal"
+                | "waiting_timer"
+                | "waiting_external"
+                | "waiting_replan"
+                | "completed"
+                | "failed"
+                | "cancelled"
+                | "unknown_outcome"
         ),
-        "waiting_input" => matches!(target, "running" | "cancelled"),
-        "waiting_replan" => target == "cancelled",
-        "completed" | "skipped" | "failed" | "cancelled" => false,
+        "waiting_input" | "waiting_review" | "waiting_signal" | "waiting_timer" => {
+            matches!(target, "ready" | "cancelled")
+        }
+        "waiting_external" => matches!(
+            target,
+            "ready" | "completed" | "failed" | "cancelled" | "unknown_outcome"
+        ),
+        "waiting_replan" => matches!(target, "ready" | "cancelled"),
+        "completed" | "skipped" | "failed" | "cancelled" | "unknown_outcome" => false,
         other => panic!("unknown task status in contract table: {other}"),
     }
 }
@@ -270,13 +381,20 @@ pub(crate) fn task_transition_allowed(source: &str, target: &str) -> bool {
 pub(crate) fn task_setup_path(status: &str) -> &'static [&'static str] {
     match status {
         "pending" => &[],
+        "ready" => &["ready"],
         "reserved" => &["reserved"],
+        "dispatching" => &["ready", "dispatching"],
         "running" => &["reserved", "running"],
         "waiting_input" => &["reserved", "running", "waiting_input"],
+        "waiting_review" => &["reserved", "running", "waiting_review"],
+        "waiting_signal" => &["reserved", "running", "waiting_signal"],
+        "waiting_timer" => &["reserved", "running", "waiting_timer"],
+        "waiting_external" => &["reserved", "running", "waiting_external"],
         "waiting_replan" => &["reserved", "running", "waiting_replan"],
         "completed" => &["reserved", "running", "completed"],
         "skipped" => &["skipped"],
         "failed" => &["reserved", "running", "failed"],
+        "unknown_outcome" => &["reserved", "running", "unknown_outcome"],
         "cancelled" => &["cancelled"],
         other => panic!("unknown task status setup: {other}"),
     }
@@ -351,8 +469,25 @@ pub(crate) async fn count_route_audits_as_app_role(
 pub(crate) async fn create_run(
     repository: &ExecutionRepository,
     scope: ExecutionScope,
-    mut run: NewExecutionRun,
+    run: NewExecutionRun,
 ) -> Result<moa_execution::repository::ExecutionRunRecord, moa_execution::Error> {
+    match create_run_with_config(repository, scope, &ExecutionConfig::default(), run).await? {
+        RunAdmissionOutcome::Admitted(run) | RunAdmissionOutcome::Replayed(run) => Ok(*run),
+        RunAdmissionOutcome::CapacitySaturated { dimension } => {
+            Err(moa_execution::Error::CapacitySaturated {
+                dimension: dimension.as_str(),
+            })
+        }
+    }
+}
+
+/// Admits a run with explicit execution-capacity limits after seeding its planning context.
+pub(crate) async fn create_run_with_config(
+    repository: &ExecutionRepository,
+    scope: ExecutionScope,
+    config: &ExecutionConfig,
+    mut run: NewExecutionRun,
+) -> Result<RunAdmissionOutcome, moa_execution::Error> {
     if repository
         .load_planning_context(scope, run.planning_context_uid)
         .await?
@@ -394,7 +529,7 @@ pub(crate) async fn create_run(
         run.planning_context_uid = context.planning_context_uid;
         run.planning_context_hash = context_hash;
     }
-    repository.create_run(scope, run).await
+    repository.create_run(scope, config, run).await
 }
 
 /// Builds a minimal durable execution-run fixture.
@@ -416,6 +551,17 @@ pub(crate) fn new_run(
         planning_context_uid: Uuid::now_v7(),
         planning_context_hash: ExecutionHash::from_bytes([97; 32]),
         owner_user_id: UserId::new("researcher"),
+        admitted_identity: Identity {
+            identity_type: if contact_id.is_some() {
+                IdentityType::Contact
+            } else {
+                IdentityType::Operator
+            },
+            id: contact_id.map_or_else(Uuid::now_v7, |value| value.0),
+            tenant_id,
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        },
         goal: ExecutionGoalContract {
             objective: "test durable execution".to_string(),
             requirements: Vec::new(),
@@ -447,6 +593,12 @@ pub(crate) fn canonical_plan(seed: u8) -> CanonicalExecutionPlan {
     CanonicalExecutionPlan {
         definition: moa_artifacts::execution_plan::ExecutionPlanDefinition {
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
+            input_wait_policy: ExecutionWaitPolicy {
+                expiry: ExecutionTemporalTarget::After {
+                    delay_seconds: 3_600,
+                },
+                on_expiry: ExecutionWaitExpiryAction::FailTask,
+            },
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
             nodes: Vec::new(),
@@ -526,17 +678,6 @@ pub(crate) fn logical_task(
             max_backoff_ms: 10,
         },
         reservation,
-    }
-}
-
-/// Builds a terminal task-failure projection for the requested failure class.
-pub(crate) fn terminal_failure_projection(class: ExecutionFailureClass) -> TerminalProjection {
-    TerminalProjection::Failed {
-        failure: moa_execution::state::ExecutionTaskFailure {
-            class,
-            message: "terminal test failure".to_string(),
-            capability_ref: None,
-        },
     }
 }
 

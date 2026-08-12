@@ -14,6 +14,13 @@ pub(super) fn task_failure_fingerprint_input(
     task: &ExecutionTaskRecord,
 ) -> Option<FailureFingerprintInput> {
     let outcome = task.current_outcome.as_ref()?;
+    task_failure_fingerprint_input_for_outcome(task, outcome)
+}
+
+pub(super) fn task_failure_fingerprint_input_for_outcome(
+    task: &ExecutionTaskRecord,
+    outcome: &ExecutionTaskOutcome,
+) -> Option<FailureFingerprintInput> {
     let (class, message) = match &outcome.result {
         ExecutionTaskResult::Failed { class, message } => (class.clone(), message.clone()),
         ExecutionTaskResult::NeedsReplan { reason, .. } => (
@@ -274,6 +281,9 @@ pub(super) async fn terminalize_reservation_rejection(
         .map_err(sqlx_error)?;
 
     let (_, error, citations) = outcome_projection_fields(&outcome)?;
+    let failure_fingerprint = task_failure_fingerprint_input_for_outcome(task, &outcome)
+        .map(|input| failure_fingerprint(&input).map(|hash| hash.to_string()))
+        .transpose()?;
     let audit = json!({
         "kind": "reservation_admission_rejected",
         "attempt": task.attempt,
@@ -298,6 +308,7 @@ pub(super) async fn terminalize_reservation_rejection(
         .bind(error)
         .bind(serde_json::to_value(citations)?)
         .bind(audit)
+        .bind(failure_fingerprint)
         .fetch_optional(conn.as_mut())
         .await
         .map_err(sqlx_error)?;

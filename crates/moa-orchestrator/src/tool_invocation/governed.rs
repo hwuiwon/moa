@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use moa_config::SessionLimitsConfig;
 use moa_core::traits::ChannelAdapter;
 use moa_core::{
@@ -36,8 +37,8 @@ use crate::services::{
     action_reviews::{ActionReviewsClient, RequestActionReview},
     session_store::RestateSessionStoreClient,
     tool_executor::{
-        ExecutionToolCallOrigin, ExecutionToolCallOutcome, ExecutionToolCallRequest,
-        ScopedToolCatalogRequest, ToolExecutorClient,
+        ExecutionToolCallOrigin, ExecutionToolCallOutcome, ExecutionToolCallPhase,
+        ExecutionToolCallRequest, ScopedToolCatalogRequest, ToolExecutorClient,
     },
 };
 use crate::turn::util::{
@@ -96,6 +97,8 @@ pub(crate) enum GovernedInvocationOrigin<'a> {
         task_uid: uuid::Uuid,
         /// Task generation fenced by the execution workflow.
         generation: u64,
+        /// Exact bounded task-attempt generation that owns the provider call.
+        attempt_generation: u64,
     },
     /// Tool call belongs to one persisted execution compensation.
     ExecutionCompensation {
@@ -105,6 +108,8 @@ pub(crate) enum GovernedInvocationOrigin<'a> {
         compensation_id: uuid::Uuid,
         /// Compensation generation fenced by the execution workflow.
         generation: u64,
+        /// Exact bounded compensation-attempt generation that owns the provider call.
+        attempt_generation: u64,
     },
 }
 
@@ -134,24 +139,28 @@ impl GovernedInvocationOrigin<'_> {
                 run_uid,
                 task_uid,
                 generation,
+                attempt_generation,
             } => ActionReviewOwner::ExecutionTask {
                 session_id,
                 origin: ExecutionTaskOrigin {
                     run_uid,
                     task_uid,
                     generation,
+                    attempt_generation,
                 },
             },
             Self::ExecutionCompensation {
                 run_uid,
                 compensation_id,
                 generation,
+                attempt_generation,
             } => ActionReviewOwner::ExecutionCompensation {
                 session_id,
                 origin: ExecutionCompensationOrigin {
                     run_uid,
                     compensation_id,
                     generation,
+                    attempt_generation,
                 },
             },
         }
@@ -200,8 +209,19 @@ pub(crate) struct GovernedInvocationResult {
     pub(crate) output: SecuredToolOutput,
     /// Outcome classification for workflow-local recording.
     pub(crate) disposition: GovernedInvocationDisposition,
+    /// Exact durable review wait, present only for a storage-backed review boundary.
+    pub(crate) review: Option<GovernedReviewPending>,
     /// Event ownership plan used for the output event.
     pub(crate) event_plan: GovernedInvocationEventPlan,
+}
+
+/// Exact storage-backed review reference returned by action-review admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GovernedReviewPending {
+    /// Stable action-review identity.
+    pub(crate) review_uid: uuid::Uuid,
+    /// Exact persisted review expiry owned by the durable timeout service.
+    pub(crate) expires_at: DateTime<Utc>,
 }
 
 impl GovernedInvocationResult {
@@ -256,6 +276,17 @@ pub(crate) enum GovernedInvocationEventPlan {
 pub(crate) enum GovernedInvocationOutcome {
     /// Tool call was fully handled by the governed coordinator.
     Completed(Box<GovernedInvocationResult>),
+    /// Provider work was durably started and must resume from callback or reconciliation.
+    ExternalJob {
+        /// MOA-owned job identity reserved before provider dispatch.
+        external_job_uid: uuid::Uuid,
+        /// Stable tool-call id for durable external-job ownership.
+        tool_id: ToolCallId,
+        /// Invocation that committed the provider job.
+        invocation: ToolInvocation,
+        /// Immutable provider job identity and recovery contract.
+        job: moa_core::types::tools::AsyncToolJob,
+    },
     /// Tool call is a delegation tool and must stay on the workflow-owned path.
     Delegation {
         /// Stable tool-call id for the delegation path.
@@ -285,6 +316,10 @@ pub(crate) enum GovernedInvocationOutcome {
 
 enum GovernedDispatchOutcome {
     Completed(Box<SecuredToolOutput>),
+    ExternalJob {
+        external_job_uid: uuid::Uuid,
+        job: moa_core::types::tools::AsyncToolJob,
+    },
     UnknownOutcome {
         message: String,
     },
@@ -508,7 +543,13 @@ fn bounded_review_refusal(
     request: &GovernedInvocationRequest<'_>,
     invocation: &ToolInvocation,
 ) -> Option<ToolOutput> {
-    (!request.resource_budget.is_unbounded()).then(|| {
+    (!request.resource_budget.is_unbounded()
+        && !matches!(
+            request.origin,
+            GovernedInvocationOrigin::ExecutionTask { .. }
+                | GovernedInvocationOrigin::ExecutionCompensation { .. }
+        ))
+    .then(|| {
         denied_tool_output(format!(
             "Tool {} requires admin review, which a resource-bounded turn cannot detach.",
             invocation.name
@@ -539,7 +580,7 @@ async fn request_action_review(
         )));
     }
 
-    crate::restate_identity::replay_safe_request(
+    let review = crate::restate_identity::replay_safe_request(
         ctx.service_client::<ActionReviewsClient>()
             .request(Json::from(RequestActionReview {
                 envelope: prepared_action.envelope,
@@ -548,17 +589,27 @@ async fn request_action_review(
             })),
     )
     .call()
-    .await?;
+    .await?
+    .into_inner();
+    if review.id != request.tool_id.0 || review.tool_call_id != request.tool_id {
+        return Err(TerminalError::new(
+            "action-review admission returned a mismatched durable review identity",
+        )
+        .into());
+    }
     let output = pending_review_output(&invocation, &prepared_action.input_summary);
     append_synthetic_tool_result(ctx, &request, &invocation, &output).await?;
-    Ok(GovernedInvocationOutcome::Completed(Box::new(
-        completed_result(
-            request.tool_id,
-            invocation,
-            output,
-            GovernedInvocationDisposition::ReviewPending,
-        ),
-    )))
+    let mut result = completed_result(
+        request.tool_id,
+        invocation,
+        output,
+        GovernedInvocationDisposition::ReviewPending,
+    );
+    result.review = Some(GovernedReviewPending {
+        review_uid: review.id,
+        expires_at: review.expires_at,
+    });
+    Ok(GovernedInvocationOutcome::Completed(Box::new(result)))
 }
 
 async fn execute_allowed_tool(
@@ -593,6 +644,7 @@ async fn execute_allowed_tool(
             run_uid,
             task_uid,
             generation,
+            attempt_generation,
         } => span
             .in_scope(|| {
                 crate::restate_identity::replay_safe_request(
@@ -603,7 +655,9 @@ async fn execute_allowed_tool(
                                 run_uid,
                                 task_uid,
                                 generation,
+                                attempt_generation,
                             }),
+                            phase: ExecutionToolCallPhase::Direct,
                         })),
                 )
             })
@@ -616,6 +670,7 @@ async fn execute_allowed_tool(
             run_uid,
             compensation_id,
             generation,
+            attempt_generation,
         } => span
             .in_scope(|| {
                 crate::restate_identity::replay_safe_request(
@@ -627,8 +682,10 @@ async fn execute_allowed_tool(
                                     run_uid,
                                     compensation_id,
                                     generation,
+                                    attempt_generation,
                                 },
                             ),
+                            phase: ExecutionToolCallPhase::Direct,
                         })),
                 )
             })
@@ -653,6 +710,17 @@ async fn execute_allowed_tool(
     record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
     let output = match dispatch {
         GovernedDispatchOutcome::Completed(output) => *output,
+        GovernedDispatchOutcome::ExternalJob {
+            external_job_uid,
+            job,
+        } => {
+            return Ok(GovernedInvocationOutcome::ExternalJob {
+                external_job_uid,
+                tool_id: request.tool_id,
+                invocation,
+                job,
+            });
+        }
         GovernedDispatchOutcome::UnknownOutcome { message } => {
             return Ok(GovernedInvocationOutcome::UnknownOutcome {
                 tool_id: request.tool_id,
@@ -675,6 +743,7 @@ async fn execute_allowed_tool(
             invocation,
             output,
             disposition: GovernedInvocationDisposition::Executed,
+            review: None,
             event_plan: GovernedInvocationEventPlan::ToolExecutorResult,
         },
     )))
@@ -684,6 +753,13 @@ impl From<ExecutionToolCallOutcome> for GovernedDispatchOutcome {
     fn from(outcome: ExecutionToolCallOutcome) -> Self {
         match outcome {
             ExecutionToolCallOutcome::Completed { output } => Self::Completed(output),
+            ExecutionToolCallOutcome::ExternalJob {
+                external_job_uid,
+                job,
+            } => Self::ExternalJob {
+                external_job_uid,
+                job,
+            },
             ExecutionToolCallOutcome::UnknownOutcome { message } => {
                 Self::UnknownOutcome { message }
             }
@@ -727,6 +803,7 @@ fn completed_result(
         invocation,
         output,
         disposition,
+        review: None,
         event_plan: GovernedInvocationEventPlan::WorkflowSyntheticResult { success: false },
     }
 }
@@ -1173,6 +1250,7 @@ mod tests {
                 run_uid: Uuid::from_u128(83),
                 task_uid: Uuid::from_u128(84),
                 generation: 2,
+                attempt_generation: 3,
             },
         );
         request.capability_policy_context = Some(&context);
@@ -1217,6 +1295,44 @@ mod tests {
     }
 
     #[test]
+    fn bounded_execution_origins_detach_only_into_storage_backed_reviews() {
+        // Pins: only execution task and compensation owners may cross a bounded
+        // invocation boundary because their exact generation is parked in Postgres.
+        let session = test_session_meta();
+        let tool_call = tool_call();
+        let allowed_tools = BTreeSet::from(["file_read".to_string()]);
+        for origin in [
+            GovernedInvocationOrigin::ExecutionTask {
+                run_uid: Uuid::from_u128(51),
+                task_uid: Uuid::from_u128(52),
+                generation: 3,
+                attempt_generation: 4,
+            },
+            GovernedInvocationOrigin::ExecutionCompensation {
+                run_uid: Uuid::from_u128(51),
+                compensation_id: Uuid::from_u128(53),
+                generation: 4,
+                attempt_generation: 5,
+            },
+        ] {
+            let mut request = request(&session, &tool_call, &allowed_tools, origin);
+            request.resource_budget = moa_core::types::resource::ResourceBudget::new(
+                None,
+                Some(moa_core::types::resource::ResourceAmounts {
+                    tool_calls: 1,
+                    ..moa_core::types::resource::ResourceAmounts::ZERO
+                }),
+            );
+
+            assert_eq!(
+                bounded_review_refusal(&request, &tool_call.invocation),
+                None,
+                "execution-owned bounded reviews must park through their durable owner"
+            );
+        }
+    }
+
+    #[test]
     fn governed_origin_maps_to_exactly_one_typed_action_review_owner() {
         // Pins: who is resumed after a review is decided at the moment the tool call is
         // issued, by the runtime that issued it, with the fence it was admitted under.
@@ -1257,6 +1373,7 @@ mod tests {
             run_uid: Uuid::from_u128(50),
             task_uid: Uuid::from_u128(51),
             generation: 2,
+            attempt_generation: 3,
         }
         .action_review_owner(session_id);
         assert_eq!(
@@ -1267,6 +1384,7 @@ mod tests {
                     run_uid: Uuid::from_u128(50),
                     task_uid: Uuid::from_u128(51),
                     generation: 2,
+                    attempt_generation: 3,
                 },
             }
         );
@@ -1274,6 +1392,7 @@ mod tests {
             run_uid: Uuid::from_u128(50),
             compensation_id: Uuid::from_u128(52),
             generation: 7,
+            attempt_generation: 8,
         }
         .action_review_owner(session_id);
         assert_eq!(
@@ -1284,6 +1403,7 @@ mod tests {
                     run_uid: Uuid::from_u128(50),
                     compensation_id: Uuid::from_u128(52),
                     generation: 7,
+                    attempt_generation: 8,
                 },
             }
         );
@@ -1368,6 +1488,7 @@ mod tests {
                 run_uid: Uuid::from_u128(40),
                 task_uid: Uuid::from_u128(41),
                 generation: 2,
+                attempt_generation: 3,
             },
         );
         request.capability_provenance = Some(&capability);
@@ -1385,6 +1506,7 @@ mod tests {
                 run_uid: Uuid::from_u128(40),
                 task_uid: Uuid::from_u128(41),
                 generation: 2,
+                attempt_generation: 3,
             })
         );
     }
@@ -1452,6 +1574,7 @@ mod tests {
                 run_uid: Uuid::from_u128(40),
                 task_uid: Uuid::from_u128(41),
                 generation: 2,
+                attempt_generation: 3,
             },
         );
 
@@ -1499,6 +1622,7 @@ mod tests {
                 run_uid: Uuid::from_u128(40),
                 task_uid: Uuid::from_u128(41),
                 generation: 2,
+                attempt_generation: 3,
             }
         ));
     }
@@ -1651,6 +1775,7 @@ mod tests {
                 moa_core::types::security::ToolCapabilityId::builtin("noop"),
             ),
             disposition: GovernedInvocationDisposition::Executed,
+            review: None,
             event_plan: GovernedInvocationEventPlan::ToolExecutorResult,
         };
 

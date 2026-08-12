@@ -29,9 +29,9 @@ use crate::execution_execution_support::{
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
 async fn execution_observability_exports_stable_identity_and_replay_safe_service_spans()
 -> Result<()> {
-    // Pins: the real Execution/start -> Session activation -> ExecutionRun -> ExecutionTask path
-    // exports one stable run identity on every durable hop without putting attempt-local trace
-    // headers into replayed Restate commands.
+    // Pins: the real Execution/start -> Session activation -> ExecutionRunController ->
+    // ExecutionTaskAttempt path exports one stable run identity on every durable hop without
+    // putting attempt-local trace headers into replayed Restate commands.
     let fixture = OrchestratorTestFixture::with_execution_fixture(
         json!({
             "default": {
@@ -67,6 +67,7 @@ async fn execution_observability_exports_stable_identity_and_replay_safe_service
                 contact_id: None,
                 session_id,
                 originating_user_sequence_num,
+                deadline_at: chrono::Utc::now() + chrono::TimeDelta::days(1),
                 requested_template: None,
             },
         )
@@ -91,6 +92,12 @@ async fn execution_observability_exports_stable_identity_and_replay_safe_service
         },
         plan: ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                    delay_seconds: 86_400,
+                },
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+            },
             input_schema: json!({"type": "object", "additionalProperties": false}),
             output_schema: json!({
                 "type": "object",
@@ -258,21 +265,21 @@ async fn execution_observability_exports_stable_identity_and_replay_safe_service
     let plan_revision = persisted_task.plan_revision.to_string();
     let run_span = capture
         .wait_for_span(SERVICE_TIMEOUT, |span| {
-            span.attribute("restate.service") == Some("ExecutionRun")
-                && span.attribute("restate.handler") == Some("run")
+            span.attribute("restate.service") == Some("ExecutionRunController")
+                && span.attribute("restate.handler") == Some("advance")
                 && span.attribute("moa.execution.run_uid") == Some(run_uid.as_str())
         })
         .await
-        .context("wait for exported ExecutionRun handler span")?;
+        .context("wait for exported ExecutionRunController/advance handler span")?;
     let task_span = capture
         .wait_for_span(SERVICE_TIMEOUT, |span| {
-            span.attribute("restate.service") == Some("ExecutionTask")
+            span.attribute("restate.service") == Some("ExecutionTaskAttempt")
                 && span.attribute("restate.handler") == Some("run")
                 && span.attribute("moa.execution.run_uid") == Some(run_uid.as_str())
                 && span.attribute("moa.execution.task_id") == Some(task_id.as_str())
         })
         .await
-        .context("wait for exported ExecutionTask handler span")?;
+        .context("wait for exported ExecutionTaskAttempt/run handler span")?;
     let activation_span = capture
         .wait_for_span(SERVICE_TIMEOUT, |span| {
             span.attribute("restate.service") == Some("Session")

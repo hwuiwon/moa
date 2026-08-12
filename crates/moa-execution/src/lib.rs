@@ -42,7 +42,10 @@ pub use completion::{
     evaluate_completion, execution_terminal_reason,
 };
 pub use error::Error;
-pub use interpreter::{ScheduleRequest, ready_empty_map_nodes, schedule};
+pub use interpreter::{
+    NodeMaterializationPage, ReduceMaterializationCursor, ReduceMaterializationPageInput,
+    ScheduleRequest, materialize_node_page, ready_empty_map_nodes, schedule,
+};
 pub use replan::{ReplanDecision, ReplanEvaluationRequest, ReplanStopReason, evaluate_replan_stop};
 pub use state::{ExecutionSourceKind, ExecutionTerminalReason};
 

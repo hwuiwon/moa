@@ -37,6 +37,7 @@ use crate::workflows::skill_learning::{SkillLearning, SkillLearningImpl};
 use crate::{
     objects::{
         cron_job::{CronJob, CronJobImpl},
+        execution_run_controller::{ExecutionRunController, ExecutionRunControllerImpl},
         ingestion::{IngestionVO, IngestionVOImpl},
         session::{Session, SessionImpl},
         tenant::{TenantImpl, TenantObject},
@@ -49,7 +50,15 @@ use crate::{
         artifact_release::{ArtifactRelease, ArtifactReleaseImpl},
         artifacts::{Artifacts, ArtifactsImpl},
         contacts::{Contacts, ContactsImpl},
+        durable_timeout::{DurableTimeout, DurableTimeoutImpl},
         execution::{Execution, ExecutionImpl},
+        execution_dispatcher::{
+            ExecutionDispatchDrain, ExecutionDispatchDrainImpl, ExecutionDispatchReconciler,
+            ExecutionDispatchReconcilerImpl, ExecutionDispatcher, ExecutionDispatcherImpl,
+        },
+        execution_retention::{ExecutionRetention, ExecutionRetentionImpl},
+        execution_schedule::{ExecutionSchedule, ExecutionScheduleImpl},
+        execution_trigger::{ExecutionTrigger, ExecutionTriggerImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         health::{Health, HealthImpl},
         learning_review::{LearningReview, LearningReviewImpl},
@@ -57,13 +66,14 @@ use crate::{
         memory::{Memory, MemoryImpl},
         session_store::{RestateSessionStore, SessionStoreImpl},
         skills::{Skills, SkillsImpl},
-        tool_executor::{ToolExecutor, ToolExecutorImpl},
+        tool_executor::{ToolExecutor, ToolExecutorDependencies, ToolExecutorImpl},
     },
     workflows::{
         consolidate::{Consolidate, ConsolidateImpl},
-        execution_compensation::{ExecutionCompensation, ExecutionCompensationImpl},
-        execution_run::{ExecutionRun, ExecutionRunImpl},
-        execution_task::{ExecutionTask, ExecutionTaskImpl},
+        execution_compensation_attempt::{
+            ExecutionCompensationAttempt, ExecutionCompensationAttemptImpl,
+        },
+        execution_task_attempt::{ExecutionTaskAttempt, ExecutionTaskAttemptImpl},
         session_retention::{SessionRetention, SessionRetentionImpl},
         turn_events::TurnEventAppender,
         turn_execution::{TurnExecution, implementation::TurnExecutionImpl},
@@ -93,6 +103,13 @@ const CORE_BODY_SERVICE_NAMES: &[&str] = &[
     "ToolExecutor",
     "ActionPolicy",
     "Execution",
+    "ExecutionSchedule",
+    "ExecutionRetention",
+    "ExecutionTrigger",
+    "ExecutionDispatcher",
+    "ExecutionDispatchDrain",
+    "ExecutionDispatchReconciler",
+    "DurableTimeout",
     "GraphMemoryMaint",
     "Knowledge",
     "LearningReview",
@@ -105,9 +122,9 @@ const CORE_BODY_SERVICE_NAMES: &[&str] = &[
     "Worker",
     "Tenants",
     "Tenant",
-    "ExecutionRun",
-    "ExecutionTask",
-    "ExecutionCompensation",
+    "ExecutionRunController",
+    "ExecutionTaskAttempt",
+    "ExecutionCompensationAttempt",
     "KnowledgeSyncIngestion",
     "Consolidate",
     "SessionRetention",
@@ -122,10 +139,18 @@ const INGRESS_PRIVATE_SERVICE_NAMES: &[&str] = &[
     "ToolExecutor",
     "TurnExecution",
     "WorkerTurnExecution",
-    "ExecutionRun",
-    "ExecutionTask",
-    "ExecutionCompensation",
+    "ExecutionRunController",
+    "ExecutionRetention",
+    "ExecutionTaskAttempt",
+    "ExecutionCompensationAttempt",
+    "ExecutionTrigger",
+    "ExecutionDispatcher",
+    "ExecutionDispatchDrain",
+    "ExecutionDispatchReconciler",
+    "DurableTimeout",
 ];
+#[cfg(test)]
+const INGRESS_PRIVATE_HANDLER_NAMES: &[(&str, &str)] = &[("ExecutionSchedule", "fire_occurrence")];
 const EXPERIMENT_WORKFLOW_SERVICE_NAMES: &[&str] = &[
     "ExperimentRun",
     "ExperimentTrialRun",
@@ -163,6 +188,13 @@ fn workflow_options() -> ServiceOptions {
     service_options().handler("run", HandlerOptions::new().workflow_retention(RETENTION))
 }
 
+fn execution_schedule_service_options() -> ServiceOptions {
+    service_options().handler(
+        "fire_occurrence",
+        HandlerOptions::new().ingress_private(true),
+    )
+}
+
 fn high_cost_internal_service_options() -> ServiceOptions {
     service_options()
         .inactivity_timeout(HIGH_COST_INACTIVITY_TIMEOUT)
@@ -173,6 +205,10 @@ fn high_cost_internal_service_options() -> ServiceOptions {
 fn high_cost_internal_workflow_options() -> ServiceOptions {
     high_cost_internal_service_options()
         .handler("run", HandlerOptions::new().workflow_retention(RETENTION))
+}
+
+fn execution_run_controller_options() -> ServiceOptions {
+    high_cost_internal_service_options()
 }
 
 fn high_cost_public_workflow_options() -> ServiceOptions {
@@ -299,7 +335,7 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
             service_options(),
         )
         .bind_with_options(
-            ActionReviewDispatcherImpl::new(pool.clone()).serve(),
+            ActionReviewDispatcherImpl::new(pool.clone(), config.execution.clone()).serve(),
             service_options(),
         )
         .bind_with_options(
@@ -357,15 +393,17 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
             service_options(),
         )
         .bind_with_options(
-            ToolExecutorImpl::new(
-                tool_router.clone(),
-                connector_catalogs.clone(),
+            ToolExecutorImpl::new(ToolExecutorDependencies {
+                router: tool_router.clone(),
+                connector_catalogs: connector_catalogs.clone(),
                 connector_completion,
-                session_store.clone(),
-                session_store.clone(),
-                pool.clone(),
-                sandbox_workspace_management,
-            )
+                sessions: session_store.clone(),
+                events: session_store.clone(),
+                pool: pool.clone(),
+                workspace_management: sandbox_workspace_management,
+                external_job_adapters: runtime_deps.external_job_adapters.clone(),
+                execution_config: config.execution.clone(),
+            })
             .serve(),
             high_cost_internal_service_options(),
         )
@@ -389,6 +427,15 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
             )
             .serve(),
             service_options(),
+        )
+        .bind_with_options(
+            ExecutionScheduleImpl::new(pool.clone(), authz.clone(), config.execution.clone())
+                .serve(),
+            execution_schedule_service_options(),
+        )
+        .bind_with_options(
+            ExecutionRetentionImpl::new(pool.clone(), &config.execution).serve(),
+            high_cost_internal_service_options(),
         )
         .bind_with_options(
             GraphMemoryMaintImpl::new(pool.clone(), config.clone()).serve(),
@@ -495,23 +542,33 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
             high_cost_public_workflow_options(),
         )
         .bind_with_options(
-            ExecutionRunImpl::new(
-                pool.clone(),
-                config.execution.clone(),
-                moa_core::types::identifiers::ModelId::new(
-                    config
-                        .models
-                        .auxiliary
-                        .clone()
-                        .unwrap_or_else(|| config.models.main.clone()),
-                ),
-            )
-            .serve(),
-            high_cost_internal_workflow_options(),
+            ExecutionTriggerImpl::new(pool.clone(), &config.execution).serve(),
+            high_cost_internal_service_options(),
         )
         .bind_with_options(
-            ExecutionTaskImpl::new(
+            ExecutionDispatcherImpl::new(pool.clone()).serve(),
+            high_cost_internal_service_options(),
+        )
+        .bind_with_options(
+            ExecutionDispatchDrainImpl::new(pool.clone(), &config.execution).serve(),
+            high_cost_internal_service_options(),
+        )
+        .bind_with_options(
+            ExecutionDispatchReconcilerImpl::new(pool.clone(), &config.execution).serve(),
+            high_cost_internal_service_options(),
+        )
+        .bind_with_options(
+            DurableTimeoutImpl::new(pool.clone()).serve(),
+            high_cost_internal_service_options(),
+        )
+        .bind_with_options(
+            ExecutionRunControllerImpl::new(pool.clone(), config.execution.clone()).serve(),
+            execution_run_controller_options(),
+        )
+        .bind_with_options(
+            ExecutionTaskAttemptImpl::new(
                 pool.clone(),
+                config.execution.clone(),
                 session_store.clone(),
                 session_limits.clone(),
                 channel_adapters.clone(),
@@ -520,7 +577,7 @@ pub fn build_endpoint(runtime_deps: &RuntimeDeps) -> Endpoint {
             high_cost_internal_workflow_options(),
         )
         .bind_with_options(
-            ExecutionCompensationImpl::new(
+            ExecutionCompensationAttemptImpl::new(
                 pool.clone(),
                 session_store.clone(),
                 session_limits.clone(),
@@ -675,8 +732,9 @@ mod tests {
     use restate_sdk::prelude::*;
 
     use super::{
-        INGRESS_PRIVATE_SERVICE_NAMES, RegisteredDeployment, RegisteredService,
-        bootstrap_entry_service_options, expected_service_names,
+        INGRESS_PRIVATE_HANDLER_NAMES, INGRESS_PRIVATE_SERVICE_NAMES, RegisteredDeployment,
+        RegisteredService, bootstrap_entry_service_options, execution_run_controller_options,
+        execution_schedule_service_options, expected_service_names,
         high_cost_internal_service_options, high_cost_internal_workflow_options,
         high_cost_public_workflow_options, sandbox_workspace_service_options,
         services_registered_for_mode, services_registered_with_expected,
@@ -694,6 +752,40 @@ mod tests {
 
     impl ServicePolicyProbe for ServicePolicyProbeImpl {
         async fn call(&self, _ctx: Context<'_>) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
+    #[restate_sdk::service]
+    #[name = "ExecutionSchedule"]
+    trait ExecutionSchedulePolicyProbe {
+        async fn create() -> Result<(), HandlerError>;
+
+        async fn fire_occurrence() -> Result<(), HandlerError>;
+    }
+
+    struct ExecutionSchedulePolicyProbeImpl;
+
+    impl ExecutionSchedulePolicyProbe for ExecutionSchedulePolicyProbeImpl {
+        async fn create(&self, _ctx: Context<'_>) -> Result<(), HandlerError> {
+            Ok(())
+        }
+
+        async fn fire_occurrence(&self, _ctx: Context<'_>) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
+    #[restate_sdk::object]
+    #[name = "ExecutionRunController"]
+    trait ExecutionRunControllerPolicyProbe {
+        async fn advance() -> Result<(), HandlerError>;
+    }
+
+    struct ExecutionRunControllerPolicyProbeImpl;
+
+    impl ExecutionRunControllerPolicyProbe for ExecutionRunControllerPolicyProbeImpl {
+        async fn advance(&self, _ctx: ObjectContext<'_>) -> Result<(), HandlerError> {
             Ok(())
         }
     }
@@ -822,6 +914,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execution_schedule_keeps_crud_public_and_fire_occurrence_ingress_private() {
+        // Pins: tenant schedule CRUD remains callable through public ingress, while only trusted
+        // outbox delivery can invoke the trigger-consuming occurrence handler.
+        let endpoint = Endpoint::builder()
+            .bind_with_options(
+                ExecutionSchedulePolicyProbeImpl.serve(),
+                execution_schedule_service_options(),
+            )
+            .build();
+        let manifest = v4_manifest(endpoint).await;
+        let service = &manifest["services"][0];
+        assert_eq!(service["name"], "ExecutionSchedule");
+        assert_ne!(service["ingressPrivate"], true);
+
+        let handlers = service["handlers"]
+            .as_array()
+            .expect("schedule handlers should be an array");
+        let create = handlers
+            .iter()
+            .find(|handler| handler["name"] == "create")
+            .expect("public create handler should exist");
+        let fire_occurrence = handlers
+            .iter()
+            .find(|handler| handler["name"] == "fire_occurrence")
+            .expect("private fire-occurrence handler should exist");
+
+        assert_ne!(create["ingressPrivate"], true);
+        assert_eq!(fire_occurrence["ingressPrivate"], true);
+    }
+
+    #[tokio::test]
+    async fn execution_run_controller_options_match_the_advance_handler() {
+        // Pins: the bounded run controller is a virtual object with `advance`, so endpoint
+        // discovery must not apply workflow-only options for a nonexistent `run` handler.
+        let endpoint = Endpoint::builder()
+            .bind_with_options(
+                ExecutionRunControllerPolicyProbeImpl.serve(),
+                execution_run_controller_options(),
+            )
+            .build();
+        let manifest = v4_manifest(endpoint).await;
+        let service = &manifest["services"][0];
+        assert_eq!(service["name"], "ExecutionRunController");
+        assert_eq!(service["ingressPrivate"], true);
+        let advance = service["handlers"]
+            .as_array()
+            .expect("controller handlers should be an array")
+            .iter()
+            .find(|handler| handler["name"] == "advance")
+            .expect("controller advance handler should exist");
+        assert_eq!(
+            advance["workflowCompletionRetention"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[tokio::test]
     async fn sandbox_workspace_service_uses_configured_durable_retention() {
         // Pins: Restate cannot evict a workspace operation owner on the generic
         // one-day service default while Postgres still requires reconciliation.
@@ -884,10 +1033,24 @@ mod tests {
                 "ToolExecutor",
                 "TurnExecution",
                 "WorkerTurnExecution",
-                "ExecutionRun",
-                "ExecutionTask",
-                "ExecutionCompensation",
+                "ExecutionRunController",
+                "ExecutionRetention",
+                "ExecutionTaskAttempt",
+                "ExecutionCompensationAttempt",
+                "ExecutionTrigger",
+                "ExecutionDispatcher",
+                "ExecutionDispatchDrain",
+                "ExecutionDispatchReconciler",
+                "DurableTimeout",
             ]
+        );
+    }
+
+    #[test]
+    fn ingress_private_handlers_are_exactly_the_mixed_service_internal_set() {
+        assert_eq!(
+            INGRESS_PRIVATE_HANDLER_NAMES,
+            [("ExecutionSchedule", "fire_occurrence")]
         );
     }
 
@@ -918,10 +1081,10 @@ mod tests {
             1
         );
         assert!(
-            names.contains(&"ExecutionRun")
-                && names.contains(&"ExecutionTask")
-                && names.contains(&"ExecutionCompensation"),
-            "product readiness should include every durable execution workflow"
+            names.contains(&"ExecutionRunController")
+                && names.contains(&"ExecutionTaskAttempt")
+                && names.contains(&"ExecutionCompensationAttempt"),
+            "product readiness should include every bounded execution owner"
         );
         assert!(
             names.contains(&"Execution"),
@@ -967,10 +1130,10 @@ mod tests {
             .copied()
             .filter(|name| *name != "ExperimentRun")
             .collect::<Vec<_>>();
-        let deployment_without_compensation = names
+        let deployment_without_controller = names
             .iter()
             .copied()
-            .filter(|name| *name != "ExecutionCompensation")
+            .filter(|name| *name != "ExecutionRunController")
             .collect::<Vec<_>>();
 
         assert!(
@@ -989,10 +1152,10 @@ mod tests {
         );
         assert!(
             !services_registered_with_expected(
-                &[deployment_with_services(&deployment_without_compensation)],
+                &[deployment_with_services(&deployment_without_controller)],
                 &names
             ),
-            "readiness must reject a deployment missing ExecutionCompensation"
+            "readiness must reject a deployment missing ExecutionRunController"
         );
     }
 

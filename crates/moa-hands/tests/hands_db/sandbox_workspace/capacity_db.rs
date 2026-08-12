@@ -9,14 +9,14 @@ use moa_core::{
             TenantId, WorkspaceOperationId,
         },
         sandbox_workspace::{
-            DurabilityClass, SandboxWorkspaceScope, WorkspaceCapacityDimension,
-            WorkspaceOperationKind,
+            DurabilityClass, SandboxWorkspaceScope, SandboxWorkspaceState,
+            WorkspaceCapacityDimension, WorkspaceOperationKind,
         },
     },
 };
 use moa_hands::core::sandbox_workspace::{
     capacity::{CapacityQuantity, CapacityReservationRequest, PostgresWorkspaceCapacityRepository},
-    model::CreateWorkspaceRequest,
+    model::{CreateWorkspaceRequest, WorkspaceTransition},
     operations::{PostgresWorkspaceOperationRepository, WorkspaceOperationIntent},
     repository::PostgresWorkspaceRepository,
     storage_resources::{PostgresWorkspaceStorageResourceRepository, StorageResourceCreateIntent},
@@ -142,10 +142,10 @@ async fn cleanup_volume_account(pool: &sqlx::PgPool, account_id: ProviderAccount
 }
 
 #[tokio::test]
-#[ignore = "requires a fresh V58 compose Postgres via MOA_DATABASE_URL"]
+#[ignore = "requires a fresh V60 compose Postgres via MOA_DATABASE_URL"]
 async fn exact_capacity_succeeds_and_exact_limit_plus_one_is_deterministic_db() {
-    // Pins: one atomic reservation consumes the exact tenant/provider limit and
-    // the next replica is rejected without a partial reservation.
+    // Pins: workspace creation atomically consumes the exact tenant/provider
+    // limit, and only finalized deletion at the exact generation releases it.
     let pool = PgPoolOptions::new()
         .max_connections(6)
         .connect(&database_url())
@@ -176,72 +176,35 @@ async fn exact_capacity_succeeds_and_exact_limit_plus_one_is_deterministic_db() 
     .expect("seed tenant capacity");
 
     let workspaces = PostgresWorkspaceRepository::new(pool.clone());
-    let operations = PostgresWorkspaceOperationRepository::new(pool.clone());
-    let capacity = PostgresWorkspaceCapacityRepository::new(pool.clone());
-    let now = Utc::now();
-    let mut requests = Vec::new();
-    for ordinal in 0..2 {
-        let workspace_id = SandboxWorkspaceId::new();
-        let operation_id = WorkspaceOperationId::new();
-        workspaces
-            .create(&CreateWorkspaceRequest {
-                workspace_id,
-                tenant_id,
-                scope: SandboxWorkspaceScope::ExecutionTask {
-                    run_id: ExecutionRunScopeId::new(),
-                    task_id: ExecutionTaskScopeId::new(),
-                },
-                provider: "local".to_string(),
-                provider_account_id: account_id,
-                provider_account_generation: 1,
-                durability_class: DurabilityClass::PortableFilesystem,
-                retention_deadline_at: None,
-            })
-            .await
-            .expect("create logical workspace");
-        operations
-            .persist_intent(&WorkspaceOperationIntent {
-                operation_id,
-                tenant_id,
-                workspace_id,
-                provider_account_id: account_id,
-                provider_account_generation: 1,
-                kind: WorkspaceOperationKind::Create,
-                request_hash: format!("sha256:capacity-{ordinal}"),
-                expected_writer_epoch: 0,
-                expected_instance_generation: 0,
-                expected_checkpoint_generation: 0,
-                deadline_at: now + ChronoDuration::seconds(10),
-                reconcile_not_before: now + ChronoDuration::seconds(20),
-            })
-            .await
-            .expect("persist create intent");
-        requests.push(CapacityReservationRequest {
-            tenant_id,
-            workspace_id,
-            operation_id,
-            provider_account_id: account_id,
-            provider_account_generation: 1,
-            expected_writer_epoch: 0,
-            expected_instance_generation: 0,
-            quantities: vec![CapacityQuantity {
-                dimension: WorkspaceCapacityDimension::Workspaces,
-                quantity: 1,
-            }],
-        });
-    }
-
-    let first = capacity
-        .reserve(&requests[0])
+    let create = |workspace_id| CreateWorkspaceRequest {
+        workspace_id,
+        tenant_id,
+        scope: SandboxWorkspaceScope::ExecutionTask {
+            run_id: ExecutionRunScopeId::new(),
+            task_id: ExecutionTaskScopeId::new(),
+        },
+        provider: "local".to_string(),
+        provider_account_id: account_id,
+        provider_account_generation: 1,
+        durability_class: DurabilityClass::PortableFilesystem,
+        retention_deadline_at: None,
+    };
+    let first_workspace_id = SandboxWorkspaceId::new();
+    workspaces
+        .create(&create(first_workspace_id))
         .await
-        .expect("exact capacity is admitted");
-    assert_eq!(first.len(), 1);
+        .expect("workspace creation atomically reserves the exact capacity");
+    let second_workspace_id = SandboxWorkspaceId::new();
+    let error = workspaces
+        .create(&create(second_workspace_id))
+        .await
+        .expect_err("limit plus one must roll back workspace creation");
     assert!(
-        capacity.reserve(&requests[1]).await.is_err(),
-        "exact limit plus one must be rejected"
+        matches!(error, MoaError::StorageError(ref detail) if detail.contains("tenant workspaces capacity exceeded")),
+        "workspace admission must report the exact exhausted dimension: {error}"
     );
     let reservation_count = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM moa.sandbox_capacity_reservations WHERE tenant_id = $1",
+        "SELECT count(*) FROM moa.sandbox_capacity_reservations WHERE tenant_id = $1 AND resource_dimension = 'workspaces' AND reservation_state = 'committed'",
     )
     .bind(tenant_id)
     .fetch_one(&pool)
@@ -251,6 +214,106 @@ async fn exact_capacity_succeeds_and_exact_limit_plus_one_is_deterministic_db() 
         reservation_count, 1,
         "a rejected batch leaves no partial row"
     );
+    let workspace_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM moa.sandbox_workspaces WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count atomically admitted workspaces");
+    assert_eq!(
+        workspace_count, 1,
+        "capacity failure rolls back workspace metadata"
+    );
+    assert_ne!(first_workspace_id, second_workspace_id);
+
+    assert!(
+        workspaces
+            .transition(WorkspaceTransition {
+                tenant_id,
+                workspace_id: first_workspace_id,
+                from: SandboxWorkspaceState::Creating,
+                to: SandboxWorkspaceState::Ready,
+                writer_epoch: 0,
+                instance_generation: 0,
+            })
+            .await
+            .expect("make admitted workspace ready for deletion")
+    );
+    assert!(
+        workspaces
+            .fence_for_deletion(tenant_id, first_workspace_id, 0, 0)
+            .await
+            .expect("fence exact workspace generation for deletion")
+    );
+    let capacity = PostgresWorkspaceCapacityRepository::new(pool.clone());
+    assert!(
+        !capacity
+            .release_workspace(tenant_id, first_workspace_id, 1)
+            .await
+            .expect("deleting workspace cannot release capacity before finalized absence")
+    );
+
+    let delete_operation_id = WorkspaceOperationId::new();
+    let now = Utc::now();
+    PostgresWorkspaceOperationRepository::new(pool.clone())
+        .persist_intent(&WorkspaceOperationIntent {
+            operation_id: delete_operation_id,
+            tenant_id,
+            workspace_id: first_workspace_id,
+            provider_account_id: account_id,
+            provider_account_generation: 1,
+            kind: WorkspaceOperationKind::Delete,
+            request_hash: format!("sha256:workspace-delete-{delete_operation_id}"),
+            expected_writer_epoch: 0,
+            expected_instance_generation: 0,
+            expected_checkpoint_generation: 0,
+            deadline_at: now + ChronoDuration::seconds(10),
+            reconcile_not_before: now + ChronoDuration::seconds(20),
+        })
+        .await
+        .expect("persist exact delete operation");
+    sqlx::query(
+        r#"
+        UPDATE moa.sandbox_workspace_operations
+        SET outcome_class = 'confirmed', confirmed_disposition = 'resource_absent',
+            absence_observation_count = 2,
+            absence_first_observed_at = now() - interval '2 seconds',
+            absence_last_observed_at = now(),
+            absence_inventory_digest = 'sha256:capacity-delete-absence'
+        WHERE operation_id = $1
+        "#,
+    )
+    .bind(delete_operation_id)
+    .execute(&pool)
+    .await
+    .expect("record verified provider absence for deletion");
+    assert!(
+        workspaces
+            .finalize_deleted(tenant_id, first_workspace_id, 1, delete_operation_id)
+            .await
+            .expect("finalize exact deleted workspace")
+    );
+    assert!(
+        !capacity
+            .release_workspace(tenant_id, first_workspace_id, 2)
+            .await
+            .expect("future delete generation is a fenced miss")
+    );
+    assert!(
+        !capacity
+            .release_workspace(tenant_id, first_workspace_id, 1)
+            .await
+            .expect("finalize atomically released the exact workspace owner")
+    );
+    let released_state = sqlx::query_scalar::<_, String>(
+        "SELECT reservation_state FROM moa.sandbox_capacity_reservations WHERE workspace_id = $1 AND resource_dimension = 'workspaces'",
+    )
+    .bind(first_workspace_id)
+    .fetch_one(&pool)
+    .await
+    .expect("load released lifetime workspace reservation");
+    assert_eq!(released_state, "released");
 
     sqlx::query("DELETE FROM moa.sandbox_capacity_reservations WHERE tenant_id = $1")
         .bind(tenant_id)
@@ -261,7 +324,7 @@ async fn exact_capacity_succeeds_and_exact_limit_plus_one_is_deterministic_db() 
         .bind(tenant_id)
         .execute(&pool)
         .await
-        .expect("clean operations");
+        .expect("clean workspace operations");
     sqlx::query("DELETE FROM moa.sandbox_workspaces WHERE tenant_id = $1")
         .bind(tenant_id)
         .execute(&pool)
@@ -281,7 +344,7 @@ async fn exact_capacity_succeeds_and_exact_limit_plus_one_is_deterministic_db() 
 }
 
 #[tokio::test]
-#[ignore = "requires a fresh V58 compose Postgres via MOA_DATABASE_URL"]
+#[ignore = "requires a fresh V60 compose Postgres via MOA_DATABASE_URL"]
 async fn volume_inventory_overlap_headroom_and_exact_limit_are_atomic_db() {
     // Pins: one volume seen in both durable state and Daytona inventory counts
     // once, while provider-only inventory and reserved headroom still make the

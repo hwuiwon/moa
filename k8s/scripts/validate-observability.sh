@@ -47,6 +47,18 @@ EXPECTED_ALERTS=(
   MOAAuthzOutboxBacklogAge
   MOAAuthzOutboxDeadLetters
   MOABuiltinApprovalBacklogAge
+  MOAExecutionActiveAttemptStuck
+  MOAExecutionAdmissionSaturated
+  MOAExecutionExternalJobStuck
+  MOAExecutionMaintenanceReconcileStale
+  MOAExecutionOldestReadySLO
+  MOAExecutionOutboxDeadLetters
+  MOAExecutionOutboxLagHigh
+  MOAExecutionOverdueDeadlines
+  MOAExecutionQueueSampleSaturated
+  MOAExecutionRetentionStale
+  MOAExecutionTriggerDeadLetters
+  MOAExecutionTriggerLagHigh
   MOALLMFailoverElevated
   MOALineageDeadLettering
   MOALineageDrainTimeout
@@ -63,6 +75,7 @@ EXPECTED_ALERTS=(
   MOARestateIngressRateLimited
   MOARestateInvocationTaskFailures
   MOARestateNodeScrapeDown
+  MOARestateOldDeploymentDrainAge
   MOARestatePartitionAppliedLSNLagHigh
   MOARestatePartitionLeaderMissing
   MOARestatePartitionStatusStale
@@ -78,6 +91,7 @@ EXPECTED_ALERTS=(
   MOASandboxWorkspaceReaperBacklogAge
   MOASandboxWorkspaceReaperHeartbeatStale
   MOASandboxWorkspaceReaperUnready
+  MOASandboxParkedTaskRetainsActiveHand
 )
 
 # Prometheus spellings of the server instruments verified against Restate
@@ -463,6 +477,98 @@ ORCHESTRATOR_NETPOL_TEXT="$(<"${REPO_ROOT}/k8s/base/26-orchestrator-network-poli
 assert_excludes "${ORCHESTRATOR_NETPOL_TEXT}" "- Egress" \
   "the orchestrator NetworkPolicy now restricts egress; OTLP push to the collector must be explicitly allowed or telemetry stops with no error anywhere"
 
+echo "Checking long-horizon maintenance and draining-version contracts..."
+python3 - "${REPO_ROOT}" <<'PY' || exit 1
+import pathlib
+import sys
+
+import yaml
+
+root = pathlib.Path(sys.argv[1])
+
+restate_deployment = yaml.safe_load(
+    (root / "k8s/base/20-orchestrator-deployment.yaml").read_text(encoding="utf-8")
+)
+autoscaling = restate_deployment.get("spec", {}).get("autoscaling") or {}
+if autoscaling.get("minReplicas") != 1 or autoscaling.get("maxReplicas") != 6:
+    raise SystemExit(
+        "draining Restate revisions must autoscale between exactly one recovery "
+        "replica and the six-replica serving ceiling"
+    )
+if "scaleTargetRef" in autoscaling:
+    raise SystemExit(
+        "RestateDeployment autoscaling must omit scaleTargetRef; the operator injects it per revision"
+    )
+metrics = autoscaling.get("metrics") or []
+cpu_targets = [
+    metric.get("resource", {}).get("target", {}).get("averageUtilization")
+    for metric in metrics
+    if metric.get("type") == "Resource"
+    and metric.get("resource", {}).get("name") == "cpu"
+]
+if cpu_targets != [60]:
+    raise SystemExit(
+        f"draining Restate revisions must use the single 60% CPU target, got {cpu_targets}"
+    )
+scale_down = autoscaling.get("behavior", {}).get("scaleDown") or {}
+if scale_down.get("stabilizationWindowSeconds") != 120:
+    raise SystemExit("draining-version scale-down must use the reviewed 120s stabilization window")
+
+maintenance_path = root / "k8s/base/25-maintenance-deployment.yaml"
+maintenance = yaml.safe_load(maintenance_path.read_text(encoding="utf-8"))
+if maintenance.get("kind") != "Deployment" or maintenance.get("metadata", {}).get("name") != "moa-maintenance":
+    raise SystemExit(f"{maintenance_path} must define the moa-maintenance Deployment")
+spec = maintenance.get("spec", {})
+if spec.get("replicas") != 1 or spec.get("strategy", {}).get("type") != "Recreate":
+    raise SystemExit("moa-maintenance must be a singleton using the Recreate rollout strategy")
+pod_spec = spec.get("template", {}).get("spec", {})
+containers = pod_spec.get("containers") or []
+if len(containers) != 1:
+    raise SystemExit("moa-maintenance must have exactly one runtime container")
+container = containers[0]
+if container.get("args") != ["maintenance"]:
+    raise SystemExit("moa-maintenance must use the hard-break maintenance subcommand")
+ports = {port.get("name") for port in container.get("ports") or []}
+if ports != {"health"}:
+    raise SystemExit(
+        "moa-maintenance may expose only health; Restate, SCIM, and credential ingress belong to serving pods"
+    )
+env_names = {entry.get("name") for entry in container.get("env") or []}
+for required in (
+    "MOA_DATABASE_URL",
+    "MOA_DATABASE_MAINTENANCE_URL",
+    "MOA_RESTATE_INGRESS_URL",
+    "MOA_METRICS_EXPORTER",
+    "MOA_SERVICE_INSTANCE_ID",
+):
+    if required not in env_names:
+        raise SystemExit(f"moa-maintenance is missing required environment binding {required}")
+
+base_kustomization = (root / "k8s/base/kustomization.yaml").read_text(encoding="utf-8")
+if base_kustomization.count("25-maintenance-deployment.yaml") != 1:
+    raise SystemExit("base kustomization must include the maintenance Deployment exactly once")
+
+production_kustomization = (
+    root / "k8s/overlays/production/kustomization.yaml"
+).read_text(encoding="utf-8")
+if production_kustomization.count("name: moa-maintenance") != 2:
+    raise SystemExit(
+        "production must apply both the security and observability patches to moa-maintenance"
+    )
+if production_kustomization.count("path: patches/orchestrator-security-profile.yaml") != 2:
+    raise SystemExit("maintenance and serving pods must share the production security patch")
+if production_kustomization.count("path: patches/orchestrator-observability.yaml") != 2:
+    raise SystemExit("maintenance and serving pods must share the production OTLP patch")
+
+runtime_profile = (
+    root / "k8s/overlays/production/patches/runtime-security-profile.yaml"
+).read_text(encoding="utf-8")
+if 'MOA_EXECUTION_TRIGGER_RECONCILIATION_CADENCE_SECONDS: "30"' not in runtime_profile:
+    raise SystemExit("production does not set the safety-critical trigger reconciliation cadence")
+
+print("  OK maintenance is singleton/private and old Restate revisions autoscale while draining")
+PY
+
 echo "Checking alert rules with promtool..."
 RULE_FILES=("${ALERTS_DIR}"/*.yaml)
 # kustomization.yaml lives in the same directory and is not a rule file.
@@ -581,7 +687,9 @@ root = pathlib.Path(sys.argv[1])
 dashboard_path = pathlib.Path(sys.argv[2])
 allowed = set(sys.argv[3:])
 allowed.add("up")
-metric_pattern = re.compile(r"(?:restate_[a-z0-9_]+|\bup\b)")
+# Match complete Restate server metric tokens, not the `restate_` substring in
+# MOA-owned fleet gauges such as `moa_restate_draining_deployment_*`.
+metric_pattern = re.compile(r"(?:(?<![a-z0-9_])restate_[a-z0-9_]+|\bup\b)")
 
 dashboard = json.loads(dashboard_path.read_text(encoding="utf-8"))
 panels = dashboard.get("panels") or []
@@ -679,6 +787,135 @@ PY
 echo "Checking Grafana dashboard delivery..."
 [[ -d "${CANONICAL_DASHBOARD_DIR}" ]] \
   || die "canonical Grafana dashboard directory is missing: ${CANONICAL_DASHBOARD_DIR}"
+echo "Checking the long-horizon execution metric and alert contract..."
+python3 - "${REPO_ROOT}" <<'PY' || exit 1
+import pathlib
+import re
+import sys
+
+import yaml
+
+root = pathlib.Path(sys.argv[1])
+runtime_metrics = (root / "crates/moa-observability/src/runtime_metrics.rs").read_text(
+    encoding="utf-8"
+)
+expected = {
+    "moa_execution_active_attempt_oldest_age_seconds",
+    "moa_execution_admission_utilization_ratio",
+    "moa_execution_external_job_oldest_age_seconds",
+    "moa_execution_maintenance_last_success_age_seconds",
+    "moa_execution_maintenance_ready",
+    "moa_execution_retention_last_success_age_seconds",
+    "moa_execution_retention_ready",
+    "moa_execution_oldest_ready_age_seconds",
+    "moa_execution_outbox_dead_letters",
+    "moa_execution_outbox_claimable",
+    "moa_execution_outbox_lag_seconds",
+    "moa_execution_queue_sample_saturated",
+    "moa_execution_overdue_deadlines",
+    "moa_execution_runs",
+    "moa_execution_tenant_max_share_ratio",
+    "moa_execution_trigger_dead_letters",
+    "moa_execution_trigger_due",
+    "moa_execution_trigger_lag_seconds",
+    "moa_restate_draining_deployment_oldest_age_seconds",
+    "moa_restate_draining_deployment_replica_hours",
+    "moa_restate_draining_deployment_replicas",
+    "moa_restate_draining_deployments",
+    "moa_sandbox_workspace_active_hands",
+    "moa_sandbox_workspace_parked_tasks_with_active_hands",
+    "moa_sandbox_workspace_releases_total",
+    "moa_sandbox_workspace_restores_total",
+}
+for metric in expected:
+    if f'"{metric}"' not in runtime_metrics:
+        raise SystemExit(f"long-horizon metric {metric} is not emitted by runtime_metrics.rs")
+
+execution_source = runtime_metrics[
+    runtime_metrics.index("pub fn record_execution_run_phase") :
+    runtime_metrics.index("pub fn record_worker_terminal_delivery")
+]
+label_keys = set(re.findall(r'"([a-z_]+)"\s*=>', execution_source))
+if label_keys != {"phase", "queue", "resource", "sample", "scope"}:
+    raise SystemExit(
+        "long-horizon execution metric label vocabulary drifted: "
+        f"{sorted(label_keys)}"
+    )
+for forbidden in (
+    "tenant_id",
+    "run_id",
+    "run_uid",
+    "task_id",
+    "task_uid",
+    "external_job_id",
+    "deployment_id",
+    "deployment_version",
+):
+    if forbidden in execution_source:
+        raise SystemExit(
+            f"long-horizon execution metrics expose forbidden identity label {forbidden!r}"
+        )
+
+alerts_path = root / "ops/prometheus/alerts/moa-long-horizon-execution.yaml"
+alerts = yaml.safe_load(alerts_path.read_text(encoding="utf-8"))
+rules = [
+    rule
+    for group in alerts.get("spec", {}).get("groups") or []
+    for rule in group.get("rules") or []
+]
+if len(rules) != 12:
+    raise SystemExit(f"{alerts_path} must contain exactly twelve actionable alerts")
+alert_expressions = "\n".join(rule.get("expr", "") for rule in rules)
+required_alert_metrics = {
+    "moa_execution_active_attempt_oldest_age_seconds",
+    "moa_execution_admission_utilization_ratio",
+    "moa_execution_external_job_oldest_age_seconds",
+    "moa_execution_maintenance_last_success_age_seconds",
+    "moa_execution_maintenance_ready",
+    "moa_execution_retention_last_success_age_seconds",
+    "moa_execution_retention_ready",
+    "moa_execution_oldest_ready_age_seconds",
+    "moa_execution_outbox_dead_letters",
+    "moa_execution_outbox_lag_seconds",
+    "moa_execution_queue_sample_saturated",
+    "moa_execution_overdue_deadlines",
+    "moa_execution_trigger_dead_letters",
+    "moa_execution_trigger_lag_seconds",
+}
+observed_alert_metrics = set(re.findall(r"moa_execution_[a-z0-9_]+", alert_expressions))
+if observed_alert_metrics != required_alert_metrics:
+    raise SystemExit(
+        "long-horizon alert metric inventory drifted; "
+        f"missing={sorted(required_alert_metrics - observed_alert_metrics)}, "
+        f"extra={sorted(observed_alert_metrics - required_alert_metrics)}"
+    )
+
+retention_rules = [rule for rule in rules if rule.get("alert") == "MOAExecutionRetentionStale"]
+if len(retention_rules) != 1:
+    raise SystemExit("long-horizon alerts must define MOAExecutionRetentionStale exactly once")
+retention_expr = retention_rules[0].get("expr", "")
+for required_clause in (
+    "absent(moa_execution_retention_ready)",
+    "max(moa_execution_retention_ready) == 0",
+    "max(moa_execution_retention_last_success_age_seconds) > 7200",
+):
+    if required_clause not in retention_expr:
+        raise SystemExit(
+            "MOAExecutionRetentionStale must alert on missing, unready, and older-than-two-hour receipts"
+        )
+
+kustomization = (root / "ops/prometheus/alerts/kustomization.yaml").read_text(
+    encoding="utf-8"
+)
+if kustomization.count("moa-long-horizon-execution.yaml") != 1:
+    raise SystemExit(
+        "moa-long-horizon-execution.yaml must appear exactly once in the alert kustomization"
+    )
+
+print(
+    f"  OK {len(expected)} low-cardinality metrics back {len(rules)} long-horizon alerts"
+)
+PY
 echo "Checking the sandbox workspace metrics/dashboard/alert contract..."
 python3 - "${REPO_ROOT}" <<'PY' || exit 1
 import json
@@ -804,8 +1041,8 @@ rules = [
     for group in alerts.get("spec", {}).get("groups") or []
     for rule in group.get("rules") or []
 ]
-if len(rules) != 7:
-    raise SystemExit(f"{alerts_path} must contain exactly seven actionable alerts")
+if len(rules) != 8:
+    raise SystemExit(f"{alerts_path} must contain exactly eight actionable alerts")
 for rule in rules:
     expression = rule.get("expr", "")
     annotations = rule.get("annotations") or {}

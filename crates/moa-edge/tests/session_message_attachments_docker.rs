@@ -225,6 +225,10 @@ async fn start_edge(
             moa_edge::connector_credential_proxy::ConnectorCredentialProxy::new(upstream)
                 .expect("credential proxy URL is valid"),
         ),
+        external_job_callbacks: Arc::new(
+            moa_edge::external_job_callback_proxy::ExternalJobCallbackProxy::new(upstream)
+                .expect("callback proxy URL is valid"),
+        ),
         clickhouse_lineage: None,
         clickhouse_analytics: None,
     };

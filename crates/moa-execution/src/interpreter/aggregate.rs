@@ -98,6 +98,7 @@ pub(super) fn derive_aggregate_nodes(
                 | ExecutionOperation::Agent { .. }
                 | ExecutionOperation::Review { .. }
                 | ExecutionOperation::WaitSignal { .. }
+                | ExecutionOperation::WaitUntil { .. }
                 | ExecutionOperation::Output { .. } => AggregateState::Pending,
             };
 
@@ -326,7 +327,9 @@ pub(super) fn derive_reduce_rounds(
                     )?;
                     completed.push(output);
                 }
-                ExecutionTaskStatus::Failed => return Ok(AggregateState::Failed),
+                ExecutionTaskStatus::Failed | ExecutionTaskStatus::UnknownOutcome => {
+                    return Ok(AggregateState::Failed);
+                }
                 ExecutionTaskStatus::Cancelled => return Ok(AggregateState::Cancelled),
                 ExecutionTaskStatus::Skipped => {
                     return Err(Error::InvalidProjection {
@@ -334,9 +337,15 @@ pub(super) fn derive_reduce_rounds(
                     });
                 }
                 ExecutionTaskStatus::Pending
+                | ExecutionTaskStatus::Ready
                 | ExecutionTaskStatus::Reserved
+                | ExecutionTaskStatus::Dispatching
                 | ExecutionTaskStatus::Running
                 | ExecutionTaskStatus::WaitingInput
+                | ExecutionTaskStatus::WaitingReview
+                | ExecutionTaskStatus::WaitingSignal
+                | ExecutionTaskStatus::WaitingTimer
+                | ExecutionTaskStatus::WaitingExternal
                 | ExecutionTaskStatus::WaitingReplan => return Ok(AggregateState::Pending),
             }
         }

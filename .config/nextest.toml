@@ -97,6 +97,16 @@ binary(/^orchestrator_fixture_service_e2e$/)
   | binary(/^turn_terminal_failure_service_e2e$/)
 '''
 
+# Accelerated eight-logical-day execution validation. The binary owns one
+# disposable Restate/Postgres/Valkey fixture and deliberately restarts those
+# dependencies, so cases are serialized and have a hard ten-minute ceiling.
+[profile.long-horizon-execution]
+inherits = "default"
+test-threads = 1
+junit.path = "target/nextest/long-horizon-execution/junit.xml"
+default-filter = 'package(moa-orchestrator) & binary(/^long_horizon_execution_service_e2e$/)'
+slow-timeout = { period = "60s", terminate-after = 10 }
+
 # Small deterministic crash/replay and worker-deadline cases run serially on
 # pull requests. Large fan-out, A/B rollout, node-loss, and chaos scenarios
 # remain in their existing local/nightly lanes.

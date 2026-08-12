@@ -12,13 +12,19 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Router, serve};
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
+use moa_execution::repository::{
+    ExecutionRepository, ExecutionScope,
+    outbox::{ExecutionMaintenanceCheckpoint, ExecutionMaintenanceJobKind},
+    retention::ExecutionRetentionCheckpoint,
+};
 use moa_observability::{TelemetryConfig, init_observability, metrics_endpoint_url};
 use moa_orchestrator::objects::session_status_migrator::build_status_migration_endpoint;
 use moa_orchestrator::services::scim::{self, ScimState};
 use moa_orchestrator::{
     config::{ProvidersOverride, load_moa_config_from_env, restate_ingress_url, skip_fga_from_env},
-    credential_ingress,
+    credential_ingress, external_job_ingress,
     runtime::{
         bootstrap::{BootstrapOptions, run as run_bootstrap, wait_for_session_status_cutover},
         channel_ingress::spawn_channel_ingress,
@@ -26,9 +32,10 @@ use moa_orchestrator::{
         deps::RuntimeDeps,
         endpoint::build_endpoint,
         jobs::{
+            build_maintenance_dependencies, ensure_execution_maintenance_cron_jobs,
             start_action_review_reaper, start_authz_challenge_reaper_if_configured,
-            start_checkpoint_bucket_versioning_refresh, start_hand_lease_reaper,
-            start_mcp_catalog_refresh, start_workspace_reaper,
+            start_authz_outbox_poller, start_checkpoint_bucket_versioning_refresh,
+            start_hand_lease_reaper, start_mcp_catalog_refresh, start_workspace_reaper,
         },
         kms::KmsRuntime,
         sandbox_workspace_rollout::validate_startup_state as validate_sandbox_workspace_rollout,
@@ -40,17 +47,18 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_RESTATE_PORT: u16 = 10020;
-const DEFAULT_HEALTH_PORT: u16 = 10021;
+const DEFAULT_HEALTH_PORT: u16 = 9081;
 const DEFAULT_SCIM_PORT: u16 = 10022;
 const DEFAULT_CONNECTOR_CREDENTIAL_PORT: u16 = 10023;
 const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
 const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_secs(15);
+const EXECUTION_CRON_RECONCILE_MAX_DELAY: Duration = Duration::from_secs(300);
 const ORCHESTRATOR_WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 /// Process arguments for the orchestrator process.
 #[derive(Debug, Parser)]
 struct Args {
-    /// Run database migrations and exit without starting Restate services.
+    /// Optional process role or one-shot administrative command.
     #[command(subcommand)]
     command: Option<Command>,
     /// HTTP port for the Restate handler endpoint.
@@ -69,6 +77,8 @@ struct Args {
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum Command {
+    /// Run the singleton correctness-maintenance process without serving product ingress.
+    Maintenance,
     /// Apply database migrations and exit.
     Migrate,
     /// Serve only the raw Session state cutover handlers.
@@ -222,6 +232,17 @@ async fn async_main() -> anyhow::Result<()> {
         Some(Command::ServeStatusMigration) | Some(Command::WaitStatusCutover { .. }) => {
             unreachable!("pre-runtime command returned before runtime config")
         }
+        Some(Command::Maintenance) => {
+            let result = run_maintenance(
+                moa_config,
+                args.health_port,
+                &database_search_path,
+                skip_fga,
+            )
+            .await;
+            telemetry.shutdown();
+            return result;
+        }
         None => {}
     }
 
@@ -269,7 +290,7 @@ async fn async_main() -> anyhow::Result<()> {
     } else {
         None
     };
-    let mut runtime_deps = RuntimeDeps::build(
+    let runtime_deps = RuntimeDeps::build(
         moa_config.clone(),
         pool.clone(),
         background_pool,
@@ -290,15 +311,6 @@ async fn async_main() -> anyhow::Result<()> {
         .clone()
         .map(start_checkpoint_bucket_versioning_refresh);
 
-    let mut workspace_reaper_handle = runtime_deps
-        .workspace_maintenance
-        .clone()
-        .map(|coordinator| start_workspace_reaper(coordinator, moa_config.as_ref()))
-        .transpose()?;
-    let workspace_reaper_readiness = workspace_reaper_handle
-        .as_ref()
-        .map(moa_hands::core::sandbox_workspace::reaper::WorkspaceReaperHandle::readiness);
-
     let readiness = Arc::new(AtomicBool::new(false));
     let probe_state = ProbeState::new(
         readiness.clone(),
@@ -306,31 +318,9 @@ async fn async_main() -> anyhow::Result<()> {
         runtime_deps.kms.clone(),
         runtime_deps.lineage.writer.clone(),
         runtime_deps.checkpoint_versioning_observer.clone(),
-        workspace_reaper_readiness,
+        MaintenanceReadiness::default(),
     );
     let shutdown = CancellationToken::new();
-    let authz_challenge_reaper_handle = start_authz_challenge_reaper_if_configured(
-        &runtime_deps.background_pool,
-        moa_config.as_ref(),
-        runtime_deps.awakeable_resolver.clone(),
-    )?;
-    let action_review_reaper_handle =
-        start_action_review_reaper(&runtime_deps.background_pool, restate_ingress_url.clone());
-    // The destruction owner for every bounded sandbox deadline. It is started
-    // before the servers accept traffic, and startup fails outright if no hand
-    // provider is registered, so no sandbox is ever provisioned under a policy
-    // this process cannot enforce.
-    let hand_lease_reaper_handle = moa_config
-        .sandbox_workspaces
-        .mode
-        .maintenance_enabled()
-        .then(|| {
-            start_hand_lease_reaper(
-                &runtime_deps.background_pool,
-                runtime_deps.tool_router.hand_providers(),
-            )
-        })
-        .transpose()?;
     // Optional connectors that failed discovery at startup are retried here, and
     // schema changes republished, without restarting the process.
     let mcp_catalog_refresh_handle =
@@ -346,7 +336,14 @@ async fn async_main() -> anyhow::Result<()> {
     let mut scim_server = spawn_scim_server(scim_listener, scim_state, shutdown.clone());
     let mut credential_server = spawn_credential_server(
         credential_listener,
-        credential_ingress::router(runtime_deps.connector_credential_ingress()),
+        credential_ingress::router(runtime_deps.connector_credential_ingress()).merge(
+            external_job_ingress::router(external_job_ingress::ExternalJobCallbackIngress::new(
+                pool.clone(),
+                runtime_deps.external_job_adapters.clone(),
+                moa_config.execution.clone(),
+                &restate_ingress_url,
+            )?),
+        ),
         shutdown.clone(),
     );
     let mut channel_ingress = spawn_channel_ingress(
@@ -433,22 +430,6 @@ async fn async_main() -> anyhow::Result<()> {
             result.context("join connector credential ingress server")??;
             bail!("connector credential ingress server exited unexpectedly");
         }
-        result = await_workspace_reaper_exit(&mut workspace_reaper_handle) => {
-            readiness.store(false, Ordering::Release);
-            shutdown.cancel();
-            restate_server.abort();
-            health_server.abort();
-            scim_server.abort();
-            credential_server.abort();
-            if let Some(handle) = channel_ingress.take() {
-                handle.abort();
-            }
-            if let Some(handle) = analytics_export.take() {
-                handle.abort();
-            }
-            result.context("durable workspace reaper exited")?;
-            bail!("durable workspace reaper exited unexpectedly");
-        }
         result = await_checkpoint_versioning_refresh_exit(&mut checkpoint_versioning_refresh_handle) => {
             readiness.store(false, Ordering::Release);
             shutdown.cancel();
@@ -503,14 +484,6 @@ async fn async_main() -> anyhow::Result<()> {
                 let _ = join_task_bounded("analytics export", handle).await;
             }
 
-            if let Some(handle) = workspace_reaper_handle.take() {
-                let _ = shutdown_future_bounded(
-                    "durable workspace reaper",
-                    handle.shutdown(),
-                )
-                .await;
-            }
-
             if let Some(handle) = checkpoint_versioning_refresh_handle.take() {
                 let _ = shutdown_future_bounded(
                     "checkpoint bucket versioning refresh",
@@ -519,32 +492,9 @@ async fn async_main() -> anyhow::Result<()> {
                 .await;
             }
 
-            if let Some(handle) = hand_lease_reaper_handle {
-                abort_and_join_task("hand lease reaper", handle).await;
-            }
             if let Some(handle) = mcp_catalog_refresh_handle {
                 abort_and_join_task("MCP catalog refresh", handle).await;
             }
-            if let Some(poller_handle) = runtime_deps.authz_outbox_poller.take() {
-                let _ = shutdown_future_bounded(
-                    "authz outbox poller",
-                    poller_handle.shutdown(),
-                )
-                .await;
-            }
-            if let Some(reaper_handle) = authz_challenge_reaper_handle {
-                let _ = shutdown_future_bounded(
-                    "authz challenge reaper",
-                    reaper_handle.shutdown(),
-                )
-                .await;
-            }
-            let _ = shutdown_future_bounded(
-                "action review reaper",
-                action_review_reaper_handle.shutdown(),
-            )
-            .await;
-
             let audit = runtime_deps.audit.clone();
 
             if let Some(writer) = runtime_deps.lineage.writer.clone() {
@@ -587,8 +537,346 @@ async fn async_main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Runs the singleton correctness-maintenance role without binding product ingress.
+async fn run_maintenance(
+    config: Arc<moa_config::MoaConfig>,
+    health_port: u16,
+    database_search_path: &str,
+    skip_fga: bool,
+) -> anyhow::Result<()> {
+    config
+        .validate_sandbox_workspace_runtime(skip_fga)
+        .context("validate sandbox workspace maintenance rollout")?;
+    let restate_ingress_url = restate_ingress_url(config.as_ref())?;
+    let pool = build_database_pool(
+        config.database.runtime_url(),
+        database_search_path,
+        config.database.max_connections,
+        Duration::from_secs(config.database.connect_timeout_seconds),
+    )
+    .await
+    .context("connect maintenance runtime database pool")?;
+    moa_migrations::validate_complete_history(&pool)
+        .await
+        .context("validate complete database migration history")?;
+    validate_sandbox_workspace_rollout(config.as_ref(), &pool).await?;
+    ensure_execution_maintenance_cron_jobs(
+        &restate_ingress_url,
+        config.execution.trigger_reconciliation_cadence_seconds,
+    )
+    .await
+    .context("ensure durable execution dispatch repair CronJob")?;
+
+    // The dedicated maintenance connection is constructed only when durable
+    // workspaces are enabled. Disabled deployments therefore keep one small
+    // runtime pool and never wake a sandbox provider or object-store client.
+    let maintenance_pool = if config.sandbox_workspaces.mode.maintenance_enabled() {
+        let url = config.database.maintenance_url().ok_or_else(|| {
+            anyhow::anyhow!("sandbox workspace maintenance database URL is unavailable")
+        })?;
+        Some(
+            build_database_pool(
+                url,
+                database_search_path,
+                config.database.background_max_connections,
+                Duration::from_secs(config.database.connect_timeout_seconds),
+            )
+            .await
+            .context("connect dedicated sandbox workspace maintenance database pool")?,
+        )
+    } else {
+        None
+    };
+
+    let dependencies = build_maintenance_dependencies(
+        config.as_ref(),
+        pool.clone(),
+        maintenance_pool,
+        &restate_ingress_url,
+        skip_fga,
+    )
+    .await?;
+
+    let mut checkpoint_versioning_refresh_handle = dependencies
+        .checkpoint_versioning_observer
+        .clone()
+        .map(start_checkpoint_bucket_versioning_refresh);
+    let mut workspace_reaper_handle = dependencies
+        .workspace_maintenance
+        .clone()
+        .map(|coordinator| start_workspace_reaper(coordinator, config.as_ref()))
+        .transpose()?;
+    let mut hand_lease_reaper_handle = config
+        .sandbox_workspaces
+        .mode
+        .maintenance_enabled()
+        .then(|| start_hand_lease_reaper(&pool, dependencies.hand_providers))
+        .transpose()?;
+    let mut authz_outbox_poller_handle = dependencies
+        .fga_client
+        .map(|client| start_authz_outbox_poller(&pool, client));
+    let mut authz_challenge_reaper_handle = match dependencies.awakeable_resolver {
+        Some(resolver) => {
+            start_authz_challenge_reaper_if_configured(&pool, config.as_ref(), resolver)?
+        }
+        None => None,
+    };
+    let mut action_review_reaper_handle = Some(start_action_review_reaper(
+        &pool,
+        restate_ingress_url.clone(),
+    ));
+
+    let readiness = Arc::new(AtomicBool::new(false));
+    let execution_maintenance_repository = ExecutionRepository::new(pool.clone());
+    let probe_state = ProbeState::new(
+        readiness.clone(),
+        pool,
+        dependencies.kms,
+        None,
+        dependencies.checkpoint_versioning_observer,
+        MaintenanceReadiness {
+            workspace_reaper: workspace_reaper_handle
+                .as_ref()
+                .map(|handle| handle.readiness()),
+            hand_lease_reaper: hand_lease_reaper_handle
+                .as_ref()
+                .map(|handle| handle.readiness()),
+            authz_outbox_poller: authz_outbox_poller_handle
+                .as_ref()
+                .map(|handle| handle.readiness()),
+            action_review_reaper: action_review_reaper_handle
+                .as_ref()
+                .map(|handle| handle.readiness()),
+            authz_challenge_reaper: authz_challenge_reaper_handle
+                .as_ref()
+                .map(|handle| handle.readiness()),
+            execution_repository: Some(execution_maintenance_repository),
+        },
+    );
+    let shutdown = CancellationToken::new();
+    let mut execution_cron_reconciler = spawn_execution_cron_reconciler(
+        restate_ingress_url,
+        config.execution.trigger_reconciliation_cadence_seconds,
+        shutdown.clone(),
+    );
+    let health_listener = bind_listener(health_port).await?;
+    let mut health_server =
+        spawn_health_server(health_listener, probe_state.clone(), shutdown.clone());
+    tracing::info!(
+        health_port,
+        metrics_url =
+            metrics_endpoint_url(&config.metrics).unwrap_or_else(|| "disabled".to_string()),
+        "starting moa-maintenance"
+    );
+    readiness.store(true, Ordering::Release);
+
+    tokio::select! {
+        result = &mut health_server => {
+            close_maintenance_readiness(&readiness);
+            shutdown.cancel();
+            result.context("join maintenance health probe server")??;
+            bail!("maintenance health probe server exited unexpectedly");
+        }
+        result = await_checkpoint_versioning_refresh_exit(&mut checkpoint_versioning_refresh_handle) => {
+            close_maintenance_readiness(&readiness);
+            shutdown.cancel();
+            result.context("checkpoint bucket versioning refresh exited")?;
+            bail!("checkpoint bucket versioning refresh exited unexpectedly");
+        }
+        result = await_workspace_reaper_exit(&mut workspace_reaper_handle) => {
+            close_maintenance_readiness(&readiness);
+            shutdown.cancel();
+            result.context("durable workspace reaper exited")?;
+            bail!("durable workspace reaper exited unexpectedly");
+        }
+        result = await_hand_lease_reaper_exit(&mut hand_lease_reaper_handle) => {
+            close_maintenance_readiness(&readiness);
+            shutdown.cancel();
+            result.context("durable hand-lease reaper exited")?;
+            bail!("durable hand-lease reaper exited unexpectedly");
+        }
+        result = await_authz_outbox_poller_exit(&mut authz_outbox_poller_handle) => {
+            close_maintenance_readiness(&readiness);
+            shutdown.cancel();
+            result.context("authorization outbox poller exited")?;
+            bail!("authorization outbox poller exited unexpectedly");
+        }
+        result = await_authz_challenge_reaper_exit(&mut authz_challenge_reaper_handle) => {
+            close_maintenance_readiness(&readiness);
+            shutdown.cancel();
+            result.context("authorization challenge reaper exited")?;
+            bail!("authorization challenge reaper exited unexpectedly");
+        }
+        result = await_action_review_reaper_exit(&mut action_review_reaper_handle) => {
+            close_maintenance_readiness(&readiness);
+            shutdown.cancel();
+            result.context("action-review reaper exited")?;
+            bail!("action-review reaper exited unexpectedly");
+        }
+        result = &mut execution_cron_reconciler => {
+            close_maintenance_readiness(&readiness);
+            shutdown.cancel();
+            result.context("join execution CronJob reconciler")??;
+            bail!("execution CronJob reconciler exited unexpectedly");
+        }
+        signal = shutdown_signal() => signal?,
+    }
+
+    tracing::info!("shutdown signal received, stopping maintenance owners");
+    close_maintenance_readiness(&readiness);
+    shutdown.cancel();
+
+    let checkpoint_versioning_refresh_handle = checkpoint_versioning_refresh_handle.take();
+    let workspace_reaper_handle = workspace_reaper_handle.take();
+    let hand_lease_reaper_handle = hand_lease_reaper_handle.take();
+    let authz_outbox_poller_handle = authz_outbox_poller_handle.take();
+    let authz_challenge_reaper_handle = authz_challenge_reaper_handle.take();
+    let action_review_reaper_handle = action_review_reaper_handle.take();
+    tokio::join!(
+        async move {
+            if let Some(result) =
+                join_task_bounded("maintenance health probe server", health_server).await
+                && let Err(error) = result
+            {
+                tracing::warn!(%error, "maintenance health probe server failed during shutdown");
+            }
+        },
+        async move {
+            if let Some(handle) = checkpoint_versioning_refresh_handle {
+                let _ = shutdown_future_bounded(
+                    "checkpoint bucket versioning refresh",
+                    handle.shutdown(),
+                )
+                .await;
+            }
+        },
+        async move {
+            if let Some(handle) = workspace_reaper_handle {
+                let _ =
+                    shutdown_future_bounded("durable workspace reaper", handle.shutdown()).await;
+            }
+        },
+        async move {
+            if let Some(handle) = hand_lease_reaper_handle {
+                let _ =
+                    shutdown_future_bounded("durable hand-lease reaper", handle.shutdown()).await;
+            }
+        },
+        async move {
+            if let Some(handle) = authz_outbox_poller_handle {
+                let _ =
+                    shutdown_future_bounded("authorization outbox poller", handle.shutdown()).await;
+            }
+        },
+        async move {
+            if let Some(handle) = authz_challenge_reaper_handle {
+                let _ =
+                    shutdown_future_bounded("authorization challenge reaper", handle.shutdown())
+                        .await;
+            }
+        },
+        async move {
+            if let Some(handle) = action_review_reaper_handle {
+                let _ = shutdown_future_bounded("action-review reaper", handle.shutdown()).await;
+            }
+        },
+        async move {
+            let _ =
+                join_task_bounded("execution CronJob reconciler", execution_cron_reconciler).await;
+        },
+    );
+
+    Ok(())
+}
+
+fn spawn_execution_cron_reconciler(
+    restate_ingress_url: String,
+    cadence_seconds: u64,
+    shutdown: CancellationToken,
+) -> JoinHandle<anyhow::Result<()>> {
+    tokio::spawn(async move {
+        let mut consecutive_failures = 0;
+        loop {
+            let retry_delay = execution_cron_reconcile_delay(cadence_seconds, consecutive_failures);
+            tokio::select! {
+                () = shutdown.cancelled() => return Ok(()),
+                () = tokio::time::sleep(retry_delay) => {}
+            }
+            match ensure_execution_maintenance_cron_jobs(&restate_ingress_url, cadence_seconds)
+                .await
+            {
+                Ok(()) => consecutive_failures = 0,
+                Err(error) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    let next_retry_delay =
+                        execution_cron_reconcile_delay(cadence_seconds, consecutive_failures);
+                    tracing::warn!(
+                        %error,
+                        retry_delay_secs = next_retry_delay.as_secs(),
+                        "execution CronJob reconciliation failed; retrying with bounded backoff"
+                    );
+                }
+            }
+        }
+    })
+}
+
+fn execution_cron_reconcile_delay(cadence_seconds: u64, consecutive_failures: u32) -> Duration {
+    let steady_delay = Duration::from_secs(cadence_seconds.clamp(1, 60));
+    let multiplier = 1_u32
+        .checked_shl(consecutive_failures.min(31))
+        .unwrap_or(u32::MAX);
+    steady_delay
+        .saturating_mul(multiplier)
+        .min(EXECUTION_CRON_RECONCILE_MAX_DELAY)
+}
+
+fn close_maintenance_readiness(readiness: &AtomicBool) {
+    readiness.store(false, Ordering::Release);
+}
+
 async fn await_workspace_reaper_exit(
     handle: &mut Option<moa_hands::core::sandbox_workspace::reaper::WorkspaceReaperHandle>,
+) -> moa_core::error::Result<()> {
+    match handle {
+        Some(handle) => handle.task_result().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn await_authz_outbox_poller_exit(
+    handle: &mut Option<moa_authz::PollerHandle>,
+) -> Result<(), moa_authz::poller::PollerTaskError> {
+    match handle {
+        Some(handle) => handle.task_result().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn await_authz_challenge_reaper_exit(
+    handle: &mut Option<
+        moa_orchestrator::services::authz_challenges_reaper::AuthzChallengeReaperHandle,
+    >,
+) -> Result<(), moa_orchestrator::services::authz_challenges_reaper::ReaperError> {
+    match handle {
+        Some(handle) => handle.task_result().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn await_action_review_reaper_exit(
+    handle: &mut Option<
+        moa_orchestrator::services::action_reviews_reaper::ActionReviewReaperHandle,
+    >,
+) -> Result<(), moa_orchestrator::services::action_reviews_reaper::ActionReviewReaperError> {
+    match handle {
+        Some(handle) => handle.task_result().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn await_hand_lease_reaper_exit(
+    handle: &mut Option<moa_hands::core::reaper::HandLeaseReaperHandle>,
 ) -> moa_core::error::Result<()> {
     match handle {
         Some(handle) => handle.task_result().await,
@@ -668,9 +956,25 @@ struct ProbeState {
     checkpoint_versioning: Option<
         moa_hands::core::sandbox_workspace::checkpoint::versioning::CheckpointBucketVersioningObserver,
     >,
+    maintenance: MaintenanceReadiness,
+}
+
+#[derive(Clone, Default)]
+struct MaintenanceReadiness {
     /// Supervised workspace-maintenance readiness, when maintenance is enabled.
-    workspace_reaper:
-        Option<moa_hands::core::sandbox_workspace::reaper::WorkspaceReaperReadiness>,
+    workspace_reaper: Option<moa_hands::core::sandbox_workspace::reaper::WorkspaceReaperReadiness>,
+    /// Supervised hand-lease cleanup readiness, when maintenance is enabled.
+    hand_lease_reaper: Option<moa_hands::core::reaper::HandLeaseReaperReadiness>,
+    /// Supervised authorization-outbox readiness, in the maintenance role.
+    authz_outbox_poller: Option<moa_authz::poller::PollerReadiness>,
+    /// Supervised tenant action-review timeout readiness, in the maintenance role.
+    action_review_reaper:
+        Option<moa_orchestrator::services::action_reviews_reaper::ActionReviewReaperReadiness>,
+    /// Supervised builtin-authz timeout readiness, when that provider is configured.
+    authz_challenge_reaper:
+        Option<moa_orchestrator::services::authz_challenges_reaper::AuthzChallengeReaperReadiness>,
+    /// Durable receipt reader for the Cron-owned execution reconciliation pass.
+    execution_repository: Option<ExecutionRepository>,
 }
 
 impl ProbeState {
@@ -682,9 +986,7 @@ impl ProbeState {
         checkpoint_versioning: Option<
             moa_hands::core::sandbox_workspace::checkpoint::versioning::CheckpointBucketVersioningObserver,
         >,
-        workspace_reaper: Option<
-            moa_hands::core::sandbox_workspace::reaper::WorkspaceReaperReadiness,
-        >,
+        maintenance: MaintenanceReadiness,
     ) -> Self {
         Self {
             readiness,
@@ -692,11 +994,49 @@ impl ProbeState {
             kms,
             lineage_writer,
             checkpoint_versioning,
-            workspace_reaper,
+            maintenance,
         }
     }
 
     async fn check_ready(&self) -> anyhow::Result<()> {
+        let result = self.check_ready_inner().await;
+        if let Some(repository) = &self.maintenance.execution_repository {
+            let (receipt_ready, last_success_age) = match repository
+                .load_execution_maintenance_checkpoint(
+                    ExecutionScope::ControlPlane,
+                    ExecutionMaintenanceJobKind::DispatchReconciliation,
+                )
+                .await
+            {
+                Ok(checkpoint) => execution_maintenance_status(checkpoint.as_ref(), Utc::now()),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to observe durable execution maintenance receipt");
+                    (false, None)
+                }
+            };
+            moa_observability::runtime_metrics::record_execution_maintenance(
+                result.is_ok() && receipt_ready,
+                last_success_age,
+            );
+            let (retention_ready, retention_last_success_age) = match repository
+                .load_execution_retention_checkpoint(ExecutionScope::ControlPlane)
+                .await
+            {
+                Ok(checkpoint) => execution_retention_status(checkpoint.as_ref(), Utc::now()),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to observe durable execution retention receipt");
+                    (false, None)
+                }
+            };
+            moa_observability::runtime_metrics::record_execution_retention(
+                result.is_ok() && retention_ready,
+                retention_last_success_age,
+            );
+        }
+        result
+    }
+
+    async fn check_ready_inner(&self) -> anyhow::Result<()> {
         if !self.readiness.load(Ordering::Acquire) {
             bail!("readiness disabled");
         }
@@ -720,14 +1060,78 @@ impl ProbeState {
             bail!("checkpoint bucket versioning observation is missing or stale");
         }
 
-        if let Some(reaper) = &self.workspace_reaper
+        if let Some(reaper) = &self.maintenance.workspace_reaper
             && let Some(reason) = reaper.unready_reason()
         {
             bail!("durable workspace maintenance not ready: {reason}");
         }
 
+        if let Some(reaper) = &self.maintenance.hand_lease_reaper
+            && let Some(reason) = reaper.unready_reason()
+        {
+            bail!("durable hand lease cleanup not ready: {reason}");
+        }
+
+        if let Some(poller) = &self.maintenance.authz_outbox_poller
+            && let Some(reason) = poller.unready_reason()
+        {
+            bail!("authorization outbox not ready: {reason}");
+        }
+
+        if let Some(reaper) = &self.maintenance.action_review_reaper
+            && let Some(reason) = reaper.unready_reason()
+        {
+            bail!("action-review reconciliation not ready: {reason}");
+        }
+
+        if let Some(reaper) = &self.maintenance.authz_challenge_reaper
+            && let Some(reason) = reaper.unready_reason()
+        {
+            bail!("authorization challenge reconciliation not ready: {reason}");
+        }
+
         Ok(())
     }
+}
+
+fn execution_maintenance_status(
+    checkpoint: Option<&ExecutionMaintenanceCheckpoint>,
+    observed_at: DateTime<Utc>,
+) -> (bool, Option<Duration>) {
+    let Some(checkpoint) = checkpoint else {
+        return (false, None);
+    };
+    let Some(last_succeeded_at) = checkpoint.last_succeeded_at else {
+        return (false, None);
+    };
+    let failed_since_success = checkpoint
+        .last_failure_at
+        .is_some_and(|last_failure_at| last_failure_at > last_succeeded_at);
+    let age = observed_at
+        .signed_duration_since(last_succeeded_at)
+        .to_std()
+        .unwrap_or(Duration::ZERO);
+    (!failed_since_success, Some(age))
+}
+
+fn execution_retention_status(
+    checkpoint: Option<&ExecutionRetentionCheckpoint>,
+    observed_at: DateTime<Utc>,
+) -> (bool, Option<Duration>) {
+    let Some(checkpoint) = checkpoint else {
+        return (false, None);
+    };
+    let Some(last_succeeded_at) = checkpoint.last_succeeded_at else {
+        return (false, None);
+    };
+    let last_success_age = observed_at
+        .signed_duration_since(last_succeeded_at)
+        .to_std()
+        .unwrap_or_default();
+    let newer_failure = checkpoint
+        .last_failure_at
+        .is_some_and(|failed_at| failed_at > last_succeeded_at);
+    (!newer_failure, Some(last_success_age))
 }
 
 async fn live_handler() -> impl IntoResponse {
@@ -850,5 +1254,111 @@ async fn shutdown_signal() -> anyhow::Result<()> {
     #[cfg(not(unix))]
     {
         ctrl_c.await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maintenance_command_uses_the_dedicated_health_port_default() {
+        // Pins: the fixture and deployment can give the maintenance role a health-only port
+        // without starting a Restate handler endpoint.
+        let args =
+            Args::try_parse_from(["moa-orchestrator", "--health-port", "19081", "maintenance"])
+                .expect("maintenance command must parse");
+
+        assert_eq!(args.command, Some(Command::Maintenance));
+        assert_eq!(args.health_port, 19081);
+    }
+
+    #[test]
+    fn execution_cron_reconciliation_sleeps_and_backs_off_with_a_hard_cap() {
+        // Pins: the maintenance owner never hot-polls Restate, refreshes a very long configured
+        // cadence at least once per minute, and applies bounded exponential failure backoff.
+        assert_eq!(
+            execution_cron_reconcile_delay(3_600, 0),
+            Duration::from_secs(60)
+        );
+        assert_eq!(execution_cron_reconcile_delay(1, 0), Duration::from_secs(1));
+        assert_eq!(execution_cron_reconcile_delay(1, 3), Duration::from_secs(8));
+        assert_eq!(
+            execution_cron_reconcile_delay(60, 32),
+            EXECUTION_CRON_RECONCILE_MAX_DELAY
+        );
+    }
+
+    #[test]
+    fn execution_maintenance_metric_uses_the_durable_success_receipt() {
+        // Pins: the maintenance gauge ages the durable successful Cron receipt,
+        // rather than a process-local timer that resets on pod restart.
+        let observed_at = Utc::now();
+        let succeeded_at = observed_at - chrono::Duration::seconds(37);
+        let checkpoint = ExecutionMaintenanceCheckpoint {
+            job_kind: ExecutionMaintenanceJobKind::DispatchReconciliation,
+            generation: 4,
+            last_started_at: Some(succeeded_at),
+            last_succeeded_at: Some(succeeded_at),
+            last_failure_at: None,
+            last_error: None,
+            updated_at: succeeded_at,
+        };
+
+        assert_eq!(
+            execution_maintenance_status(Some(&checkpoint), observed_at),
+            (true, Some(Duration::from_secs(37)))
+        );
+    }
+
+    #[test]
+    fn execution_maintenance_metric_is_unready_without_a_success_or_after_failure() {
+        // Pins: a missing receipt and a failure newer than the last success are
+        // both observable as unready, even while the maintenance pod is alive.
+        let observed_at = Utc::now();
+        assert_eq!(
+            execution_maintenance_status(None, observed_at),
+            (false, None)
+        );
+
+        let succeeded_at = observed_at - chrono::Duration::seconds(60);
+        let checkpoint = ExecutionMaintenanceCheckpoint {
+            job_kind: ExecutionMaintenanceJobKind::DispatchReconciliation,
+            generation: 5,
+            last_started_at: Some(observed_at - chrono::Duration::seconds(10)),
+            last_succeeded_at: Some(succeeded_at),
+            last_failure_at: Some(observed_at - chrono::Duration::seconds(5)),
+            last_error: Some("bounded repair failed".to_string()),
+            updated_at: observed_at - chrono::Duration::seconds(5),
+        };
+
+        assert_eq!(
+            execution_maintenance_status(Some(&checkpoint), observed_at),
+            (false, Some(Duration::from_secs(60)))
+        );
+    }
+
+    #[test]
+    fn execution_retention_metric_uses_only_its_durable_receipt() {
+        // Pins: terminal-detail retention has an independent SLO and cannot
+        // inherit readiness from the dispatch-reconciliation receipt.
+        let observed_at = Utc::now();
+        let succeeded_at = observed_at - chrono::Duration::minutes(17);
+        let checkpoint = ExecutionRetentionCheckpoint {
+            generation: 9,
+            last_started_at: Some(succeeded_at),
+            last_succeeded_at: Some(succeeded_at),
+            last_failure_at: None,
+            next_run_at: Some(observed_at + chrono::Duration::minutes(30)),
+            scheduled_generation: Some(10),
+            last_error: None,
+            updated_at: succeeded_at,
+        };
+
+        assert_eq!(
+            execution_retention_status(Some(&checkpoint), observed_at),
+            (true, Some(Duration::from_secs(17 * 60)))
+        );
+        assert_eq!(execution_retention_status(None, observed_at), (false, None));
     }
 }

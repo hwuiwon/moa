@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use moa_config::McpServerConfig;
 use serde_json::{Value, json};
@@ -235,6 +236,59 @@ async fn sse_client_skips_request_notifications_before_matching_final_response()
         .await
         .expect("parse final SSE response");
     assert_eq!(output.to_text(), "pong");
+    server.await.expect("fake MCP server should finish");
+}
+
+#[tokio::test]
+async fn plain_text_rate_limit_preserves_http_status_and_retry_after() {
+    // Pins: HTTP status and Retry-After are transport metadata, so a non-JSON error body cannot
+    // turn a retryable MCP rate limit into a fatal unsupported-content-type failure.
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake MCP server");
+    let addr = listener.local_addr().expect("fake MCP server address");
+    let server = tokio::spawn(async move {
+        let (mut discover_socket, _) = listener.accept().await.expect("accept discover");
+        let discover = read_request(&mut discover_socket).await;
+        assert_modern_request(&discover, "server/discover");
+        write_json_response(
+            &mut discover_socket,
+            r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":60000,"cacheScope":"private"}}"#,
+        )
+        .await;
+
+        let (mut call_socket, _) = listener.accept().await.expect("accept tools/call");
+        let call = read_request(&mut call_socket).await;
+        assert_modern_request(&call, "tools/call");
+        let body = "fixture rate limit";
+        let response = format!(
+            "HTTP/1.1 429 Too Many Requests\r\ncontent-type: text/plain\r\nretry-after: 7\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        call_socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write MCP rate-limit response");
+    });
+
+    let client = MCPClient::connect(&config(addr), HashMap::new())
+        .await
+        .expect("connect to modern MCP server");
+    let error = client
+        .call_tool("rate_limited", json!({}), None, None)
+        .await
+        .expect_err("plain-text 429 must remain a typed HTTP error");
+    match error {
+        moa_core::error::MoaError::HttpStatus {
+            status: 429,
+            retry_after: Some(delay),
+            message,
+        } => assert_eq!(
+            (delay, message),
+            (Duration::from_secs(7), "fixture rate limit".to_string())
+        ),
+        other => panic!("plain-text 429 returned the wrong error: {other}"),
+    }
     server.await.expect("fake MCP server should finish");
 }
 

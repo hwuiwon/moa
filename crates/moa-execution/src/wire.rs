@@ -10,14 +10,15 @@ use moa_artifacts::{
 };
 use moa_core::events::Event;
 use moa_core::events::{
-    ExecutionFailureDisposition, ExecutionProgress, ExecutionTaskResultsRef,
+    ExecutionBlockerAudience, ExecutionFailureDisposition, ExecutionProgress,
+    ExecutionProgressPhase, ExecutionRemainingBudget, ExecutionTaskResultsRef,
     ExecutionTerminalSummary,
 };
-use moa_core::traits::Identity;
 use moa_core::types::{
     contact::ContactId,
     execution_planning::{ExecutionSourceProvenance, PinnedExecutionTemplateRef},
     identifiers::{SessionId, TenantId, UserId},
+    tools::{AsyncToolJob, AsyncToolJobCallbackOutcome, AsyncToolJobCancelOutcome},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -93,6 +94,8 @@ pub struct ExecutionPlanningContextRequest {
     pub session_id: SessionId,
     /// Exact persisted user-message sequence that supplies the objective.
     pub originating_user_sequence_num: u64,
+    /// Absolute authorized deadline frozen into the Durable planning context.
+    pub deadline_at: DateTime<Utc>,
     /// Optional exact template selection hint; this grants no authority.
     pub requested_template: Option<PinnedExecutionTemplateRef>,
 }
@@ -658,19 +661,109 @@ pub struct ExecutionSynthesisEvidence {
 }
 
 /// Builds compact aggregate progress from one canonical execution-run row.
-#[must_use]
 pub fn execution_progress_from_run(
     run: &crate::repository::ExecutionRunRecord,
-) -> ExecutionProgress {
-    ExecutionProgress {
+) -> Result<ExecutionProgress> {
+    let phase = execution_progress_phase(run);
+    let remaining = BudgetLedger {
+        limit: run.approved_budget.clone(),
+        reserved: run.reserved,
+        consumed: run.consumed,
+        overrun: run.budget_overrun,
+    }
+    .remaining_limit()?;
+    Ok(ExecutionProgress {
         run_uid: run.run_uid,
         originating_user_sequence_num: run.originating_user_sequence_num,
         plan_revision: run.plan_revision,
         status: run.status.as_str().to_string(),
+        phase,
+        waiting_since: run.waiting_since,
+        next_wake_at: run.next_wake_at,
+        last_progress_at: run.last_progress_at,
+        // A run can own multiple concurrent external jobs. Only a task-qualified
+        // transition can name one exact job; the aggregate run row cannot.
+        external_job_uid: None,
+        ready_tasks: run.ready_task_count,
+        active_tasks: run.active_task_count,
+        parked_tasks: run.waiting_task_count,
+        blocker_audience: execution_blocker_audience(run),
+        remaining_budget: ExecutionRemainingBudget {
+            cost_microusd: remaining.max_cost_microusd,
+            tokens: remaining.max_tokens,
+            tasks: remaining.max_tasks,
+            tool_calls: remaining.max_tool_calls,
+            retrieved_bytes: remaining.max_retrieved_bytes,
+            deadline_at: remaining.deadline_at,
+        },
         total: run.progress_total_tasks,
         completed: run.progress_completed_tasks,
         failed: run.progress_failed_tasks,
         cancelled: run.progress_cancelled_tasks,
+    })
+}
+
+fn execution_blocker_audience(
+    run: &crate::repository::ExecutionRunRecord,
+) -> Option<ExecutionBlockerAudience> {
+    execution_blocker_audience_from_flags(
+        run.waiting_input_user_task_count > 0,
+        run.waiting_input_tenant_admin_task_count > 0 || run.waiting_review_task_count > 0,
+        run.waiting_input_external_task_count > 0
+            || run.waiting_signal_task_count > 0
+            || run.waiting_external_task_count > 0,
+        run.waiting_timer_task_count > 0 || run.waiting_replan_task_count > 0,
+    )
+}
+
+fn execution_blocker_audience_from_flags(
+    user: bool,
+    tenant_reviewer: bool,
+    external: bool,
+    system: bool,
+) -> Option<ExecutionBlockerAudience> {
+    if user {
+        Some(ExecutionBlockerAudience::User)
+    } else if tenant_reviewer {
+        Some(ExecutionBlockerAudience::TenantReviewer)
+    } else if external {
+        Some(ExecutionBlockerAudience::External)
+    } else if system {
+        Some(ExecutionBlockerAudience::System)
+    } else {
+        None
+    }
+}
+
+fn execution_progress_phase(run: &crate::repository::ExecutionRunRecord) -> ExecutionProgressPhase {
+    execution_progress_phase_from_flags(
+        run.status,
+        run.waiting_input_task_count > 0,
+        run.waiting_review_task_count > 0,
+        run.waiting_signal_task_count > 0,
+        run.waiting_timer_task_count > 0,
+        run.waiting_external_task_count > 0,
+    )
+}
+
+fn execution_progress_phase_from_flags(
+    status: ExecutionRunStatus,
+    waiting_input: bool,
+    waiting_review: bool,
+    waiting_signal: bool,
+    waiting_timer: bool,
+    waiting_external: bool,
+) -> ExecutionProgressPhase {
+    match status {
+        ExecutionRunStatus::PauseRequested => ExecutionProgressPhase::PauseRequested,
+        ExecutionRunStatus::Pausing => ExecutionProgressPhase::Pausing,
+        ExecutionRunStatus::Paused => ExecutionProgressPhase::Paused,
+        _ if waiting_input => ExecutionProgressPhase::WaitingInput,
+        _ if waiting_review => ExecutionProgressPhase::WaitingReview,
+        _ if waiting_signal => ExecutionProgressPhase::WaitingSignal,
+        _ if waiting_timer => ExecutionProgressPhase::WaitingTimer,
+        _ if waiting_external => ExecutionProgressPhase::WaitingExternal,
+        _ => ExecutionProgressPhase::Running,
     }
 }
 
@@ -920,6 +1013,13 @@ pub enum ExecutionActionReviewResolution {
         /// Serialized governed tool output.
         tool_output: Value,
     },
+    /// The approved capability committed asynchronous provider work.
+    ExternalJob {
+        /// MOA-owned job identity reserved before provider dispatch.
+        external_job_uid: Uuid,
+        /// Immutable provider job identity and recovery contract.
+        job: AsyncToolJob,
+    },
     /// The approved tool failed during dispatch.
     Failed {
         /// Typed task failure classification.
@@ -949,18 +1049,6 @@ pub enum ExecutionActionReviewResolution {
     },
 }
 
-/// Idempotent acknowledgement returned to the action-review outbox dispatcher.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionActionReviewAcknowledgement {
-    /// The resolution was applied to the current task generation.
-    Applied,
-    /// This review UID was already applied to the same task generation.
-    Replayed,
-    /// The resolution was durably audited but its generation is stale or terminal.
-    AuditedStale,
-}
-
 /// Typed terminal action-policy review delivery to a compensation generation.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -977,106 +1065,397 @@ pub struct ExecutionCompensationReviewResolutionRequest {
     pub resolution: ExecutionActionReviewResolution,
 }
 
-/// Idempotent acknowledgement returned to a compensation-review dispatcher.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionCompensationReviewAcknowledgement {
-    /// The resolution was applied to the current compensation generation.
-    Applied,
-    /// This review UID was already applied to the same compensation generation.
-    Replayed,
-    /// The resolution was durably audited but its generation is stale or settled.
-    AuditedStale,
-}
-
-/// Internal request that starts the keyed run workflow.
+/// Immutable request that executes one bounded task-attempt slice.
+///
+/// The Restate workflow key is [`Self::dispatch_uid`]. Re-delivery of this
+/// request can replay the same slice, but a different dispatch UID must never
+/// continue or replace it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionRunWorkflowRequest {
-    /// Durable run identifier and workflow key.
-    pub run_uid: Uuid,
-    /// Owning tenant.
-    pub tenant_id: TenantId,
-    /// Optional owning contact.
-    pub contact_id: Option<ContactId>,
-    /// Parent session.
-    pub session_id: SessionId,
-    /// Exact authenticated identity admitted when the run was launched.
-    pub identity: Identity,
-}
-
-/// Internal request that notifies a keyed run of a persisted scheduling change.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExecutionRunWakeRequest {
-    /// Durable run identifier and workflow key.
-    pub run_uid: Uuid,
-    /// Exact persisted monotonic wake epoch.
-    pub wake_epoch: u64,
-    /// Mutation that caused the wake.
-    pub reason: ExecutionRunWakeReason,
-}
-
-/// Stable reasons a run workflow is awakened.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionRunWakeReason {
-    /// A task persisted an outcome.
-    TaskOutcome,
-    /// The user confirmed the active plan and budget.
-    Confirmed,
-    /// Audience-bound input resumed a task.
-    InputDelivered,
-    /// An explicit review task was resolved.
-    ReviewDecided,
-    /// A named signal was delivered.
-    SignalDelivered,
-    /// An externally supplied amendment was accepted.
-    AmendmentAccepted,
-    /// The run was cancelled.
-    Cancelled,
-    /// A compensation registration or generation changed durably.
-    CompensationProgress,
-}
-
-/// Internal request that dispatches one keyed task generation.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExecutionTaskWorkflowRequest {
+pub struct ExecutionTaskAttemptRequest {
+    /// Immutable durable-dispatch identity and workflow key.
+    pub dispatch_uid: Uuid,
+    /// Exact active-capacity receipt released when this slice yields or settles.
+    pub capacity_reservation_uid: Uuid,
+    /// Exact watchdog trigger owned only while this slice is active.
+    pub watchdog_trigger_uid: Uuid,
+    /// Durable delayed-delivery dispatch for the exact watchdog trigger.
+    pub watchdog_dispatch_uid: Uuid,
     /// Owning run.
     pub run_uid: Uuid,
-    /// Stable workflow key.
+    /// Stable logical task.
     pub task_id: ExecutionTaskId,
-    /// Current generation fence.
-    pub generation: u64,
+    /// Run-controller generation that admitted the slice.
+    pub controller_generation: u64,
+    /// Exact bounded attempt generation.
+    pub attempt_generation: u64,
+    /// Absolute deadline committed by admission.
+    pub attempt_deadline_at: DateTime<Utc>,
     /// Owning tenant.
     pub tenant_id: TenantId,
-    /// Optional owning contact.
-    pub contact_id: Option<ContactId>,
-    /// Parent session used for policy and model context.
-    pub session_id: SessionId,
-    /// Exact authenticated identity inherited from the owning run workflow.
-    pub identity: Identity,
 }
 
-/// Internal request that dispatches one keyed compensation generation.
+/// Delivery of the exact watchdog owned by one active task attempt.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionCompensationWorkflowRequest {
-    /// Owning execution run.
+pub struct ExecutionTaskAttemptWatchdogRequest {
+    /// Immutable durable-dispatch identity and workflow key.
+    pub dispatch_uid: Uuid,
+    /// Exact active-capacity receipt released by watchdog settlement.
+    pub capacity_reservation_uid: Uuid,
+    /// Trigger whose delivery caused this check.
+    pub watchdog_trigger_uid: Uuid,
+    /// Owning run.
     pub run_uid: Uuid,
-    /// Stable workflow key derived from the forward task.
-    pub compensation_id: CompensationId,
-    /// Current compensation generation fence.
-    pub generation: u64,
+    /// Stable logical task.
+    pub task_id: ExecutionTaskId,
+    /// Run-controller generation that admitted the slice.
+    pub controller_generation: u64,
+    /// Exact bounded attempt generation.
+    pub attempt_generation: u64,
     /// Owning tenant.
     pub tenant_id: TenantId,
-    /// Optional owning contact.
-    pub contact_id: Option<ContactId>,
-    /// Parent session used for policy and action context.
-    pub session_id: SessionId,
-    /// Exact authenticated identity inherited from the owning run workflow.
-    pub identity: Identity,
+}
+
+/// Immutable request that executes one bounded compensation-attempt slice.
+///
+/// The Restate workflow key is [`Self::dispatch_uid`]. Logical compensation
+/// generation and attempt generation are distinct fences.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionCompensationAttemptRequest {
+    /// Immutable durable-dispatch identity and workflow key.
+    pub dispatch_uid: Uuid,
+    /// Exact shared active-capacity receipt released when this slice returns.
+    pub capacity_reservation_uid: Uuid,
+    /// Exact watchdog trigger owned only while this slice is active.
+    pub watchdog_trigger_uid: Uuid,
+    /// Durable delayed-delivery dispatch for the exact watchdog trigger.
+    pub watchdog_dispatch_uid: Uuid,
+    /// Owning execution run.
+    pub run_uid: Uuid,
+    /// Stable compensation registration.
+    pub compensation_id: CompensationId,
+    /// Logical compensation generation selected in strict reverse order.
+    pub compensation_generation: u64,
+    /// Exact bounded compensation-attempt generation.
+    pub compensation_attempt_generation: u64,
+    /// Run-controller generation that admitted the slice.
+    pub controller_generation: u64,
+    /// Absolute deadline committed by admission.
+    pub attempt_deadline_at: DateTime<Utc>,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+}
+
+/// Delivery of the exact watchdog owned by one active compensation attempt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionCompensationAttemptWatchdogRequest {
+    /// Immutable durable-dispatch identity and workflow key.
+    pub dispatch_uid: Uuid,
+    /// Exact shared active-capacity receipt released by watchdog settlement.
+    pub capacity_reservation_uid: Uuid,
+    /// Trigger whose delivery caused this check.
+    pub watchdog_trigger_uid: Uuid,
+    /// Owning execution run.
+    pub run_uid: Uuid,
+    /// Stable compensation registration.
+    pub compensation_id: CompensationId,
+    /// Logical compensation generation selected in strict reverse order.
+    pub compensation_generation: u64,
+    /// Exact bounded compensation-attempt generation.
+    pub compensation_attempt_generation: u64,
+    /// Run-controller generation that admitted the slice.
+    pub controller_generation: u64,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+}
+
+/// Durable reason one exact active attempt must checkpoint and relinquish ownership.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionAttemptCancelReason {
+    /// The run's immutable approved deadline elapsed.
+    DeadlineExceeded,
+    /// Another terminal intent fenced all remaining forward work.
+    RunTerminal,
+    /// An authorized pause fenced new work and is draining active slices.
+    PauseRequested,
+    /// Provider-owned asynchronous work was committed before the slice relinquished compute.
+    ExternalJobStarted,
+}
+
+/// Durable reason one compensation slice relinquishes its active sandbox ownership.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionCompensationReleaseIntent {
+    /// A definitive compensation outcome is ready to settle.
+    Outcome,
+    /// A retryable compensation failure is ready to requeue.
+    Retry,
+    /// The governed action is parking for tenant review.
+    Review,
+    /// Provider-owned asynchronous work was durably started.
+    ExternalJob,
+    /// An authorized pause is draining the active slice.
+    Pause,
+    /// The exact attempt watchdog elapsed.
+    Watchdog,
+    /// The immutable run deadline elapsed.
+    Deadline,
+    /// Another terminal run intent fenced the active slice.
+    RunTerminal,
+}
+
+/// Identity-free cancellation delivery for one exact active task attempt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionTaskAttemptCancelRequest {
+    /// Immutable outbox delivery identity and Restate idempotency key.
+    #[serde(rename = "dispatch_uid")]
+    pub cancellation_dispatch_uid: Uuid,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Owning execution run.
+    pub run_uid: Uuid,
+    /// Stable logical task.
+    pub task_id: ExecutionTaskId,
+    /// Exact controller generation that fenced the attempt.
+    pub controller_generation: u64,
+    /// Controller generation carried by the immutable attempt resources being released.
+    pub attempt_controller_generation: u64,
+    /// Exact logical task generation.
+    pub task_generation: u64,
+    /// Exact bounded attempt generation.
+    pub attempt_generation: u64,
+    /// Immutable dispatch identity that owns the active slice.
+    pub active_dispatch_uid: Uuid,
+    /// Exact active-capacity receipt released only after sandbox ownership is relinquished.
+    pub capacity_reservation_uid: Uuid,
+    /// Exact watchdog superseded by cancellation settlement.
+    pub watchdog_trigger_uid: Uuid,
+    /// Closed reason for the ownership transfer.
+    pub reason: ExecutionAttemptCancelReason,
+}
+
+/// Identity-free cancellation delivery for one exact compensation attempt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionCompensationAttemptCancelRequest {
+    /// Immutable outbox delivery identity and Restate idempotency key.
+    #[serde(rename = "dispatch_uid")]
+    pub cancellation_dispatch_uid: Uuid,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Owning execution run.
+    pub run_uid: Uuid,
+    /// Stable compensation registration.
+    pub compensation_id: CompensationId,
+    /// Exact controller generation that fenced the attempt.
+    pub controller_generation: u64,
+    /// Controller generation carried by the immutable attempt resources being released.
+    pub attempt_controller_generation: u64,
+    /// Exact logical compensation generation.
+    pub compensation_generation: u64,
+    /// Exact bounded compensation-attempt generation.
+    pub compensation_attempt_generation: u64,
+    /// Immutable dispatch identity that owns the active slice.
+    pub active_dispatch_uid: Uuid,
+    /// Exact active-capacity receipt released only after sandbox ownership is relinquished.
+    pub capacity_reservation_uid: Uuid,
+    /// Exact watchdog superseded by cancellation settlement.
+    pub watchdog_trigger_uid: Uuid,
+    /// Closed reason for the compensation ownership transfer.
+    pub intent: ExecutionCompensationReleaseIntent,
+}
+
+/// Immutable request to cancel one exact asynchronous provider-job generation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionExternalJobCancelRequest {
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Stable MOA external-job identity.
+    pub external_job_uid: Uuid,
+    /// Exact provider-job generation.
+    pub job_generation: u64,
+    /// Expected provider implementation name.
+    pub provider: String,
+    /// Expected provider-issued job identity.
+    pub provider_job_id: String,
+    /// Stable provider idempotency key reused for cancellation.
+    pub idempotency_key: String,
+}
+
+/// Exact task or compensation owner duplicated by a start-recovery trigger.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "owner_kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionExternalJobStartRecoveryOwner {
+    /// One forward-task attempt.
+    Task {
+        /// Stable logical task identity.
+        task_id: Uuid,
+        /// Exact task-attempt generation.
+        attempt_generation: u64,
+    },
+    /// One compensation attempt.
+    Compensation {
+        /// Stable compensation identity.
+        compensation_id: Uuid,
+        /// Exact compensation logical generation.
+        compensation_generation: u64,
+        /// Exact compensation-attempt generation.
+        compensation_attempt_generation: u64,
+    },
+}
+
+/// Durable delivery request for crash-safe provider start recovery.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionExternalJobStartRecoveryRequest {
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Owning execution run.
+    pub run_uid: Uuid,
+    /// Exact task or compensation owner.
+    pub owner: ExecutionExternalJobStartRecoveryOwner,
+    /// Stable MOA external-job identity.
+    pub external_job_uid: Uuid,
+    /// Exact provider-job generation.
+    pub job_generation: u64,
+    /// Declared adapter/provider key reserved before dispatch.
+    pub provider: String,
+    /// Stable provider start idempotency key.
+    pub idempotency_key: String,
+    /// Exact temporal trigger being delivered.
+    pub trigger_uid: Uuid,
+}
+
+/// Durable result of one provider start-recovery delivery.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionExternalJobStartRecoveryResponse {
+    /// Stable MOA external-job identity.
+    pub external_job_uid: Uuid,
+    /// Exact provider-job generation.
+    pub job_generation: u64,
+    /// Generation-fenced recovery disposition.
+    pub outcome: ExecutionExternalJobStartRecoveryResponseOutcome,
+}
+
+/// Typed acknowledgement from a bounded task or compensation watchdog receiver.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionAttemptWatchdogResponse {
+    /// Whether trigger delivery may settle or must retry.
+    pub outcome: ExecutionAttemptWatchdogResponseOutcome,
+}
+
+/// Durable watchdog receiver disposition.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionAttemptWatchdogResponseOutcome {
+    /// The exact active attempt and capacity were settled by this invocation.
+    Settled,
+    /// Exact work was already settled or became stale before this replay.
+    ReplayedOrStale,
+    /// The receiver could not safely settle; trigger delivery must remain retryable.
+    RetryDelivery,
+}
+
+/// Result of recovering one pre-reserved provider start.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionExternalJobStartRecoveryResponseOutcome {
+    /// Provider proved that no work started and the intent was released.
+    NotStartedReleased,
+    /// Provider start was found and exact ownership was bound.
+    StartedBound,
+    /// Provider outcome remains ambiguous and recovery work was rearmed.
+    UnknownPreserved,
+    /// The delivery no longer names the current unbound intent.
+    StaleDelivery,
+    /// The intent was already bound or released by another delivery.
+    AlreadySettled,
+}
+
+/// Durable result of one bounded provider cancellation invocation.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionExternalJobCancelResponse {
+    /// Stable MOA external-job identity.
+    pub external_job_uid: Uuid,
+    /// Exact provider-job generation.
+    pub job_generation: u64,
+    /// Typed settlement result, including generation-fenced no-op deliveries.
+    pub outcome: ExecutionExternalJobCancelResponseOutcome,
+}
+
+/// Result of one generation-fenced external-job cancellation delivery.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "disposition", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionExternalJobCancelResponseOutcome {
+    /// The exact current provider job was called and its result was persisted.
+    Applied {
+        /// Typed provider cancellation result.
+        provider_outcome: AsyncToolJobCancelOutcome,
+    },
+    /// The delivery no longer names the current job generation or provider identity.
+    StaleDelivery,
+    /// The job had already reached a terminal state before this delivery.
+    AlreadyTerminal,
+    /// No visible job has the supplied MOA identity.
+    NotFound,
+}
+
+/// Immutable request to reconcile one exact asynchronous provider-job generation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionExternalJobReconcileRequest {
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Stable MOA external-job identity.
+    pub external_job_uid: Uuid,
+    /// Exact durable reconcile-trigger identity used as the synthetic provider event fence.
+    pub trigger_uid: Uuid,
+    /// Exact provider-job generation.
+    pub job_generation: u64,
+    /// Expected provider implementation name.
+    pub provider: String,
+    /// Expected provider-issued job identity.
+    pub provider_job_id: String,
+    /// Stable provider idempotency key reused for reconciliation.
+    pub idempotency_key: String,
+}
+
+/// Typed result of one bounded sparse provider reconciliation.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionExternalJobReconcileResponse {
+    /// Stable MOA external-job identity.
+    pub external_job_uid: Uuid,
+    /// Exact provider-job generation.
+    pub job_generation: u64,
+    /// Generation-fenced durable reconciliation disposition.
+    pub outcome: ExecutionExternalJobReconcileResponseOutcome,
+}
+
+/// Result of one generation-fenced sparse provider reconciliation delivery.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "disposition", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionExternalJobReconcileResponseOutcome {
+    /// The exact provider job was observed and its result was persisted.
+    Applied {
+        /// Typed progress or terminal provider observation.
+        provider_outcome: AsyncToolJobCallbackOutcome,
+    },
+    /// The delivery no longer names the current job generation or provider identity.
+    StaleDelivery,
+    /// The job had already reached a terminal state before this delivery.
+    AlreadyTerminal,
+    /// No visible job has the supplied MOA identity.
+    NotFound,
 }
 
 /// Encodes a cursor as canonical JSON in URL-safe unpadded base64.
@@ -1157,6 +1536,137 @@ fn invalid_cursor(message: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_progress_phase_exhaustively_maps_aggregate_wait_and_pause_states_offline() {
+        // Pins: run-only progress distinguishes every public storage-only wait and pause phase;
+        // task-only stale work has no aggregate run-status mapping.
+        let expected = [
+            (
+                ExecutionRunStatus::WaitingInput,
+                ExecutionProgressPhase::WaitingInput,
+                [true, false, false, false, false],
+            ),
+            (
+                ExecutionRunStatus::WaitingReview,
+                ExecutionProgressPhase::WaitingReview,
+                [false, true, false, false, false],
+            ),
+            (
+                ExecutionRunStatus::WaitingSignal,
+                ExecutionProgressPhase::WaitingSignal,
+                [false, false, true, false, false],
+            ),
+            (
+                ExecutionRunStatus::WaitingTimer,
+                ExecutionProgressPhase::WaitingTimer,
+                [false, false, false, true, false],
+            ),
+            (
+                ExecutionRunStatus::WaitingExternal,
+                ExecutionProgressPhase::WaitingExternal,
+                [false, false, false, false, true],
+            ),
+            (
+                ExecutionRunStatus::PauseRequested,
+                ExecutionProgressPhase::PauseRequested,
+                [false; 5],
+            ),
+            (
+                ExecutionRunStatus::Pausing,
+                ExecutionProgressPhase::Pausing,
+                [false; 5],
+            ),
+            (
+                ExecutionRunStatus::Paused,
+                ExecutionProgressPhase::Paused,
+                [false; 5],
+            ),
+        ];
+        for (status, phase, waits) in expected {
+            assert_eq!(
+                execution_progress_phase_from_flags(
+                    status, waits[0], waits[1], waits[2], waits[3], waits[4]
+                ),
+                phase,
+                "status {status:?}"
+            );
+        }
+
+        let aggregate_running = [
+            ExecutionRunStatus::AwaitingConfirmation,
+            ExecutionRunStatus::Queued,
+            ExecutionRunStatus::Running,
+            ExecutionRunStatus::WaitingReplan,
+            ExecutionRunStatus::Compensating,
+            ExecutionRunStatus::Completed,
+            ExecutionRunStatus::Partial,
+            ExecutionRunStatus::Blocked,
+            ExecutionRunStatus::Unsupported,
+            ExecutionRunStatus::Failed,
+            ExecutionRunStatus::Cancelled,
+        ];
+        for status in aggregate_running {
+            assert_eq!(
+                execution_progress_phase_from_flags(status, false, false, false, false, false),
+                ExecutionProgressPhase::Running,
+                "status {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn execution_blocker_audience_uses_exact_scalar_priority_not_reason_samples_offline() {
+        // Pins: truncated display samples cannot hide a higher-priority exact blocker; scalar
+        // audience counters always order User > TenantReviewer > External > Agent > System.
+        assert_eq!(
+            execution_blocker_audience_from_flags(true, true, true, true),
+            Some(ExecutionBlockerAudience::User)
+        );
+        assert_eq!(
+            execution_blocker_audience_from_flags(false, true, true, true),
+            Some(ExecutionBlockerAudience::TenantReviewer)
+        );
+        assert_eq!(
+            execution_blocker_audience_from_flags(false, false, true, true),
+            Some(ExecutionBlockerAudience::External)
+        );
+        assert_eq!(
+            execution_blocker_audience_from_flags(false, false, false, true),
+            Some(ExecutionBlockerAudience::System)
+        );
+        assert_eq!(
+            execution_blocker_audience_from_flags(false, false, false, false),
+            None
+        );
+    }
+
+    // Pins: cancel outbox payloads expose the SQL-validated `dispatch_uid` key while
+    // keeping the Rust field explicit about its cancellation-delivery ownership.
+    #[test]
+    fn attempt_cancel_payload_uses_dispatch_uid_wire_key_offline() {
+        let request = ExecutionTaskAttemptCancelRequest {
+            cancellation_dispatch_uid: Uuid::from_u128(1),
+            tenant_id: TenantId::from(Uuid::from_u128(2)),
+            run_uid: Uuid::from_u128(3),
+            task_id: ExecutionTaskId::from_uuid(Uuid::from_u128(4)),
+            controller_generation: 5,
+            attempt_controller_generation: 4,
+            task_generation: 6,
+            attempt_generation: 7,
+            active_dispatch_uid: Uuid::from_u128(8),
+            capacity_reservation_uid: Uuid::from_u128(9),
+            watchdog_trigger_uid: Uuid::from_u128(10),
+            reason: ExecutionAttemptCancelReason::DeadlineExceeded,
+        };
+
+        let value = serde_json::to_value(request).expect("serialize task cancel request");
+        assert_eq!(
+            value.get("dispatch_uid"),
+            Some(&serde_json::json!(Uuid::from_u128(1)))
+        );
+        assert!(value.get("cancellation_dispatch_uid").is_none());
+    }
 
     #[test]
     fn cursor_round_trip_is_url_safe_and_strict() {

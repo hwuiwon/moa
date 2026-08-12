@@ -829,7 +829,7 @@ fn execution_planning_candidate(objective: &str, max_attempts: u32) -> String {
 
 fn execution_amendment_planning_request()
 -> moa_brain::execution_planning::ExecutionAmendmentPlanningRequest {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     let objective = "Repair the durable report";
     let mut initial = serde_json::from_str::<
@@ -872,29 +872,6 @@ fn execution_amendment_planning_request()
         )
     });
     let run_uid = uuid::Uuid::from_u128(700);
-    let prepare_task = moa_execution::state::ExecutionTaskProjection {
-        task_id: moa_execution::state::ExecutionTaskId::derive(run_uid, "prepare", "")
-            .expect("prepare task id"),
-        node_id: "prepare".to_string(),
-        item_key: String::new(),
-        status: moa_execution::state::ExecutionTaskStatus::Completed,
-        attempt: 1,
-        generation: 1,
-        input: json!({}),
-        outcome: Some(moa_artifacts::execution_plan::ExecutionTaskOutcome {
-            schema_version: 1,
-            usage: moa_artifacts::execution_plan::ExecutionUsage {
-                cost_microusd: 0,
-                tokens: 0,
-                tool_calls: 0,
-                retrieved_bytes: 0,
-            },
-            result: moa_artifacts::execution_plan::ExecutionTaskResult::Completed {
-                output: json!({"value": "completed-value"}),
-                citations: Vec::new(),
-            },
-        }),
-    };
     let waiting_task = moa_execution::state::ExecutionTaskProjection {
         task_id: moa_execution::state::ExecutionTaskId::derive(run_uid, "output", "")
             .expect("waiting task id"),
@@ -926,7 +903,7 @@ fn execution_amendment_planning_request()
         evidence: moa_brain::execution_planning::AmendmentPlanningEvidence {
             goal: initial.goal,
             active_plan: compiled.plan,
-            projection: moa_execution::state::ExecutionProjection {
+            projection: moa_execution::state::ExecutionAmendmentProjection {
                 plan_revision: 7,
                 node_statuses: BTreeMap::from([
                     (
@@ -938,7 +915,8 @@ fn execution_amendment_planning_request()
                         moa_execution::state::ExecutionNodeStatus::Waiting,
                     ),
                 ]),
-                tasks: vec![prepare_task, waiting_task],
+                started_node_ids: BTreeSet::from(["prepare".to_string(), "output".to_string()]),
+                replan_tasks: vec![waiting_task],
             },
             failure_evidence: json!({"reason": "shape changed"}),
             waiting_task: waiting_task_id,

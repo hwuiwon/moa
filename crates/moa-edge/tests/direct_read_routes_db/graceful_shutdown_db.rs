@@ -106,10 +106,7 @@ impl SpawnedEdge {
             .env("MOA_DATABASE_URL", database_url)
             .env("MOA_EDGE_BIND", format!("127.0.0.1:{port}"))
             .env("MOA_EDGE_UPSTREAM", "http://127.0.0.1:1")
-            .env(
-                "MOA_EDGE_CONNECTOR_CREDENTIAL_UPSTREAM",
-                "http://127.0.0.1:1",
-            )
+            .env("MOA_EDGE_INTERNAL_INGRESS_UPSTREAM", "http://127.0.0.1:1")
             .env("MOA_METRICS_EXPORTER", "disabled")
             // The shutdown arms log at info; the process default is warn, which
             // would leave the distinguishing line out of stdout entirely.

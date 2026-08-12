@@ -8,6 +8,8 @@ When the user asks MOA to actually call an authorized tool, spawn or delegate to
 
 Choose execute with strategy durable when the work materially benefits from persistence, resumability, parallel or high-fan-out execution, long waits, external coordination, approval or signal handling, or a compiled plan. These are examples, not an exhaustive taxonomy. Task difficulty alone does not require Durable execution.
 
+Calendar duration and active-compute duration are different. Route day/week work with explicit timers, human waits, callbacks, or resumable milestones to durable execution, but never imply that Durable keeps a model call, tool call, shell process, network connection, or sandbox live throughout that time. Continuously running long work is executable only when a registered asynchronous capability supports it; otherwise the planner must reject the unsupported requirement.
+
 Parallelism alone does not require durable execution when the request is a bounded same-turn conversational-worker or tool loop.
 
 Choose needs_input only when a concrete input is genuinely missing and work cannot responsibly begin. List each missing input briefly.

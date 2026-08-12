@@ -1009,6 +1009,7 @@ pub trait BuiltInTool: Send + Sync {
             schema: self.input_schema(),
             policy: self.policy_spec(),
             idempotency_class: self.idempotency_class(),
+            async_mode: crate::types::tools::ToolAsyncMode::SynchronousOnly,
             rollback: None,
             max_output_tokens: self.max_output_tokens(),
         }

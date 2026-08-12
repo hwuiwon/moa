@@ -4,7 +4,8 @@ use chrono::{Duration, Utc};
 use moa_artifacts::execution_plan::{
     CapabilityReference, CompensationInputMapping, ExecutionBudgetLimit, ExecutionCancelPolicy,
     ExecutionCompensation, ExecutionGoalContract, ExecutionNode, ExecutionOperation,
-    ExecutionPlanDefinition, MapTask, RetryPolicy,
+    ExecutionPlanDefinition, ExecutionTemporalTarget, ExecutionWaitExpiryAction,
+    ExecutionWaitPolicy, MapTask, RetryPolicy,
 };
 
 use super::*;
@@ -22,6 +23,7 @@ fn map_execution_task_validates_the_item_output_schema() {
     let plan = CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
+            input_wait_policy: test_input_wait_policy(),
             input_schema: serde_json::json!({}),
             output_schema: serde_json::json!({}),
             nodes: vec![ExecutionNode {
@@ -136,6 +138,7 @@ fn empty_map_is_reported_as_first_materialization_without_a_logical_task() {
         plan: CanonicalExecutionPlan {
             definition: ExecutionPlanDefinition {
                 cancel_policy: ExecutionCancelPolicy::RetainEffects,
+                input_wait_policy: test_input_wait_policy(),
                 input_schema: serde_json::json!({}),
                 output_schema: serde_json::json!({}),
                 nodes: vec![map_node],
@@ -230,6 +233,7 @@ fn only_direct_capability_task_materializes_compensation_contract() {
         plan: CanonicalExecutionPlan {
             definition: ExecutionPlanDefinition {
                 cancel_policy: ExecutionCancelPolicy::CompensateCommitted,
+                input_wait_policy: test_input_wait_policy(),
                 input_schema: serde_json::json!({}),
                 output_schema: serde_json::json!({}),
                 nodes: vec![direct_node.clone()],
@@ -308,4 +312,11 @@ fn only_direct_capability_task_materializes_compensation_contract() {
     )
     .expect("aggregate capability task should materialize");
     assert_eq!(aggregate.compensation, None);
+}
+
+fn test_input_wait_policy() -> ExecutionWaitPolicy {
+    ExecutionWaitPolicy {
+        expiry: ExecutionTemporalTarget::After { delay_seconds: 60 },
+        on_expiry: ExecutionWaitExpiryAction::FailTask,
+    }
 }

@@ -1,23 +1,24 @@
 //! Restate-owned delivery for execution action-review resolutions.
 
+use chrono::Utc;
+use moa_config::ExecutionConfig;
+use moa_execution::repository::compensation::CompensationReviewResolutionOutcome;
+use moa_execution::repository::task::{
+    ResolveTaskAttemptReviewRequest, TaskAttemptReviewResolutionOutcome,
+};
+use moa_execution::repository::{ExecutionRepository, ExecutionScope};
 use moa_execution::wire::{
-    ExecutionActionReviewAcknowledgement, ExecutionActionReviewResolutionRequest,
-    ExecutionCompensationReviewAcknowledgement, ExecutionCompensationReviewResolutionRequest,
+    ExecutionActionReviewResolutionRequest, ExecutionCompensationReviewResolutionRequest,
 };
-use moa_observability::propagation::{
-    TRACE_LINK_TRACEPARENT_HEADER, TRACE_LINK_TRACESTATE_HEADER, ValidatedTraceContext,
-    with_validated_trace_headers,
-};
+use moa_observability::propagation::{ValidatedTraceContext, link_validated_context};
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::action_reviews::store as action_review_store;
-use crate::workflows::{
-    errors::sqlx_error_to_handler_error, execution_compensation::ExecutionCompensationClient,
-    execution_task::ExecutionTaskClient,
-};
+use crate::services::execution_dispatcher::{DispatchExecutionsRequest, ExecutionDispatcherClient};
+use crate::workflows::errors::sqlx_error_to_handler_error;
 
 const EXECUTION_REVIEW_DISPATCH_BATCH_SIZE: i64 = 32;
 
@@ -55,6 +56,14 @@ enum JournaledExecutionReviewRequest {
     Compensation(ExecutionCompensationReviewResolutionRequest),
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+enum StorageResolutionDisposition {
+    Delivered,
+    NotReady,
+    Failed { message: String },
+}
+
 /// Restate service that owns private workflow delivery for action-review outbox rows.
 #[restate_sdk::service]
 #[name = "ActionReviewDispatcher"]
@@ -69,13 +78,14 @@ pub trait ActionReviewDispatcher {
 #[derive(Clone)]
 pub struct ActionReviewDispatcherImpl {
     pool: PgPool,
+    config: ExecutionConfig,
 }
 
 impl ActionReviewDispatcherImpl {
     /// Creates a dispatcher over the shared control-plane pool.
     #[must_use]
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, config: ExecutionConfig) -> Self {
+        Self { pool, config }
     }
 }
 
@@ -139,7 +149,7 @@ impl ActionReviewDispatcher for ActionReviewDispatcherImpl {
         let claimed = deliveries.len();
 
         for delivery in deliveries {
-            deliver_one(&ctx, &self.pool, delivery).await?;
+            deliver_one(&ctx, &self.pool, &self.config, delivery).await?;
         }
 
         Ok(Json(DispatchActionReviewsResponse { claimed }))
@@ -149,6 +159,7 @@ impl ActionReviewDispatcher for ActionReviewDispatcherImpl {
 async fn deliver_one(
     ctx: &Context<'_>,
     pool: &PgPool,
+    config: &ExecutionConfig,
     delivery: JournaledExecutionReviewDelivery,
 ) -> Result<(), HandlerError> {
     let resolution_context = ValidatedTraceContext::new(
@@ -159,66 +170,116 @@ async fn deliver_one(
         delivery.task_traceparent.as_deref(),
         delivery.task_tracestate.as_deref(),
     );
-    macro_rules! with_delivery_trace_headers {
-        ($request:expr) => {{
-            let request = with_validated_trace_headers(
-                $request,
-                resolution_context.as_ref(),
-                |request, name, value| request.header(name, value),
-            );
-            match task_context.as_ref() {
-                Some(context) => {
-                    let request = request.header(
-                        TRACE_LINK_TRACEPARENT_HEADER.to_string(),
-                        context.traceparent().to_string(),
-                    );
-                    match context.tracestate() {
-                        Some(tracestate) => request.header(
-                            TRACE_LINK_TRACESTATE_HEADER.to_string(),
-                            tracestate.to_string(),
-                        ),
-                        None => request,
-                    }
-                }
-                None => request,
-            }
-        }};
+    if let Some(context) = resolution_context.as_ref() {
+        let _ = link_validated_context(&tracing::Span::current(), context);
+    }
+    if let Some(context) = task_context.as_ref() {
+        let _ = link_validated_context(&tracing::Span::current(), context);
     }
     let acknowledged = match delivery.request {
         JournaledExecutionReviewRequest::Task(request) => {
-            let request = ctx
-                .workflow_client::<ExecutionTaskClient>(request.task_id.to_string())
-                .resolve_action_review(Json(request))
-                .idempotency_key(delivery.review_uid.to_string());
-            let request = with_delivery_trace_headers!(request);
-            crate::restate_identity::replay_safe_request(request)
-                .call()
-                .await
-                .map(|Json(acknowledgement)| match acknowledgement {
-                    ExecutionActionReviewAcknowledgement::Applied
-                    | ExecutionActionReviewAcknowledgement::Replayed
-                    | ExecutionActionReviewAcknowledgement::AuditedStale => {}
+            let repository = ExecutionRepository::new(pool.clone());
+            let disposition = ctx
+                .run(|| async move {
+                    let disposition = match repository
+                        .resolve_task_attempt_review(
+                            config,
+                            ResolveTaskAttemptReviewRequest {
+                                scope: ExecutionScope::ControlPlane,
+                                run_uid: request.run_uid,
+                                task_id: request.task_id,
+                                expected_task_generation: request.generation,
+                                review_uid: request.review_uid,
+                                resolution: request.resolution,
+                                resolved_at: Utc::now(),
+                            },
+                        )
+                        .await
+                    {
+                        Ok(
+                            TaskAttemptReviewResolutionOutcome::Applied { .. }
+                            | TaskAttemptReviewResolutionOutcome::Replayed { .. }
+                            | TaskAttemptReviewResolutionOutcome::NotFound
+                            | TaskAttemptReviewResolutionOutcome::Stale,
+                        ) => StorageResolutionDisposition::Delivered,
+                        Ok(TaskAttemptReviewResolutionOutcome::NotReady) => {
+                            StorageResolutionDisposition::NotReady
+                        }
+                        Err(error) => StorageResolutionDisposition::Failed {
+                            message: error.to_string(),
+                        },
+                    };
+                    Ok::<_, HandlerError>(Json::from(disposition))
                 })
+                .name(format!(
+                    "resolve_task_attempt_review_{}",
+                    delivery.review_uid
+                ))
+                .await?
+                .into_inner();
+            match disposition {
+                StorageResolutionDisposition::Delivered => Ok(()),
+                StorageResolutionDisposition::NotReady => {
+                    Err("execution task review owner is not durably parked".to_string())
+                }
+                StorageResolutionDisposition::Failed { message } => Err(message),
+            }
         }
         JournaledExecutionReviewRequest::Compensation(request) => {
-            let request = ctx
-                .workflow_client::<ExecutionCompensationClient>(request.compensation_id.to_string())
-                .resolve_action_review(Json(request))
-                .idempotency_key(delivery.review_uid.to_string());
-            let request = with_delivery_trace_headers!(request);
-            crate::restate_identity::replay_safe_request(request)
-                .call()
-                .await
-                .map(|Json(acknowledgement)| match acknowledgement {
-                    ExecutionCompensationReviewAcknowledgement::Applied
-                    | ExecutionCompensationReviewAcknowledgement::Replayed
-                    | ExecutionCompensationReviewAcknowledgement::AuditedStale => {}
+            let repository = ExecutionRepository::new(pool.clone());
+            let disposition = ctx
+                .run(|| async move {
+                    let disposition = match repository
+                        .resolve_current_compensation_review(
+                            ExecutionScope::ControlPlane,
+                            request.run_uid,
+                            request.compensation_id,
+                            request.generation,
+                            request.review_uid,
+                            &request.resolution,
+                            Utc::now(),
+                        )
+                        .await
+                    {
+                        Ok(
+                            CompensationReviewResolutionOutcome::Applied { .. }
+                            | CompensationReviewResolutionOutcome::Replayed { .. }
+                            | CompensationReviewResolutionOutcome::NotFound
+                            | CompensationReviewResolutionOutcome::Stale,
+                        ) => StorageResolutionDisposition::Delivered,
+                        Ok(CompensationReviewResolutionOutcome::NotReady) => {
+                            StorageResolutionDisposition::NotReady
+                        }
+                        Err(error) => StorageResolutionDisposition::Failed {
+                            message: error.to_string(),
+                        },
+                    };
+                    Ok::<_, HandlerError>(Json::from(disposition))
                 })
+                .name(format!(
+                    "resolve_compensation_attempt_review_{}",
+                    delivery.review_uid
+                ))
+                .await?
+                .into_inner();
+            match disposition {
+                StorageResolutionDisposition::Delivered => Ok(()),
+                StorageResolutionDisposition::NotReady => {
+                    Err("execution compensation review owner is not durably parked".to_string())
+                }
+                StorageResolutionDisposition::Failed { message } => Err(message),
+            }
         }
     };
 
     match acknowledged {
         Ok(()) => {
+            crate::restate_identity::replay_safe_request(
+                ctx.service_client::<ExecutionDispatcherClient>()
+                    .dispatch(Json::from(DispatchExecutionsRequest::default()))
+                    .idempotency_key(format!("execution-action-review:{}", delivery.review_uid)),
+            )
+            .send();
             let pool = pool.clone();
             let review_uid = delivery.review_uid;
             let attempt_count = delivery.attempt_count;
@@ -245,7 +306,6 @@ async fn deliver_one(
             }
         }
         Err(error) => {
-            let error = error.to_string();
             let pool = pool.clone();
             let review_uid = delivery.review_uid;
             let attempt_count = delivery.attempt_count;

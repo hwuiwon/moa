@@ -27,6 +27,9 @@ use moa_execution::{
         ExecutionStartRequest, ExecutionStartResponse,
     },
 };
+use moa_orchestrator::services::execution::{
+    ExecutionRunControlRequest, ExecutionRunControlResponse,
+};
 use moa_test_support::{
     FixtureCapabilityOptions, FixtureCapabilityOutcome, FixtureCapabilityTool, IsolatedTest,
     OrchestratorTestFixture,
@@ -151,6 +154,127 @@ async fn third_forward_failure_restarts_after_first_completed_reverse_undo_servi
                 && attempt.capability == REVERSIBLE_FIXTURE_COMPENSATOR_TOOL),
         "the in-flight second undo must replay through the stable invocation id"
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
+async fn public_pause_drains_running_compensation_and_resumes_once_service_e2e() -> Result<()> {
+    // Pins: the public control surface accepts Compensating, emits an exact old-attempt/new-run
+    // cancellation fence, waits for verified provider teardown, preserves terminal intent, and
+    // creates one activation when the fully Paused run resumes.
+    let fixture = compensation_fixture(
+        vec![
+            FixtureCapabilityOutcome::SuccessWithInput {
+                output: json!({"applied": true}),
+            },
+            FixtureCapabilityOutcome::TerminalFailure {
+                message: "force reverse execution".to_string(),
+            },
+        ],
+        true,
+    )
+    .await?;
+    let test = fixture.isolated().await;
+    let started = start_compensated_run(
+        &fixture,
+        &test,
+        ExecutionCancelPolicy::CompensateCommitted,
+        2,
+        "public-pause-running-compensation",
+    )
+    .await?;
+    let controller = fixture
+        .fixture_capability()
+        .context("compensation fixture omitted its capability controller")?;
+
+    for expected in 1..=2 {
+        controller.wait_for_calls(expected, SERVICE_TIMEOUT).await?;
+        controller.release(1);
+    }
+    let calls = controller.wait_for_calls(3, SERVICE_TIMEOUT).await?;
+    assert_eq!(calls[2].capability, REVERSIBLE_FIXTURE_COMPENSATOR_TOOL);
+    let (attempt_controller_generation, pending_terminal_status) =
+        await_running_compensation(&fixture.postgres_url, started.response.run.run_uid).await?;
+
+    let pause: ExecutionRunControlResponse = test
+        .client()
+        .post_call(
+            "/Execution/pause",
+            &ExecutionRunControlRequest {
+                run: started.request.clone(),
+                expected_controller_generation: attempt_controller_generation,
+            },
+        )
+        .await?;
+    let paused_generation = match pause {
+        ExecutionRunControlResponse::Applied {
+            run,
+            controller_generation,
+            ..
+        } => {
+            assert_eq!(run.status, ExecutionRunStatus::Pausing);
+            assert_eq!(controller_generation, attempt_controller_generation + 1);
+            controller_generation
+        }
+        other => bail!("running compensation pause was not applied: {other:?}"),
+    };
+    let cancellation_generations: (i64, i64) = sqlx::query_as(
+        "SELECT (payload->>'controller_generation')::BIGINT, \
+                (payload->>'attempt_controller_generation')::BIGINT \
+         FROM moa.execution_dispatch_outbox WHERE run_uid=$1 \
+           AND dispatch_kind='compensation_attempt_cancel'",
+    )
+    .bind(started.response.run.run_uid)
+    .fetch_one(&sqlx::PgPool::connect(&fixture.postgres_url).await?)
+    .await?;
+    assert_eq!(
+        cancellation_generations,
+        (
+            i64::try_from(paused_generation)?,
+            i64::try_from(attempt_controller_generation)?
+        )
+    );
+
+    controller.release(1);
+    await_paused_compensation(
+        &fixture.postgres_url,
+        started.response.run.run_uid,
+        &pending_terminal_status,
+    )
+    .await?;
+    let resume: ExecutionRunControlResponse = test
+        .client()
+        .post_call(
+            "/Execution/resume",
+            &ExecutionRunControlRequest {
+                run: started.request,
+                expected_controller_generation: paused_generation,
+            },
+        )
+        .await?;
+    let (resumed_generation, resumed_wake_epoch) = match resume {
+        ExecutionRunControlResponse::Applied {
+            run,
+            controller_generation,
+            wake_epoch,
+        } => {
+            assert_eq!(run.status, ExecutionRunStatus::Compensating);
+            assert_eq!(controller_generation, paused_generation + 1);
+            (controller_generation, wake_epoch)
+        }
+        other => bail!("drained compensation resume was not applied: {other:?}"),
+    };
+    let activation_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM moa.execution_dispatch_outbox WHERE run_uid=$1 \
+         AND controller_generation=$2 AND wake_epoch=$3 AND dispatch_kind='run_activation'",
+    )
+    .bind(started.response.run.run_uid)
+    .bind(i64::try_from(resumed_generation)?)
+    .bind(i64::try_from(resumed_wake_epoch)?)
+    .fetch_one(&sqlx::PgPool::connect(&fixture.postgres_url).await?)
+    .await?;
+    assert_eq!(activation_count, 1);
     Ok(())
 }
 
@@ -503,6 +627,12 @@ fn compensated_plan(
     });
     ExecutionPlanDefinition {
         cancel_policy,
+        input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+            expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                delay_seconds: 60,
+            },
+            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+        },
         input_schema: json!({
             "type": "object",
             "additionalProperties": false
@@ -595,6 +725,69 @@ async fn await_pending_terminal(database_url: &str, run_uid: uuid::Uuid) -> Resu
     })
     .await
     .with_context(|| format!("run {run_uid} never persisted its terminal fence"))??;
+    Ok(())
+}
+
+async fn await_running_compensation(
+    database_url: &str,
+    run_uid: uuid::Uuid,
+) -> Result<(u64, String)> {
+    let pool = sqlx::PgPool::connect(database_url).await?;
+    tokio::time::timeout(SERVICE_TIMEOUT, async {
+        loop {
+            let observed: Option<(i64, String)> = sqlx::query_as(
+                "SELECT run.controller_generation,run.pending_terminal_status \
+                 FROM moa.execution_run AS run \
+                 JOIN moa.execution_compensation AS compensation ON compensation.run_uid=run.run_uid \
+                 WHERE run.run_uid=$1 AND run.status='compensating' \
+                   AND compensation.attempt_state='running'",
+            )
+            .bind(run_uid)
+            .fetch_optional(&pool)
+            .await?;
+            if let Some((generation, pending_terminal_status)) = observed {
+                return Ok::<_, anyhow::Error>((u64::try_from(generation)?, pending_terminal_status));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("run {run_uid} never entered a running compensation slice"))?
+}
+
+async fn await_paused_compensation(
+    database_url: &str,
+    run_uid: uuid::Uuid,
+    expected_pending_terminal_status: &str,
+) -> Result<()> {
+    let pool = sqlx::PgPool::connect(database_url).await?;
+    tokio::time::timeout(SERVICE_TIMEOUT, async {
+        loop {
+            let observed: Option<(String, String, i64, String)> = sqlx::query_as(
+                "SELECT run.status,run.activation_state,run.active_task_count, \
+                        run.pending_terminal_status \
+                 FROM moa.execution_run AS run WHERE run.run_uid=$1",
+            )
+            .bind(run_uid)
+            .fetch_optional(&pool)
+            .await?;
+            if let Some((status, activation_state, active_task_count, pending_status)) = observed
+                && status == "paused"
+                && activation_state == "paused"
+                && active_task_count == 0
+            {
+                if pending_status != expected_pending_terminal_status {
+                    bail!(
+                        "pause changed pending terminal status from {expected_pending_terminal_status} to {pending_status}"
+                    );
+                }
+                return Ok::<(), anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("run {run_uid} did not drain its compensation into Paused"))??;
     Ok(())
 }
 

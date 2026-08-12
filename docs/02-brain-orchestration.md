@@ -13,7 +13,7 @@ _Restate orchestration, hosted API runtime mode, turn execution, and workers._
 - Worker VO: `crates/moa-orchestrator/src/objects/worker/`
 - Turn workflows: `crates/moa-orchestrator/src/workflows/turn_execution/mod.rs` and `crates/moa-orchestrator/src/workflows/worker_turn_execution.rs`
 - Execution domain: `crates/moa-execution/`
-- Execution workflows: `crates/moa-orchestrator/src/workflows/execution_run.rs` and `crates/moa-orchestrator/src/workflows/execution_task.rs`
+- Execution persistence/activation contracts: `crates/moa-execution/src/repository/` and `crates/moa-orchestrator/src/runtime/endpoint.rs`
 - CronJob VO: `crates/moa-orchestrator/src/objects/cron_job.rs`
 - Pipeline assembly: `crates/moa-brain/src/pipeline/mod.rs`
 - Sandbox workspace contract: `docs/25-sandbox-workspaces.md`
@@ -54,9 +54,9 @@ Core production Restate bindings:
 
 | Restate primitive | Handlers |
 |---|---|
-| Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` |
-| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
-| Workflow | `ExecutionRun`, `ExecutionTask`, `ExecutionCompensation`, `KnowledgeSyncIngestion`, `Consolidate`, `SkillLearning`, `TurnExecution`, `WorkerTurnExecution`, `ExperimentRun`, `ExperimentTrialRun` |
+| Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO`, `ExecutionRunController`, fleet-keyed `ExecutionDispatchDrain` |
+| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `DurableTimeout`, `Execution`, `ExecutionDispatcher`, `ExecutionDispatchReconciler`, `ExecutionRetention`, `ExecutionSchedule`, `ExecutionTrigger`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
+| Workflow | `KnowledgeSyncIngestion`, `Consolidate`, `ExecutionTaskAttempt`, `ExecutionCompensationAttempt`, `SkillLearning`, `TurnExecution`, `WorkerTurnExecution`, `ExperimentRun`, `ExperimentTrialRun` |
 
 Internal application boundaries for action reviews, builtin async-authz
 challenges, learning review, experiments, privacy, provider routing, and memory
@@ -80,10 +80,15 @@ verified portable checkpoint; see [Sandbox Workspaces](25-sandbox-workspaces.md)
 `Artifacts` owns import, export, listing, validation, and publish for canonical
 skills, connectors, actions, and agents. `moa-execution` owns execution-plan
 compilation, pure scheduling, budgets, completion, and run/task persistence.
-The `Execution` service exposes start, status, list, cancel, review, signal, and
-bounded task-result operations. `ExecutionRun` and `ExecutionTask` own durable
-graph execution. The open-ended agent loop remains in `Session` and
-`TurnExecution`.
+The `Execution` service exposes start, status, list, cancel, pause/resume,
+review, signal, callback, and bounded result operations. Postgres owns durable
+graph execution; `ExecutionRunController`, `ExecutionTaskAttempt`,
+`ExecutionCompensationAttempt`, `ExecutionTrigger`, the head-coalescing `ExecutionDispatcher`,
+`ExecutionDispatchDrain`, and
+`ExecutionDispatchReconciler` are bounded activations over that state.
+`ExecutionSchedule` and `DurableTimeout` own bounded schedule/timeout mutations;
+`ExecutionRetention` owns bounded terminal-detail archival and deletion. The
+open-ended agent loop remains in `Session` and `TurnExecution`.
 
 ## Session Flow
 
@@ -143,7 +148,7 @@ result selects Execute/Inline without retry or planner fallback.
 - Execute carries exactly one explicit strategy. Inline runs the bounded
   root model/tool loop and may use conversational workers. Durable instantiates
   a pinned skill template or compiles a strict generated plan, persists it,
-  starts `ExecutionRun` detached, and returns acceptance without polling it
+  admits a run and dispatches `ExecutionRunController` detached, then returns acceptance without polling it
   from the root model.
 - NeedsInput appends one deterministic clarification carrying bounded missing
   fields.
@@ -273,8 +278,8 @@ The owner then runs one continuation turn:
   no durable upgrade, one bounded `Respond` call, at most one visible answer.
 - Worker: one no-tools synthesis turn that updates local history and result, then
   normal parent-result and cleanup ownership resumes.
-- `ExecutionTask`: no conversational callback at all; it stays on the durable
-  run/task outbox and ack path.
+- Execution task owner: no conversational callback at all; it stays on the
+  durable task-generation outbox and acknowledgement path.
 
 Review timeout remains fail-closed and produces no conversational resume. The
 reaper durably releases the Session or Worker lifecycle hold through a
@@ -303,22 +308,23 @@ internal atomic apply handler that performs the whole read-score-write and
 returns the exact transition, so two tool results landing in the same turn
 cannot interleave into a lost update.
 
-An execution task instead scores against a circuit held by its own task
-workflow. Do not "simplify" this into the Session VO alongside the other two.
+An execution task instead scores against circuit state held by its own persisted
+task generation and loaded by the bounded attempt. Do not "simplify" this into
+the Session VO alongside the other two.
 A single shared circuit alternates owners as work moves between the coordinator
 and detached tasks, and adopting a new owner generation clears the capability
 map — so an attacker who has tripped the coordinator's circuit could reset it
 just by causing any detached task to run. Per-task circuits under per-task
 owners remove that move entirely. The cheaper arguments point the same way: a
-task turn is a single sequential writer, so there is no interleaving to defend
-against, and the journal replays its state deterministically without a VO
-round-trip per scored output. The owner is
+task attempt is a single sequential writer, so there is no interleaving to
+defend against, and generation-fenced Postgres state survives retries without a
+VO round-trip per scored output. The owner is
 generation-fenced — `Coordinator { turn_id, generation }`,
 `Worker { worker_id, turn_id, generation }`, or
 `ExecutionTask { run_uid, task_uid, generation }` — and state resets only for a
 genuinely new owner generation, never for a new input fingerprint, new tool
-arguments, a fallback Hand provider, or a workflow replay. A delayed
-action-review continuation runs under a new workflow id but keeps the original
+arguments, a fallback Hand provider, or an activation replay. A delayed
+action-review continuation runs under a new dispatch id but keeps the original
 logical owner, which is why the owner travels in the request rather than being
 inferred from the caller.
 
@@ -374,7 +380,8 @@ relevant skill instructions; optional controls bound tools, tokens, and turns.
 Workers support interactive, steerable delegation inside Execute/Inline. They are not
 plan nodes, map items, reducers, or the bulk DAG substrate. Work that needs an
 explicit dependency graph, durable joins, scalable map materialization, review
-waits, or exact coverage uses `ExecutionRun` and stable `ExecutionTask` rows.
+waits, or exact coverage uses stable execution run and task rows plus bounded
+controller/attempt activations.
 Conversational worker fan-out limits are separate from the
 `execution.max_in_flight_tasks` physical window that bounds live DAG tasks.
 
@@ -456,7 +463,7 @@ state, reschedules once for the exact latest-heartbeat deadline when still
 fresh, or sends one joined `HeartbeatStale` signal to Session and stops when
 genuinely stale. Session never polls Worker state to discover staleness.
 
-## Workflows And Execution Runs
+## Workflows And Bounded Execution Activations
 
 Restate workflows run internal durable jobs:
 
@@ -464,33 +471,35 @@ Restate workflows run internal durable jobs:
 - `KnowledgeSyncIngestion`: one tenant knowledge sync ingestion pass.
 - `TurnExecution`: one durable session turn keyed by `turn_id`; runs the top-level session brain loop and calls back to `Session` on completion, cancellation, or failure.
 - `WorkerTurnExecution`: one admitted worker turn keyed by `turn_id`; runs child-local LLM/tool loops and calls back to `Worker` with turn-scoped mutations.
-- `ExecutionRun`: one immutable goal contract and active plan keyed by `run_uid`.
-- `ExecutionTask`: one stable logical node or map item keyed by its task identity.
 
-These are workflow-shaped because rerunning the same logical job should be
-explicit and observable.
+Long-horizon execution is deliberately not workflow-shaped. A run may remain
+nonterminal for seconds through weeks, but no Restate invocation spans that
+lifetime. Postgres stores the immutable admitted `Identity`, plan, scheduler
+projection, run and task generations, attempt leases, compensation stack,
+waits, triggers, external jobs, capacity reservations, and dispatch outbox.
 
-`ExecutionRun` loads the persisted canonical plan and asks the pure interpreter
-for ready logical work. It materializes every stable row keyed by
-`(run_uid, node_id, item_key)`, but pending rows remain storage-only. The
-positive `execution.max_in_flight_tasks` setting (64 by default) is the physical
-window for live attached `ExecutionTask` calls and is independent of logical
-`max_tasks` and provider concurrency.
+`ExecutionRunController/advance` serializes activations by `run_uid`, claims one
+persisted wake epoch, performs at most `maximum_activation_steps`, dispatches at
+most `dispatch_batch_size` ready tasks, commits progress, and returns.
+`ExecutionTaskAttempt/run` and the `ExecutionCompensationAttempt` slice each
+execute one immutable dispatch generation and return after outcome, retry,
+review, signal, timer, pause, external-job start, or watchdog classification.
+Every stale attempt loses its generation fence.
 
-On each dispatch step the run fills only open window slots with the first stable
-undispatched rows, acknowledges the processed Postgres wake epoch, and suspends
-on the matching Restate promise plus the attached calls it owns. A completed
-handle opens one slot, which the run refills before parking again. The only
-advancement sources are an already-persisted run/task transition named by a wake
-epoch or completion of an attached task call. Pending rows do not own a task
-runtime, and elapsed time never causes a scan or dispatch.
+Input, review, signal, timer, pause, and external-job waits are storage-only.
+Entering a wait resolves an `After { delay_seconds }` target from that exact
+wait-entry instant or retains an explicit UTC `At { at }`, persists `due_at`,
+releases active-attempt and hand capacity, and enqueues an immutable trigger.
+Reusable templates accept only nonzero `After`; generated one-off plans may use
+`At`. `ExecutionTrigger/fire` and the reconciliation owner redeliver the same
+generation-fenced transition through the outbox, so no polling workflow is
+needed.
 
-`ExecutionTask` atomically reserves its worst-case integer cost, token, task,
-tool-call, retrieved-byte, and deadline allowance before dispatch. A failed
-reservation starts no work. It resolves only compiler-approved references,
-executes one governed capability or bounded agent task, reconciles actual usage,
-persists citations and output, and completes through a generation fence so a
-stale attempt cannot overwrite newer work.
+Task dispatch atomically reserves tenant and fleet active-attempt capacity plus
+the task's worst-case integer cost, token, task, tool-call, retrieved-byte, and
+deadline allowance. Parked-run, scheduled-trigger, and external-job ceilings
+are independent durable capacity classes. Weighted tenant dispatch prevents a
+single tenant from consuming the fleet queue.
 
 A sandbox-using worker or execution task is also the only valid owner of a
 `SandboxWorkspace`; a coordinator/bare session is not. Mutating sandbox tools
@@ -500,7 +509,7 @@ Sandbox dispatch without a typed worker or execution-task workspace scope is
 rejected before workspace reads or provider I/O.
 
 The plan is an acyclic graph with exactly `Capability`, `Agent`, `Map`,
-`Reduce`, `Review`, `WaitSignal`, and `Output`. A map task is only a capability
+`Reduce`, `Review`, `WaitSignal`, `WaitUntil`, and `Output`. A map task is only a capability
 or agent and cannot nest another map. Agent tasks can use declared
 instruction-only skills and capabilities with bounded turns and budgets. They
 cannot mutate the graph. Unexpected conditions return typed `NeedsInput` or
@@ -510,7 +519,7 @@ Repeated hashes, recurring failure fingerprints, no progress, deadline, or
 resource exhaustion terminate with exact partial/blocked coverage instead of an
 infinite loop.
 
-Cancellation first fences new reservations and cancels and joins active tasks.
+Cancellation first fences new reservations and cancels active attempts.
 The plan's explicit policy then either retains already committed effects or
 enters `Compensating` and invokes atomically registered compensators in reverse
 commit order. Compensation uses stable identities and generation fencing, so a
@@ -523,12 +532,11 @@ output, citations, failures, and gaps to the owning session. The session starts
 at most one deduplicated synthesis turn for the originating user sequence; it
 does not ingest every raw map output or poll the run through the root model.
 
-Public `confirm`, `cancel`, `deliver_input`, `decide_review`,
-`deliver_signal`, and `apply_amendment` requests acknowledge success only after
-the repository mutation commits, any exact task-specific shared handler accepts
-it, and `ExecutionRun::wake` accepts the committed epoch. Task terminal outcomes
-may send their run wake detached because outcome and epoch are already committed
-and the run retains the attached child call as the second recovery path.
+Public `confirm`, `cancel`, `pause`, `resume`, `deliver_input`, `decide_review`,
+`deliver_signal`, external callback, and `apply_amendment` requests acknowledge
+success only after the repository mutation and generation-fenced dispatch row
+commit. If immediate delivery fails, the singleton maintenance owner reclaims
+the outbox row; replay cannot repeat the logical transition.
 
 Behavior-lab execution uses the same reserve-before-dispatch rule. An
 `ExperimentRun` requires one exact immutable `experiment_plan` revision and
@@ -553,9 +561,19 @@ the same persisted projection, task rows, planning audits, and bounded session
 event evidence as runtime inspection; they do not reconstruct success from a
 prose transcript.
 
-Reusable scheduled work is anchored by the `CronJob` virtual object. Each job
-key stores its cron expression, timezone, target service handler, and a version
-counter that invalidates stale delayed ticks after reconfiguration.
+Reusable product execution schedules live in `moa.execution_schedule`. Each
+occurrence has a stable schedule/occurrence identity, admitted owner `Identity`,
+timezone-aware policy, misfire policy, concurrency policy, next occurrence, and
+generation. The maintenance owner incrementally materializes immutable
+`schedule_occurrence` triggers; start-run admission remains tenant/fleet
+capacity-gated and idempotent. Stopping or reconfiguring a schedule advances a
+monotonic incarnation tombstone, and every tick from an older incarnation is a
+no-op.
+
+Platform maintenance schedules remain anchored by the `CronJob` virtual object.
+Each job key stores its cron expression, timezone, target service handler, and
+the same monotonic incarnation rule; stop/reconfigure never resets the counter
+or lets a late tick regain authority.
 
 ### Background Maintenance Jobs
 

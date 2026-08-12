@@ -1,5 +1,6 @@
 //! Structural, schema, reference, catalog, and authorization validation.
 
+pub(super) mod activation_bounds;
 pub(super) mod schema_references;
 
 use self::schema_references::validate_one_schema;
@@ -375,6 +376,7 @@ pub(super) fn collect_plan_references(plan: &ExecutionPlanDefinition) -> PlanRef
             },
             ExecutionOperation::Review { .. }
             | ExecutionOperation::WaitSignal { .. }
+            | ExecutionOperation::WaitUntil { .. }
             | ExecutionOperation::Output { .. } => {}
         }
         if let Some(compensation) = &node.compensation {
@@ -554,6 +556,7 @@ pub(super) fn validate_cancel_compensation_coverage(
             },
             ExecutionOperation::Review { .. }
             | ExecutionOperation::WaitSignal { .. }
+            | ExecutionOperation::WaitUntil { .. }
             | ExecutionOperation::Output { .. } => {}
         }
     }
@@ -637,6 +640,13 @@ pub(super) fn validate_compensations(
                 "non_idempotent_compensator",
                 format!("{path}.compensator"),
                 "compensator must be idempotent for durable retry",
+            );
+        }
+        if compensator.requires_sandbox {
+            report.error(
+                "sandbox_compensator_unsupported",
+                format!("{path}.compensator"),
+                "compensator requires a sandbox workspace, which durable compensation does not support",
             );
         }
 
@@ -893,6 +903,7 @@ pub(super) fn validate_agent_tool_name_ambiguity(
             | ExecutionOperation::Reduce { .. }
             | ExecutionOperation::Review { .. }
             | ExecutionOperation::WaitSignal { .. }
+            | ExecutionOperation::WaitUntil { .. }
             | ExecutionOperation::Output { .. } => {}
         }
     }

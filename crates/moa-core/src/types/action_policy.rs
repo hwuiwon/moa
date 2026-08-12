@@ -299,8 +299,10 @@ pub struct ExecutionTaskOrigin {
     pub run_uid: Uuid,
     /// Owning persisted task identifier.
     pub task_uid: Uuid,
-    /// Task attempt generation fenced by the execution workflow.
+    /// Logical task generation fenced by the execution workflow.
     pub generation: u64,
+    /// Exact bounded attempt generation that owns provider dispatch and capacity.
+    pub attempt_generation: u64,
 }
 
 /// Durable compensation identity carried through policy, review, and dispatch.
@@ -311,8 +313,10 @@ pub struct ExecutionCompensationOrigin {
     pub run_uid: Uuid,
     /// Stable compensation identifier within the execution run.
     pub compensation_id: Uuid,
-    /// Compensation generation fenced by the execution workflow.
+    /// Logical compensation generation fenced by the execution workflow.
     pub generation: u64,
+    /// Exact bounded compensation-attempt generation that owns provider dispatch and capacity.
+    pub attempt_generation: u64,
 }
 
 /// Exact owner that must be resumed when one action review resolves.
@@ -812,6 +816,7 @@ mod tests {
                 run_uid: Uuid::from_u128(10),
                 task_uid: Uuid::from_u128(11),
                 generation: 5,
+                attempt_generation: 8,
             },
         };
         assert_eq!(task.session_id(), session_id);
@@ -830,6 +835,7 @@ mod tests {
                 run_uid: Uuid::from_u128(12),
                 compensation_id: Uuid::from_u128(13),
                 generation: 6,
+                attempt_generation: 9,
             },
         };
         assert_eq!(compensation.session_id(), session_id);
@@ -843,6 +849,7 @@ mod tests {
                 run_uid: Uuid::from_u128(12),
                 compensation_id: Uuid::from_u128(13),
                 generation: 6,
+                attempt_generation: 9,
             })
         );
         assert_eq!(compensation.as_str(), "execution_compensation");
@@ -858,6 +865,7 @@ mod tests {
                 run_uid: Uuid::from_u128(32),
                 compensation_id: Uuid::from_u128(33),
                 generation: 9,
+                attempt_generation: 12,
             },
         };
         let encoded =

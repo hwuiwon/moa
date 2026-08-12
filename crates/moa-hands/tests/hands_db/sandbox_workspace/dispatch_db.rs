@@ -51,6 +51,7 @@ use moa_hands::{
             HandLeaseWorkspaceAttachment, LeaseHandle, PostgresHandLeaseStore,
         },
         sandbox_workspace::{
+            capacity::PostgresWorkspaceCapacityRepository,
             checkpoint::model::{CreateCheckpointRequest, PublishCheckpointCommitRequest},
             model::{
                 ActivateHydratedWorkspaceRequest, CreateWorkspaceRequest, SandboxWorkspace,
@@ -469,6 +470,19 @@ async fn hydration_and_checkpoint_commits_are_atomic_replay_safe_and_generation_
             Some(creating.clone())
         );
         let publication = publication(&commit_binding, operation_id, 17 + commit_index);
+        PostgresWorkspaceCapacityRepository::new(pool.clone())
+            .reserve_checkpoint_publication(
+                &WorkspaceStorageOperation {
+                    operation_id,
+                    kind: WorkspaceOperationKind::Commit,
+                    binding: commit_binding.clone(),
+                    deadline: intent.deadline_at,
+                    request_hash: intent.request_hash.clone(),
+                },
+                publication.logical_bytes,
+            )
+            .await
+            .expect("reserve checkpoint capacity before publication");
 
         if commit_index == 1 {
             let mut stale_lease = active_lease.clone();
@@ -573,6 +587,119 @@ async fn hydration_and_checkpoint_commits_are_atomic_replay_safe_and_generation_
                     .as_ref()
                     .and_then(|attachment| attachment.restored_checkpoint_id),
                 Some(checkpoint_id)
+            );
+
+            // Pins: if another writer wins after immutable bytes are uploaded,
+            // the losing checkpoint is failed and its exact count/bytes charge is
+            // released so the upload can be garbage-collected without a quota leak.
+            for (from, to) in [
+                (
+                    SandboxWorkspaceState::Active,
+                    SandboxWorkspaceState::Quiescing,
+                ),
+                (
+                    SandboxWorkspaceState::Quiescing,
+                    SandboxWorkspaceState::Committing,
+                ),
+            ] {
+                assert!(
+                    workspaces
+                        .transition(WorkspaceTransition {
+                            tenant_id,
+                            workspace_id,
+                            from,
+                            to,
+                            writer_epoch: active_workspace.writer_epoch,
+                            instance_generation: active_workspace.instance_generation,
+                        })
+                        .await
+                        .expect("enter abandoned checkpoint barrier")
+                );
+            }
+            let abandoned_workspace = workspaces
+                .get(tenant_id, workspace_id)
+                .await
+                .expect("load abandoned workspace")
+                .expect("abandoned workspace exists");
+            let abandoned_binding = binding(&abandoned_workspace);
+            let abandoned_operation_id = WorkspaceOperationId::new();
+            let abandoned_intent = operation_intent(
+                tenant_id,
+                &abandoned_workspace,
+                abandoned_operation_id,
+                WorkspaceOperationKind::Commit,
+                "sha256:abandoned-cas-loss",
+            );
+            operations
+                .persist_intent(&abandoned_intent)
+                .await
+                .expect("persist abandoned operation");
+            let abandoned_checkpoint_id = WorkspaceCheckpointId(abandoned_operation_id.0);
+            workspaces
+                .create_checkpoint(CreateCheckpointRequest {
+                    checkpoint_id: abandoned_checkpoint_id,
+                    tenant_id,
+                    workspace_id,
+                    parent_checkpoint_id: Some(checkpoint_id),
+                    operation_id: abandoned_operation_id,
+                    expected_writer_epoch: abandoned_workspace.writer_epoch,
+                    expected_instance_generation: abandoned_workspace.instance_generation,
+                    expected_checkpoint_generation: abandoned_workspace.checkpoint_generation,
+                })
+                .await
+                .expect("create abandoned checkpoint")
+                .expect("abandoned checkpoint fence matches");
+            let abandoned_publication =
+                self::publication(&abandoned_binding, abandoned_operation_id, 23);
+            PostgresWorkspaceCapacityRepository::new(pool.clone())
+                .reserve_checkpoint_publication(
+                    &WorkspaceStorageOperation {
+                        operation_id: abandoned_operation_id,
+                        kind: WorkspaceOperationKind::Commit,
+                        binding: abandoned_binding.clone(),
+                        deadline: abandoned_intent.deadline_at,
+                        request_hash: abandoned_intent.request_hash.clone(),
+                    },
+                    abandoned_publication.logical_bytes,
+                )
+                .await
+                .expect("reserve abandoned checkpoint before upload");
+            sqlx::query(
+                "UPDATE moa.sandbox_workspaces SET lifecycle_state = 'active' WHERE workspace_id = $1",
+            )
+            .bind(workspace_id)
+            .execute(&pool)
+            .await
+            .expect("simulate another writer winning the lifecycle CAS");
+            assert!(
+                !workspaces
+                    .publish_checkpoint_commit(PublishCheckpointCommitRequest {
+                        binding: &abandoned_binding,
+                        operation_id: abandoned_operation_id,
+                        publication: &abandoned_publication,
+                        post_commit_state: WorkspacePostCommitState::AttachmentRetained,
+                        lease: &active_lease,
+                    })
+                    .await
+                    .expect("CAS loss must be safely abandoned")
+            );
+            let abandoned_state = sqlx::query_as::<_, (String, String)>(
+                r#"
+                SELECT checkpoint.lifecycle_state, reservation.reservation_state
+                FROM moa.sandbox_workspace_checkpoints AS checkpoint
+                JOIN moa.sandbox_capacity_reservations AS reservation
+                  ON reservation.operation_id = checkpoint.operation_id
+                 AND reservation.resource_dimension = 'checkpoints'
+                WHERE checkpoint.checkpoint_id = $1
+                "#,
+            )
+            .bind(abandoned_checkpoint_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load abandoned checkpoint and capacity");
+            assert_eq!(
+                abandoned_state,
+                ("failed".to_string(), "released".to_string())
             );
         } else {
             assert_eq!(active_workspace.state, SandboxWorkspaceState::Ready);

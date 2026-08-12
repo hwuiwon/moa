@@ -18,7 +18,7 @@ Brain and execution
   Context pipeline -> provider router -> LLM
   Tool router -> built-ins / hands / operator MCP / tenant connector actions
   Execute Inline delegation -> Restate Worker virtual objects
-  Execute Durable planning/compiler -> Restate ExecutionRun / ExecutionTask workflows
+  Execute Durable planning/compiler -> bounded Restate execution activations
         |
         v
 Product data in Postgres / Neon
@@ -29,7 +29,9 @@ Product data in Postgres / Neon
   graph nodes, graph edges, sidecar indexes, configured vector records
   connector connections, HTTP action bindings, invocation ledgers
   knowledge projections, sync runs, document versions, chunks
-  execution runs, execution tasks, plan history, budgets, completion checks
+  execution runs/nodes/tasks/attempts, compensation, waits, triggers, schedules,
+  external jobs, dispatch outbox, admission capacity, plan history, budgets,
+  completion checks
   learning_log
   analytics.turn_lineage, analytics.score_run, analytics.scores,
   moa.experiment_run, compliance audit tables
@@ -82,9 +84,10 @@ node in Durable Execute; no skill is required to define a plan.
 
 Inline Execute is the bounded root model/tool loop, including repeat and
 tool-call limits, visible skills, and conversational `Worker` delegation.
-Durable Execute instantiates or compiles an immutable plan, starts a detached
-`ExecutionRun`, publishes compact progress, and synthesizes its terminal result
-into the owning session automatically. An initial root Inline turn may make one
+Durable Execute instantiates or compiles an immutable plan, admits a detached
+run in Postgres, dispatches its first bounded `ExecutionRunController`
+activation, publishes compact progress, and synthesizes its terminal result into
+the owning session automatically. An initial root Inline turn may make one
 evidence-preserving upgrade to Durable; it cannot downgrade or classify again.
 The workflow exposes `request_durable_execution` only to that eligible turn,
 requires it to be the sole tool call in the model response, and validates its
@@ -127,8 +130,11 @@ authoring and import/export format. Optional `ui` metadata is non-semantic.
 | `ExecutionCompiler` | `moa-execution` | Validates, canonicalizes, estimates, and hashes initial plans and amendments against the capability catalog and remaining budget. |
 | `ExecutionProjection` | `moa-execution` | Supplies ordered node/task state to the pure scheduler; it contains no repository or provider handle. |
 | `ExecutionRepository` | `moa-execution` | Owns scoped run/task persistence, idempotent materialization, atomic budget accounting, generation-fenced outcomes, amendment history, and cancellation. It depends only on shared database/core types, never on Restate or runtime owners. |
-| `ExecutionRun` | `moa-orchestrator` Restate workflow | Sole DAG-advancement owner. Drives one durable plan from persisted state, keeps at most `execution.max_in_flight_tasks` attached task calls live, and parks on persisted wake epochs or owned task completion. |
-| `ExecutionTask` | `moa-orchestrator` Restate workflow | Executes one stable logical node or map-item instance and records one typed outcome. |
+| `ExecutionRunController` | `moa-orchestrator` Restate virtual object | Serializes by `run_uid`, runs at most `maximum_activation_steps`, dispatches at most `dispatch_batch_size` ready rows, commits the next product state, and returns. It never spans a product wait. |
+| `ExecutionTaskAttempt` | `moa-orchestrator` Restate workflow | Executes one generation-fenced attempt for a stable logical node or map-item, bounded by the active-attempt timeout and task deadline. |
+| `ExecutionTrigger` | `moa-orchestrator` Restate service | Delivers one immutable, generation-fenced deadline, timer, wait-expiry, watchdog, external-reconcile, or schedule occurrence into the transactional dispatch outbox. |
+| `ExecutionCompensationAttempt` | `moa-orchestrator` ingress-private Restate workflow | Reverses one committed compensatable effect under a stable compensation identity; ambiguous results become explicit repair state. |
+| `ExecutionRetention` | `moa-orchestrator` ingress-private Restate service | Archives or deletes one bounded terminal-detail page, persists the next generation, and self-schedules; a coarse CronJob only repairs a missing delayed invocation. |
 | Sandbox workspace | `moa-hands` domain/repositories/adapters, composed by `moa-orchestrator` | Owns one tenant-scoped, worker-owned or execution-task-owned filesystem lifecycle; Postgres stores ownership/fences and provider/object storage owns bytes. |
 | Connector definition | `moa-artifacts` | Owns immutable reviewed HTTP transport, schema, data-class, credential-slot, and action contracts; the platform supplies the fixed external-write/high-risk/admin-review floor. |
 | Connector connection | `moa-connectors` | Owns tenant lifecycle/health/generation, HTTP action bindings, and durable send outcomes. |
@@ -146,11 +152,11 @@ deliverables can produce `partial`, `blocked`, or `unsupported`, never a false
 outputs, citations, and explicit gaps.
 
 An `ExecutionPlanDefinition` carries an explicit `cancel_policy`,
-`input_schema`, `output_schema`, and `nodes`. Each node carries
+`input_schema`, `output_schema`, required `input_wait_policy`, and `nodes`. Each node carries
 `id`, `depends_on`, optional `when`, `input`, `output_schema`, one `operation`,
 an explicit optional compensation contract, retry policy, optional budget, and
 the goal requirement IDs it serves. The dependency graph is acyclic, and
-its operation enum has exactly seven variants:
+its operation enum has exactly eight variants:
 
 1. `Capability { reference }` invokes one registered governed capability.
 2. `Agent { instructions, skill_refs, capability_refs, max_turns }` runs one
@@ -161,9 +167,18 @@ its operation enum has exactly seven variants:
 4. `Reduce { items, max_items, reducer, batch_size }` reduces bounded structured
    results through a deterministic capability or a bounded hierarchical agent
    reducer.
-5. `Review { prompt }` waits for a tenant review decision.
-6. `WaitSignal { signal_name }` waits for one external or user signal.
-7. `Output { value }` resolves and validates the terminal output.
+5. `Review { prompt, wait_policy }` waits for a tenant review decision.
+6. `WaitSignal { signal_name, wait_policy }` waits for one external or user signal.
+7. `WaitUntil { wake, result }` produces its declared result at an exact durable time.
+8. `Output { value }` resolves and validates the terminal output.
+
+Every wait expiry uses `ExecutionWaitPolicy { expiry, on_expiry }`, where
+`on_expiry` is `FailTask`, `FailRun`, or `ContinueWith { output }`.
+`ExecutionTemporalTarget::At { at }` is an exact UTC instant and is allowed in
+one-off compiled plans. `After { delay_seconds }` is nonzero and resolves from
+the instant the task actually enters its wait, not from planning or run
+admission. Reusable skill templates accept only `After`; this preserves their
+meaning whenever earlier dependencies take a different amount of time.
 
 Dependencies provide parallelism and joins; there are no implicit start,
 parallel, join, worker, tool, action, skill-action, or memory node kinds. Dynamic
@@ -245,13 +260,13 @@ compiled worst-case estimate above the unattended threshold is persisted as
 
 Ready map items are materialized as stable tasks keyed by
 `(run_uid, node_id, item_key)`. Materialization is deterministic and complete,
-but pending rows are storage-only: they have no live `ExecutionTask` invocation
-until the run admits them into its positive physical window. The default
-`execution.max_in_flight_tasks` is 64 and is independent of logical `max_tasks`
-and provider-specific concurrency. `ExecutionRun` starts the first stable
-undispatched tasks that fit the window, acknowledges the processed wake epoch,
-and suspends on the epoch promise plus its attached task-call handles. Each
-completed handle opens a slot for the next stable pending row.
+but pending and waiting rows are storage-only. The controller admits ready rows
+through tenant/fleet active-attempt buckets, dispatches at most
+`execution.dispatch_batch_size`, applies at most
+`execution.maximum_activation_steps`, commits its processed wake generation,
+and returns. `execution.max_in_flight_tasks` remains a per-run ceiling within
+the wider tenant/fleet admission and is independent of logical `max_tasks` and
+provider-specific concurrency.
 
 `ExecutionTaskId` is UUIDv5 over length-framed run UUID, node ID, and item key.
 Ordinary tasks use item key `""`, map tasks use the typed canonical extracted
@@ -486,17 +501,21 @@ binding without changing handler contracts.
 
 Core production bindings:
 
-- Virtual objects: `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO`.
+- Virtual objects: `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO`,
+  `ExecutionRunController`, and the fleet-keyed `ExecutionDispatchDrain` behind the stateless
+  head-coalescing `ExecutionDispatcher` router.
   `Session` and `Worker` additionally own the generation fence and the derived
   scheduling index for the action reviews their own turns raise.
 - Services: `ActionReviews`, `AgentDefinitions`, `Agents`,
   `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`,
-  `ConnectorConnections`, `Contacts`, `Execution`, `Experiments`,
+  `ConnectorConnections`, `Contacts`, `DurableTimeout`, `Execution`,
+  `ExecutionDispatcher`, `ExecutionDispatchReconciler`, `ExecutionRetention`, `ExecutionSchedule`,
+  `ExecutionTrigger`, `Experiments`,
   `GraphMemoryMaint`, `Knowledge`,
   `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`,
   `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy`
-- Workflows: `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`,
-  `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`,
+- Workflows: `KnowledgeSyncIngestion`, `Consolidate`, `ExecutionTaskAttempt`,
+  `ExecutionCompensationAttempt`, `ExperimentRun`, `ExperimentTrialRun`,
   `SkillLearning`, `TenantPurge`, `TurnExecution`, `WorkerTurnExecution`
 
 
@@ -542,10 +561,16 @@ child turn and reports turn-scoped mutations back to the VO. Segment assessment
 happens at turn, segment, idle, cancellation, and timeout boundaries as an
 auditable learning artifact, not as a live-loop control signal.
 
-`ExecutionRun` and `ExecutionTask` are the separate durable bulk-execution
-family. Their full state and aggregate counters come from execution persistence,
-not the `Session` VO. A run links to its owning session only for compact
-progress, exact input requests, and one deduplicated terminal synthesis turn.
+Long-horizon execution is a separate bounded-activation family. Postgres owns
+its complete run/task/compensation state and counters; Restate owns only short
+`ExecutionRunController`, `ExecutionTaskAttempt`, `ExecutionCompensationAttempt`,
+`ExecutionTrigger`, `ExecutionDispatcher`, `ExecutionDispatchDrain`, and
+`ExecutionDispatchReconciler`
+activations. `ExecutionSchedule` and `DurableTimeout` provide bounded schedule
+and timeout mutations, while `ExecutionRetention` archives or deletes one
+terminal-detail page per activation. A run links to its owning session only for compact progress, exact
+input requests, and one deduplicated terminal synthesis turn. Parked work owns
+no handler invocation, attempt reservation, or hand.
 
 Coordinator turns can return while detached workers keep running across
 non-sticky replicas. Cadence-limited turn progress is delivered directly from
@@ -604,7 +629,7 @@ User message
   -> TurnExecution selects Respond, Execute, or NeedsInput
        Respond: one model response, no tools or planning call
        Execute/Inline: bounded model/tool loop; optional Worker delegation
-       Execute/Durable: instantiate/compile, persist, and detach ExecutionRun
+       Execute/Durable: instantiate/compile, persist, and dispatch controller activation
        NeedsInput: deterministic bounded clarification
   -> Query rewrite may mark `is_new_task`
   -> SegmentTracker opens or rolls a task segment
@@ -785,7 +810,7 @@ separate surfaces:
   gateway. The typed decision and policy binding are terminal evidence.
   Execution targets invoke a serving skill revision's exact pinned `execution_plan`
   through the same origin-bound planning/admission path, start the common
-  `ExecutionRun`, and link its `execution_run_uid`. The `moa.experiment_run` row is the experiment ledger and
+  execution run, and link its `execution_run_uid`. The `moa.experiment_run` row is the experiment ledger and
   links to the session, execution run, pinned artifact revisions, and
   `analytics.score_run`.
   `ExperimentTrialRun` owns per-trial simulator execution. The public edge

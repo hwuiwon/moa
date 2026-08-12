@@ -15,7 +15,7 @@ use moa_core::{
     types::{
         action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
         identifiers::{ConnectorConnectionId, TenantId},
-        tools::IdempotencyClass,
+        tools::{IdempotencyClass, ToolAsyncMode},
     },
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
@@ -35,6 +35,8 @@ pub const AMENDMENT_OPERATIONS_HASH_DOMAIN: &str = "moa.execution.amendment-oper
 pub const FAILURE_HASH_DOMAIN: &str = "moa.execution.failure";
 /// Domain separator for structured task-output hashes.
 pub const TASK_OUTPUT_HASH_DOMAIN: &str = "moa.execution.task-output";
+/// Domain separator for persisted deterministic node-aggregate output hashes.
+pub const NODE_OUTPUT_HASH_DOMAIN: &str = "moa.execution.node-output";
 
 /// A 32-byte BLAKE3 digest serialized as 64 lowercase hexadecimal characters.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -227,8 +229,12 @@ pub struct ExecutionCapability {
     pub default_effect: ActionPolicyEffect,
     /// Replay and retry safety classification.
     pub idempotency_class: IdempotencyClass,
+    /// Provider completion mode pinned into the catalog hash.
+    pub async_mode: ToolAsyncMode,
     /// Resource-execution class.
     pub execution_class: ExecutionClass,
+    /// Whether invocation requires a live sandbox workspace.
+    pub requires_sandbox: bool,
     /// Source provenance for this catalog entry.
     pub source: CapabilitySource,
     /// Canonical policy floor and artifact identity carried to durable dispatch.
@@ -260,6 +266,28 @@ impl CapabilityRollbackContract {
 
 impl ExecutionCapability {
     pub(crate) fn validate_policy_context(&self) -> Result<()> {
+        if matches!(
+            self.source,
+            CapabilitySource::HandTool { .. } | CapabilitySource::SkillCode { .. }
+        ) && !self.requires_sandbox
+        {
+            return Err(Error::InvalidProjection {
+                message: format!(
+                    "capability {} source requires sandbox execution metadata",
+                    self.reference.name
+                ),
+            });
+        }
+        if let ToolAsyncMode::MayReturnExternalJob { provider } = &self.async_mode
+            && provider.trim().is_empty()
+        {
+            return Err(Error::InvalidProjection {
+                message: format!(
+                    "capability {} declares an empty external-job provider key",
+                    self.reference.name
+                ),
+            });
+        }
         if self.policy_context.source != self.source {
             return Err(Error::InvalidProjection {
                 message: format!(
@@ -727,6 +755,11 @@ pub fn task_output_hash(output: &Value) -> Result<ExecutionHash> {
     hash_serializable(TASK_OUTPUT_HASH_DOMAIN, output)
 }
 
+/// Computes a domain-separated hash of one deterministic node aggregate output.
+pub fn node_output_hash(output: &Value) -> Result<ExecutionHash> {
+    hash_serializable(NODE_OUTPUT_HASH_DOMAIN, output)
+}
+
 /// Computes a deterministic version string from owned capability metadata.
 pub fn capability_version(domain: &str, metadata: &Value) -> Result<String> {
     Ok(hash_serializable(domain, metadata)?.to_string())
@@ -786,7 +819,7 @@ mod tests {
     use moa_artifacts::reference::ArtifactRef;
     use moa_core::types::{
         action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
-        tools::IdempotencyClass,
+        tools::{IdempotencyClass, ToolAsyncMode},
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -811,7 +844,12 @@ mod tests {
             risk_level: RiskLevel::Low,
             default_effect: ActionPolicyEffect::Allow,
             idempotency_class: IdempotencyClass::Idempotent,
+            async_mode: ToolAsyncMode::SynchronousOnly,
             execution_class: ExecutionClass::Data,
+            requires_sandbox: matches!(
+                &source,
+                CapabilitySource::HandTool { .. } | CapabilitySource::SkillCode { .. }
+            ),
             source,
             policy_context,
             estimate: ExecutionEstimate {
@@ -856,6 +894,32 @@ mod tests {
                 .iter()
                 .all(|entry| entry.estimate.tasks == 1 && entry.estimate.tool_calls == 1)
         );
+    }
+
+    #[test]
+    fn capability_catalog_hash_pins_async_provider_mode() {
+        // Pins: changing whether a provider may return an external job changes
+        // the immutable dispatch contract and therefore must invalidate the
+        // catalog hash used by compiled plans and durable retries.
+        let synchronous = capability(
+            "render",
+            CapabilitySource::McpTool {
+                server: "renderer".to_string(),
+                tool_name: "mcp__renderer__render".to_string(),
+                remote_name: "render".to_string(),
+            },
+        );
+        let mut asynchronous = synchronous.clone();
+        asynchronous.async_mode = ToolAsyncMode::MayReturnExternalJob {
+            provider: "fixture-renderer".to_string(),
+        };
+
+        let synchronous = ExecutionCapabilityCatalog::build(vec![synchronous])
+            .expect("synchronous catalog must build");
+        let asynchronous = ExecutionCapabilityCatalog::build(vec![asynchronous])
+            .expect("asynchronous catalog must build");
+
+        assert_ne!(synchronous.catalog_hash, asynchronous.catalog_hash);
     }
 
     #[test]

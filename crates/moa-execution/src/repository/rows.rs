@@ -1,5 +1,6 @@
 //! PostgreSQL row decoding for execution repository projections.
 
+use super::audit::ExecutionPlanningContextRecord;
 use super::*;
 
 pub(super) fn planning_context_from_row(row: &PgRow) -> Result<ExecutionPlanningContextRecord> {
@@ -52,7 +53,52 @@ pub(super) fn run_from_row(row: &PgRow) -> Result<ExecutionRunRecord> {
             });
         }
     };
-    let waiting_reasons: Value = row.try_get("waiting_reasons").map_err(row_error)?;
+    let waiting_reasons: Vec<WaitingReason> =
+        serde_json::from_value(row.try_get("waiting_reasons").map_err(row_error)?)?;
+    let waiting_task_count = required_u64(row, "waiting_task_count")?;
+    let waiting_input_task_count = required_u64(row, "waiting_input_task_count")?;
+    let waiting_review_task_count = required_u64(row, "waiting_review_task_count")?;
+    let waiting_signal_task_count = required_u64(row, "waiting_signal_task_count")?;
+    let waiting_timer_task_count = required_u64(row, "waiting_timer_task_count")?;
+    let waiting_external_task_count = required_u64(row, "waiting_external_task_count")?;
+    let waiting_replan_task_count = required_u64(row, "waiting_replan_task_count")?;
+    let waiting_input_user_task_count = required_u64(row, "waiting_input_user_task_count")?;
+    let waiting_input_tenant_admin_task_count =
+        required_u64(row, "waiting_input_tenant_admin_task_count")?;
+    let waiting_input_external_task_count = required_u64(row, "waiting_input_external_task_count")?;
+    let waiting_reasons_truncated: bool = row
+        .try_get("waiting_reasons_truncated")
+        .map_err(row_error)?;
+    let classified_waiting_count = waiting_input_task_count
+        .checked_add(waiting_review_task_count)
+        .and_then(|count| count.checked_add(waiting_signal_task_count))
+        .and_then(|count| count.checked_add(waiting_timer_task_count))
+        .and_then(|count| count.checked_add(waiting_external_task_count))
+        .and_then(|count| count.checked_add(waiting_replan_task_count))
+        .ok_or_else(|| Error::ArithmeticOverflow {
+            context: "execution run waiting task count".to_string(),
+        })?;
+    let classified_input_count = waiting_input_user_task_count
+        .checked_add(waiting_input_tenant_admin_task_count)
+        .and_then(|count| count.checked_add(waiting_input_external_task_count))
+        .ok_or_else(|| Error::ArithmeticOverflow {
+            context: "execution run waiting input task count".to_string(),
+        })?;
+    let sample_count =
+        u64::try_from(waiting_reasons.len()).map_err(|_| Error::ArithmeticOverflow {
+            context: "execution run waiting reason sample".to_string(),
+        })?;
+    if classified_waiting_count != waiting_task_count
+        || classified_input_count != waiting_input_task_count
+        || sample_count > waiting_task_count
+        || waiting_reasons.len() > 64
+        || waiting_reasons_truncated != (sample_count < waiting_task_count)
+    {
+        return Err(Error::InvalidRepositoryData {
+            message: "execution run waiting counters disagree with the bounded reason sample"
+                .to_string(),
+        });
+    }
     let source_provenance: ExecutionSourceProvenance =
         serde_json::from_value(row.try_get("source_provenance").map_err(row_error)?)?;
     let source_kind = ExecutionSourceKind::from_str(
@@ -116,9 +162,17 @@ pub(super) fn run_from_row(row: &PgRow) -> Result<ExecutionRunRecord> {
     let contact_id: Option<Uuid> = row.try_get("contact_id").map_err(row_error)?;
     let session_id: Uuid = row.try_get("session_id").map_err(row_error)?;
     let owner_user_id: String = row.try_get("owner_user_id").map_err(row_error)?;
+    let tenant_id = TenantId(row.try_get("tenant_id").map_err(row_error)?);
+    let admitted_identity: Identity =
+        serde_json::from_value(row.try_get("admitted_identity").map_err(row_error)?)?;
+    if admitted_identity.tenant_id != tenant_id {
+        return Err(Error::InvalidRepositoryData {
+            message: "execution admitted identity tenant disagrees with run tenant".to_string(),
+        });
+    }
     Ok(ExecutionRunRecord {
         run_uid,
-        tenant_id: TenantId(row.try_get("tenant_id").map_err(row_error)?),
+        tenant_id,
         contact_id: contact_id.map(ContactId),
         session_id: SessionId(session_id),
         originating_user_sequence_num: required_u64(row, "originating_user_sequence_num")?,
@@ -128,6 +182,7 @@ pub(super) fn run_from_row(row: &PgRow) -> Result<ExecutionRunRecord> {
             .map_err(row_error)?
             .parse()?,
         owner_user_id: UserId::new(owner_user_id),
+        admitted_identity,
         goal: serde_json::from_value(goal_value)?,
         initial_plan: serde_json::from_value(initial_plan_value)?,
         active_plan: serde_json::from_value(active_plan_value)?,
@@ -165,6 +220,28 @@ pub(super) fn run_from_row(row: &PgRow) -> Result<ExecutionRunRecord> {
         terminal_evidence,
         terminal_reason,
         status,
+        controller_generation: required_u64(row, "controller_generation")?,
+        activation_state: ExecutionActivationState::from_str(
+            &row.try_get::<String, _>("activation_state")
+                .map_err(row_error)?,
+        )?,
+        next_wake_at: row.try_get("next_wake_at").map_err(row_error)?,
+        waiting_since: row.try_get("waiting_since").map_err(row_error)?,
+        last_progress_at: row.try_get("last_progress_at").map_err(row_error)?,
+        pause_requested_at: row.try_get("pause_requested_at").map_err(row_error)?,
+        paused_at: row.try_get("paused_at").map_err(row_error)?,
+        ready_task_count: required_u64(row, "ready_task_count")?,
+        active_task_count: required_u64(row, "active_task_count")?,
+        waiting_task_count,
+        waiting_input_task_count,
+        waiting_review_task_count,
+        waiting_signal_task_count,
+        waiting_timer_task_count,
+        waiting_external_task_count,
+        waiting_replan_task_count,
+        waiting_input_user_task_count,
+        waiting_input_tenant_admin_task_count,
+        waiting_input_external_task_count,
         approved_budget: ExecutionBudgetLimit {
             max_cost_microusd: optional_u64(row, "budget_max_cost_microusd")?,
             max_tokens: optional_u64(row, "budget_max_tokens")?,
@@ -180,7 +257,8 @@ pub(super) fn run_from_row(row: &PgRow) -> Result<ExecutionRunRecord> {
         progress_completed_tasks: required_u64(row, "progress_completed_tasks")?,
         progress_failed_tasks: required_u64(row, "progress_failed_tasks")?,
         progress_cancelled_tasks: required_u64(row, "progress_cancelled_tasks")?,
-        waiting_reasons: serde_json::from_value(waiting_reasons)?,
+        waiting_reasons,
+        waiting_reasons_truncated,
         wake_epoch: required_u64(row, "wake_epoch")?,
         processed_wake_epoch: required_u64(row, "processed_wake_epoch")?,
         next_compensation_sequence: required_u64(row, "next_compensation_sequence")?,
@@ -224,6 +302,19 @@ pub(super) fn task_from_row(row: &PgRow) -> Result<ExecutionTaskRecord> {
         )?,
         attempt: to_u32(row.try_get("attempt").map_err(row_error)?, "attempt")?,
         generation: required_u64(row, "generation")?,
+        attempt_generation: required_u64(row, "attempt_generation")?,
+        attempt_state: ExecutionAttemptState::from_str(
+            &row.try_get::<String, _>("attempt_state")
+                .map_err(row_error)?,
+        )?,
+        attempt_started_at: row.try_get("attempt_started_at").map_err(row_error)?,
+        last_progress_at: row.try_get("last_progress_at").map_err(row_error)?,
+        attempt_deadline_at: row.try_get("attempt_deadline_at").map_err(row_error)?,
+        waiting_since: row.try_get("waiting_since").map_err(row_error)?,
+        ready_at: row.try_get("ready_at").map_err(row_error)?,
+        external_job_uid: row.try_get("external_job_uid").map_err(row_error)?,
+        active_dispatch_uid: row.try_get("active_dispatch_uid").map_err(row_error)?,
+        dispatch_sequence: required_u64(row, "dispatch_sequence")?,
         input: row.try_get("input").map_err(row_error)?,
         resume_input_history: serde_json::from_value(resume_input_history)?,
         kind: serde_json::from_value(kind)?,

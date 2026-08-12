@@ -77,6 +77,7 @@ pub fn reversible_fixture_tool_definitions() -> (
         schema: input_schema.clone(),
         policy: policy.clone(),
         idempotency_class: IdempotencyClass::NonIdempotent,
+        async_mode: moa_core::types::tools::ToolAsyncMode::SynchronousOnly,
         rollback: Some(ToolRollbackDefinition {
             compensator_tool_name: REVERSIBLE_FIXTURE_COMPENSATOR_TOOL.to_string(),
             input_mapping: ToolRollbackInputMapping {
@@ -97,6 +98,7 @@ pub fn reversible_fixture_tool_definitions() -> (
         schema: input_schema,
         policy,
         idempotency_class: IdempotencyClass::Idempotent,
+        async_mode: moa_core::types::tools::ToolAsyncMode::SynchronousOnly,
         rollback: None,
         max_output_tokens: 128,
     };

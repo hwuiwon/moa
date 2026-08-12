@@ -837,7 +837,8 @@ async fn handle_tool_call(
             )
             .await?;
         }
-        GovernedInvocationOutcome::UnknownOutcome { .. }
+        GovernedInvocationOutcome::ExternalJob { .. }
+        | GovernedInvocationOutcome::UnknownOutcome { .. }
         | GovernedInvocationOutcome::NotDispatched { .. } => {
             return Err(TerminalError::new(
                 "worker-origin governed invocation returned an execution-only outcome",

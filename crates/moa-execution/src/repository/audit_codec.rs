@@ -1,5 +1,6 @@
 //! Normalized planning-audit identities, labels, and row codecs.
 
+use super::audit::{CompileAuditEvidence, PlannerCallAuditEvidence, RouteAuditEvidence};
 use super::rows::{optional_u64, required_u64};
 use super::*;
 

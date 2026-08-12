@@ -30,6 +30,12 @@ definition:
               kind: output_schema
       plan:
         cancel_policy: retain_effects
+        input_wait_policy:
+          expiry:
+            kind: after
+            delay_seconds: 86400
+          on_expiry:
+            kind: fail_run
         input_schema:
           type: object
         output_schema:
@@ -82,6 +88,12 @@ definition:
             operation:
               kind: review
               prompt: Review gathered evidence before issuing a refund.
+              wait_policy:
+                expiry:
+                  kind: after
+                  delay_seconds: 86400
+                on_expiry:
+                  kind: fail_run
             compensation: null
             retry:
               max_attempts: 1

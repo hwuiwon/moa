@@ -595,6 +595,7 @@ async fn e2b_workspace_restores_into_fresh_compute_live() {
                     ),
                     hand: source.clone(),
                     parent_revision: source_binding.current_revision.clone(),
+                    release_compute: false,
                 },
             )
             .await

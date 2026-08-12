@@ -30,7 +30,7 @@ spec:
             severity: critical
           annotations:
             summary: The supervised workspace reaper is unready
-            description: "At least one serving replica reports an unready workspace reaper. Readiness should drain it; verify the job result and do not disable maintenance while durable work remains."
+            description: "The singleton maintenance owner reports an unready workspace reaper or publishes no series. Verify its supervised job result and do not disable maintenance while durable work remains."
             runbook_url: https://github.com/hwuiwon/moa/blob/main/docs/19-data-operations.md#workspace-reaper-failure
 
         - alert: MOASandboxWorkspaceReaperHeartbeatStale
@@ -40,7 +40,7 @@ spec:
             severity: critical
           annotations:
             summary: The workspace reaper heartbeat is stale
-            description: "The oldest workspace reaper heartbeat is {{ $value }} seconds old (threshold 120s). Treat the replica as unready and inspect the supervised job before restarting it."
+            description: "The workspace reaper heartbeat is {{ $value }} seconds old (threshold 120s). Treat maintenance as unready and inspect the supervised job before restarting it."
             runbook_url: https://github.com/hwuiwon/moa/blob/main/docs/19-data-operations.md#workspace-reaper-failure
 
         - alert: MOASandboxWorkspaceReaperBacklogAge
@@ -82,3 +82,13 @@ spec:
             summary: Provider inventory differs from durable MOA ownership
             description: "{{ $value }} unresolved {{ $labels.classification }} findings exist for {{ $labels.provider_kind }}. Findings are quarantined and must never be auto-deleted; prove ownership and absence before resolving them."
             runbook_url: https://github.com/hwuiwon/moa/blob/main/docs/19-data-operations.md#provider-inventory-drift
+
+        - alert: MOASandboxParkedTaskRetainsActiveHand
+          expr: max(moa_sandbox_workspace_parked_tasks_with_active_hands) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: Parked execution work is retaining sandbox compute
+            description: "{{ $value }} parked execution tasks still own an active hand. Checkpoint-and-release is a correctness and cost invariant; fence the affected attempts before cleanup."
+            runbook_url: https://github.com/hwuiwon/moa/blob/main/docs/19-data-operations.md#workspace-reaper-failure

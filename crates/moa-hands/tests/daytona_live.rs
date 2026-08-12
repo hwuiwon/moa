@@ -989,6 +989,7 @@ async fn daytona_volume_workspace_survives_compute_replacement_live() {
                     .await,
                     hand: source.clone(),
                     parent_revision: None,
+                    release_compute: false,
                 },
             )
             .await?;
@@ -1132,6 +1133,7 @@ async fn daytona_workspace_restores_after_tenant_volume_replacement_live() {
                     .await,
                     hand: source.clone(),
                     parent_revision: None,
+                    release_compute: false,
                 },
             )
             .await?

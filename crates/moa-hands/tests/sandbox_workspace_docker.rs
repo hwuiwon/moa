@@ -357,6 +357,7 @@ async fn docker_compute_replacement_restores_committed_workspace_from_rustfs() {
             operation: commit_operation,
             hand: first.clone(),
             parent_revision: binding.current_revision.clone(),
+            release_compute: false,
         })
         .await
         .expect("commit encrypted portable checkpoint");

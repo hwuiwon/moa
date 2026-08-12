@@ -663,15 +663,15 @@ async fn maintenance_reaper_crosses_tenants_without_exposing_a_foreground_bypass
     .expect("expire both tenant leases");
 
     let tenant_a_rows = store
-        .list_session(tenants[0], sessions[0])
+        .list_live_session_page(tenants[0], sessions[0], None)
         .await
         .expect("tenant A lists its own session");
     let tenant_a_cross_rows = store
-        .list_session(tenants[0], sessions[1])
+        .list_live_session_page(tenants[0], sessions[1], None)
         .await
         .expect("tenant A cross-session query is filtered");
-    assert_eq!(tenant_a_rows.len(), 1);
-    assert!(tenant_a_cross_rows.is_empty());
+    assert_eq!(tenant_a_rows.leases.len(), 1);
+    assert!(tenant_a_cross_rows.leases.is_empty());
 
     let claims = PostgresExpiredHandLeaseClaims::new(pool.clone())
         .claim_expired(64, Duration::from_secs(300))

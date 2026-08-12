@@ -365,7 +365,7 @@ services:
     environment:
       MOA_EDGE_BIND: 0.0.0.0:8080
       MOA_EDGE_UPSTREAM: http://restate:8080
-      MOA_EDGE_CONNECTOR_CREDENTIAL_UPSTREAM: http://moa-orchestrator:10023
+      MOA_EDGE_INTERNAL_INGRESS_UPSTREAM: http://moa-orchestrator:10023
       # Local development opts into the staged connector-management surface.
       MOA_EDGE_CONNECTOR_MANAGEMENT_ENABLED: "true"
       MOA_DATABASE_URL: postgres://moa_owner:${POSTGRES_PASSWORD:-dev}@postgres:5432/moa?sslmode=disable

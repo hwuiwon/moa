@@ -38,7 +38,7 @@ use moa_eval_core::types::TEST_CASE_SCHEMA_VERSION;
 use moa_execution::{
     CompileExecutionOutcome, CompileExecutionRequest, ExecutionValidationReport,
     ExecutionValidationSeverity, compile,
-    repository::{CompileAuditWriteOutcome, ExecutionRepository, ExecutionScope},
+    repository::{ExecutionRepository, ExecutionScope, audit::CompileAuditWriteOutcome},
     schema::validate_instance,
     state::ExecutionRunStatus,
     wire::{
@@ -1004,6 +1004,14 @@ pub(super) async fn run_execution_template_trial(
         trial.trial_uid,
     )
     .await?;
+    let now = durable_utc_now(ctx, "experiment_trial_execution_compile_now").await?;
+    let horizon_seconds = i64::try_from(config.execution.maximum_horizon_seconds)
+        .map_err(|_| TerminalError::new("execution maximum horizon does not fit i64"))?;
+    let horizon = chrono::TimeDelta::try_seconds(horizon_seconds)
+        .ok_or_else(|| TerminalError::new("execution maximum horizon does not fit chrono"))?;
+    let deadline_at = now
+        .checked_add_signed(horizon)
+        .ok_or_else(|| TerminalError::new("execution maximum horizon exceeds timestamp range"))?;
     let planning_call = ctx
         .service_client::<ExecutionClient>()
         .planning_context(Json::from(ExecutionPlanningContextRequest {
@@ -1011,6 +1019,7 @@ pub(super) async fn run_execution_template_trial(
             contact_id: effective.contact_id,
             session_id: effective.session_id,
             originating_user_sequence_num: origin.sequence_num,
+            deadline_at,
             requested_template: Some(template.clone()),
         }));
     let planning_context = with_identity_headers(planning_call, &request.identity)
@@ -1019,7 +1028,6 @@ pub(super) async fn run_execution_template_trial(
         .into_inner();
     let operation_key =
         experiment_trial_operation_key(trial.run_uid, trial.score_run_id, trial.trial_uid);
-    let now = durable_utc_now(ctx, "experiment_trial_execution_compile_now").await?;
     let compiled = compile_experiment_template(ExperimentTemplateCompileRequest {
         context: &planning_context.snapshot,
         requested: &template,
@@ -2349,7 +2357,13 @@ fn trial_stop_for_execution_run_status(status: ExecutionRunStatus) -> Option<Wor
         | ExecutionRunStatus::Running
         | ExecutionRunStatus::WaitingInput
         | ExecutionRunStatus::WaitingReview
+        | ExecutionRunStatus::WaitingSignal
+        | ExecutionRunStatus::WaitingTimer
+        | ExecutionRunStatus::WaitingExternal
         | ExecutionRunStatus::WaitingReplan
+        | ExecutionRunStatus::PauseRequested
+        | ExecutionRunStatus::Pausing
+        | ExecutionRunStatus::Paused
         | ExecutionRunStatus::Compensating => None,
     }
 }

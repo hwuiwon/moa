@@ -3,7 +3,10 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_authz::{AwakeableResolveError, AwakeableResolver};
-use moa_orchestrator::services::authz_challenges_reaper::AuthzChallengeReaper;
+use moa_orchestrator::services::{
+    authz_challenges_reaper::{AuthzChallengeReaper, AuthzChallengeTimeoutDelivery},
+    durable_timeout::AuthzChallengeTimeout,
+};
 use moa_test_support::fixtures::quote_identifier;
 use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -114,6 +117,73 @@ async fn concurrent_reapers_resolve_terminal_challenge_once_db() {
     );
 }
 
+#[tokio::test]
+async fn durable_timeout_requires_the_exact_authz_awakeable_incarnation_db() {
+    // Pins: a delayed timeout cannot resolve or terminalize a replacement
+    // awakeable; the exact id/awakeable incarnation is claimed only once.
+    let pool = test_pool().await;
+    let challenge_id = insert_expired_pending_challenge(&pool, "awakeable-current").await;
+    let reaper = AuthzChallengeReaper::new(pool.clone());
+
+    let stale = reaper
+        .apply_timeout(&AuthzChallengeTimeout {
+            challenge_id,
+            awakeable_id: "awakeable-older-incarnation".to_string(),
+        })
+        .await
+        .expect("stale timeout should be a no-op");
+    assert_eq!(stale, AuthzChallengeTimeoutDelivery::Stale);
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM builtin_pending_approvals WHERE id = $1")
+            .bind(challenge_id)
+            .fetch_one(&pool)
+            .await
+            .expect("challenge status should load");
+    assert_eq!(status, "pending", "stale awakeable must not fail closed");
+
+    let exact = AuthzChallengeTimeout {
+        challenge_id,
+        awakeable_id: "awakeable-current".to_string(),
+    };
+    let delivery = reaper
+        .apply_timeout(&exact)
+        .await
+        .expect("exact timeout should apply");
+    let AuthzChallengeTimeoutDelivery::Resolve {
+        challenge_id: delivered_challenge_id,
+        awakeable_id,
+        resolve_claim_token,
+        newly_timed_out,
+    } = delivery
+    else {
+        panic!("exact timeout should return its claimed awakeable delivery");
+    };
+    assert_eq!(delivered_challenge_id, challenge_id);
+    assert_eq!(awakeable_id, "awakeable-current");
+    assert!(newly_timed_out, "the first exact timeout changes the row");
+    let (status, stored_claim): (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT status, resolve_claim_token FROM builtin_pending_approvals WHERE id = $1",
+    )
+    .bind(challenge_id)
+    .fetch_one(&pool)
+    .await
+    .expect("claimed challenge state should load");
+    assert_eq!(status, "timeout");
+    assert_eq!(
+        stored_claim,
+        Some(resolve_claim_token),
+        "the returned delivery token must be the transaction's durable claim"
+    );
+    assert_eq!(
+        reaper
+            .apply_timeout(&exact)
+            .await
+            .expect("claimed timeout replay should be a no-op"),
+        AuthzChallengeTimeoutDelivery::AlreadyDelivered,
+        "the exact resolution claim prevents duplicate delivery"
+    );
+}
+
 async fn test_pool() -> PgPool {
     let database_url = std::env::var("MOA_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://moa_owner:dev@localhost:10040/moa".to_string());
@@ -203,6 +273,29 @@ async fn insert_terminal_challenge(
     .execute(pool)
     .await
     .expect("terminal challenge should insert");
+    challenge_id
+}
+
+async fn insert_expired_pending_challenge(pool: &PgPool, awakeable_id: &str) -> Uuid {
+    let challenge_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO builtin_pending_approvals
+            (id, session_id, deciding_user_id, tenant_id, awakeable_id,
+             action_summary, action_details, status, expires_at)
+        VALUES
+            ($1, $2, $3, $4, $5, 'approve deploy', '{}'::jsonb,
+             'pending', NOW() - INTERVAL '1 minute')
+        "#,
+    )
+    .bind(challenge_id)
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind(awakeable_id)
+    .execute(pool)
+    .await
+    .expect("expired pending challenge should insert");
     challenge_id
 }
 

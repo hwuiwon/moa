@@ -6,6 +6,9 @@ mod validation;
 
 use amendment::*;
 use estimate::*;
+use validation::activation_bounds::{
+    validate_completion_activation_bounds, validate_plan_activation_bound,
+};
 use validation::schema_references::{validate_declared_reference_paths, validate_schemas};
 use validation::{
     append_artifact_reports, append_error, validate_amendment_reference_narrowing,
@@ -18,8 +21,8 @@ use chrono::{DateTime, Utc};
 use moa_artifacts::{
     execution_plan::{
         CompletionCheckKind, ExecutionBudgetLimit, ExecutionGoalContract, ExecutionNode,
-        ExecutionOperation, ExecutionPlanDefinition, ExecutionReducer, MapTask, PlanAmendment,
-        PlanAmendmentOperation,
+        ExecutionOperation, ExecutionPlanDefinition, ExecutionReducer, ExecutionTemporalTarget,
+        ExecutionWaitExpiryAction, MapTask, PlanAmendment, PlanAmendmentOperation,
     },
     reference::ArtifactRef,
     validation::{validate_execution_goal_contract, validate_execution_plan_definition},
@@ -38,7 +41,7 @@ use crate::{
         ExecutionEstimate, ExecutionHash, canonical_sort_key, catalog_hash, plan_hash,
     },
     schema::validate_instance,
-    state::{ExecutionNodeStatus, ExecutionProjection, ExecutionTaskStatus},
+    state::{ExecutionAmendmentProjection, ExecutionNodeStatus, ExecutionTaskStatus},
 };
 
 /// Complete input to deterministic initial execution compilation.
@@ -74,7 +77,7 @@ pub struct ValidateAmendmentRequest {
     /// Restricted pending/downstream patch.
     pub amendment: PlanAmendment,
     /// Current durable run projection.
-    pub projection: ExecutionProjection,
+    pub projection: ExecutionAmendmentProjection,
     /// Current immutable capability catalog.
     pub catalog: ExecutionCapabilityCatalog,
     /// Original immutable authorization envelope.
@@ -197,6 +200,8 @@ pub fn compile(request: CompileExecutionRequest) -> CompileExecutionOutcome {
     let mut report = ExecutionValidationReport::default();
     append_artifact_reports(&request.goal, &request.plan, &mut report);
     validate_goal_plan_links(&request.goal, &request.plan, &mut report);
+    validate_plan_activation_bound(&request.plan, &request.config, &mut report);
+    validate_completion_activation_bounds(&request.goal, &request.config, &mut report);
     validate_catalog(&request.catalog, &mut report);
     validate_authorization(&request.authorization, &mut report);
     validate_schemas(&request.goal, &request.plan, &mut report);
@@ -214,18 +219,15 @@ pub fn compile(request: CompileExecutionRequest) -> CompileExecutionOutcome {
         &request.authorization,
         &mut report,
     );
-
-    if request
-        .approved_budget
-        .deadline_at
-        .is_some_and(|deadline| request.now > deadline)
-    {
-        report.error(
-            "deadline_exceeded",
-            "approved_budget.deadline_at",
-            "approved execution deadline has already elapsed",
-        );
-    }
+    append_execution_config_validation(&request.config, &mut report);
+    validate_temporal_contract(
+        &request.plan,
+        request.approved_budget.deadline_at,
+        request.now,
+        &request.config,
+        "approved_budget.deadline_at",
+        &mut report,
+    );
 
     let estimate = estimate_plan(
         &request.goal,
@@ -344,6 +346,8 @@ pub fn validate_amendment(request: ValidateAmendmentRequest) -> AmendmentValidat
 
     append_artifact_reports(&request.goal, &definition, &mut report);
     validate_goal_plan_links(&request.goal, &definition, &mut report);
+    validate_plan_activation_bound(&definition, &request.config, &mut report);
+    validate_completion_activation_bounds(&request.goal, &request.config, &mut report);
     validate_schemas(&request.goal, &definition, &mut report);
     validate_declared_reference_paths(&request.goal, &definition, &mut report);
     validate_plan_references(
@@ -353,17 +357,15 @@ pub fn validate_amendment(request: ValidateAmendmentRequest) -> AmendmentValidat
         &mut report,
     );
 
-    if request
-        .remaining_budget
-        .deadline_at
-        .is_some_and(|deadline| request.now > deadline)
-    {
-        report.error(
-            "deadline_exceeded",
-            "remaining_budget.deadline_at",
-            "execution deadline has already elapsed",
-        );
-    }
+    append_execution_config_validation(&request.config, &mut report);
+    validate_temporal_contract(
+        &definition,
+        request.remaining_budget.deadline_at,
+        request.now,
+        &request.config,
+        "remaining_budget.deadline_at",
+        &mut report,
+    );
 
     let full_estimate = estimate_plan(
         &request.goal,
@@ -430,6 +432,190 @@ pub fn validate_amendment(request: ValidateAmendmentRequest) -> AmendmentValidat
         }),
         remaining_estimate,
         report,
+    }
+}
+
+fn append_execution_config_validation(
+    config: &ExecutionConfig,
+    report: &mut ExecutionValidationReport,
+) {
+    if let Err(error) = config.validate() {
+        report.error("invalid_execution_config", "config", error.to_string());
+    }
+}
+
+fn validate_temporal_contract(
+    plan: &ExecutionPlanDefinition,
+    deadline_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    config: &ExecutionConfig,
+    deadline_path: &str,
+    report: &mut ExecutionValidationReport,
+) {
+    let Some(deadline_at) = deadline_at else {
+        report.error(
+            "missing_deadline",
+            deadline_path,
+            "durable execution requires an absolute deadline",
+        );
+        return;
+    };
+    if deadline_at <= now {
+        report.error(
+            "deadline_exceeded",
+            deadline_path,
+            "execution deadline must be later than the validation time",
+        );
+        return;
+    }
+    let horizon_seconds = deadline_at
+        .signed_duration_since(now)
+        .to_std()
+        .map(|duration| duration.as_secs());
+    if !matches!(
+        horizon_seconds,
+        Ok(seconds) if seconds <= config.maximum_horizon_seconds
+    ) {
+        report.error(
+            "deadline_out_of_horizon",
+            deadline_path,
+            format!(
+                "execution deadline exceeds the configured maximum horizon of {} seconds",
+                config.maximum_horizon_seconds
+            ),
+        );
+    }
+
+    validate_wait_policy(
+        &plan.input_wait_policy,
+        "plan.input_wait_policy",
+        now,
+        deadline_at,
+        report,
+    );
+    for (index, node) in plan.nodes.iter().enumerate() {
+        let path = format!("plan.nodes[{index}].operation");
+        match &node.operation {
+            ExecutionOperation::Review { wait_policy, .. }
+            | ExecutionOperation::WaitSignal { wait_policy, .. } => {
+                validate_wait_policy(
+                    wait_policy,
+                    &format!("{path}.wait_policy"),
+                    now,
+                    deadline_at,
+                    report,
+                );
+                if let ExecutionWaitExpiryAction::ContinueWith { output } = &wait_policy.on_expiry
+                    && let Err(error) = validate_instance(
+                        &node.output_schema,
+                        output,
+                        "wait_policy.on_expiry.output",
+                    )
+                {
+                    append_error(
+                        report,
+                        "invalid_wait_expiry_output",
+                        format!("{path}.wait_policy.on_expiry.output"),
+                        error,
+                    );
+                }
+            }
+            ExecutionOperation::WaitUntil { wake, result } => {
+                validate_temporal_target(wake, &format!("{path}.wake"), now, deadline_at, report);
+                if !value_contains_binding(result)
+                    && let Err(error) =
+                        validate_instance(&node.output_schema, result, "wait_until.result")
+                {
+                    append_error(
+                        report,
+                        "invalid_wait_until_result",
+                        format!("{path}.result"),
+                        error,
+                    );
+                }
+            }
+            ExecutionOperation::Capability { .. }
+            | ExecutionOperation::Agent { .. }
+            | ExecutionOperation::Map { .. }
+            | ExecutionOperation::Reduce { .. }
+            | ExecutionOperation::Output { .. } => {}
+        }
+    }
+}
+
+fn validate_wait_policy(
+    policy: &moa_artifacts::execution_plan::ExecutionWaitPolicy,
+    path: &str,
+    now: DateTime<Utc>,
+    deadline_at: DateTime<Utc>,
+    report: &mut ExecutionValidationReport,
+) {
+    validate_temporal_target(
+        &policy.expiry,
+        &format!("{path}.expiry"),
+        now,
+        deadline_at,
+        report,
+    );
+}
+
+fn validate_temporal_target(
+    target: &ExecutionTemporalTarget,
+    path: &str,
+    now: DateTime<Utc>,
+    deadline_at: DateTime<Utc>,
+    report: &mut ExecutionValidationReport,
+) {
+    match target {
+        ExecutionTemporalTarget::At { at } => {
+            if *at <= now {
+                report.error(
+                    "temporal_target_elapsed",
+                    path,
+                    "absolute temporal target must be later than the validation time",
+                );
+            }
+            if *at >= deadline_at {
+                report.error(
+                    "temporal_target_after_deadline",
+                    path,
+                    "temporal target must be earlier than the run deadline",
+                );
+            }
+        }
+        ExecutionTemporalTarget::After { delay_seconds } => {
+            let remaining_seconds = deadline_at
+                .signed_duration_since(now)
+                .to_std()
+                .map(|duration| duration.as_secs())
+                .unwrap_or_default();
+            if *delay_seconds == 0 {
+                report.error(
+                    "temporal_delay_zero",
+                    path,
+                    "relative temporal delay must be greater than zero",
+                );
+            } else if *delay_seconds >= remaining_seconds {
+                report.error(
+                    "temporal_target_after_deadline",
+                    path,
+                    "relative temporal delay must fit strictly inside the remaining run horizon",
+                );
+            }
+        }
+    }
+}
+
+fn value_contains_binding(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            object.contains_key("$ref")
+                || object.contains_key("$item")
+                || object.contains_key("$item_key")
+                || object.values().any(value_contains_binding)
+        }
+        Value::Array(values) => values.iter().any(value_contains_binding),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
     }
 }
 

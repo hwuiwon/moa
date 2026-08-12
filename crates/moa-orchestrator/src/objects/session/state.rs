@@ -162,13 +162,33 @@ pub struct ResumeTurnContext {
     pub consumed_signal_ids: Vec<AgentSignalId>,
 }
 
-/// Exact aggregate tuple used for execution-progress delta gating.
+/// Exact public projection signature used for execution-progress delta gating.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionProgressSignature {
     /// Active immutable plan revision.
     pub plan_revision: u64,
     /// Exhaustively mapped durable run status.
     pub status: String,
+    /// Public active, parked, or pause-state distinction.
+    pub phase: moa_core::events::ExecutionProgressPhase,
+    /// Time at which the current storage-only wait began.
+    pub waiting_since: Option<DateTime<Utc>>,
+    /// Earliest durable controller reactivation time.
+    pub next_wake_at: Option<DateTime<Utc>>,
+    /// Latest durable scheduler progress time.
+    pub last_progress_at: DateTime<Utc>,
+    /// Exact provider job when this projection is task-qualified.
+    pub external_job_uid: Option<uuid::Uuid>,
+    /// Exact ready logical task count.
+    pub ready_tasks: u64,
+    /// Exact active task-attempt count.
+    pub active_tasks: u64,
+    /// Exact durably parked logical task count.
+    pub parked_tasks: u64,
+    /// Highest-priority audience expected to resolve the current blocker.
+    pub blocker_audience: Option<moa_core::events::ExecutionBlockerAudience>,
+    /// Exact unconsumed and unreserved execution budget.
+    pub remaining_budget: moa_core::events::ExecutionRemainingBudget,
     /// Materialized logical task count.
     pub total: u64,
     /// Successfully completed logical task count.
@@ -184,6 +204,16 @@ impl From<&moa_core::events::ExecutionProgress> for ExecutionProgressSignature {
         Self {
             plan_revision: progress.plan_revision,
             status: progress.status.clone(),
+            phase: progress.phase,
+            waiting_since: progress.waiting_since,
+            next_wake_at: progress.next_wake_at,
+            last_progress_at: progress.last_progress_at,
+            external_job_uid: progress.external_job_uid,
+            ready_tasks: progress.ready_tasks,
+            active_tasks: progress.active_tasks,
+            parked_tasks: progress.parked_tasks,
+            blocker_audience: progress.blocker_audience,
+            remaining_budget: progress.remaining_budget.clone(),
             total: progress.total,
             completed: progress.completed,
             failed: progress.failed,
@@ -201,7 +231,7 @@ pub struct ActiveExecutionRunState {
     pub originating_user_sequence_num: u64,
     /// Last aggregate progress published by the Session VO.
     pub progress: Option<moa_core::events::ExecutionProgress>,
-    /// Exact aggregate tuple corresponding to the last progress publication.
+    /// Exact public projection signature corresponding to the last progress publication.
     pub last_progress_signature: Option<ExecutionProgressSignature>,
     /// Durable time of the last progress publication.
     pub last_progress_at: Option<DateTime<Utc>>,

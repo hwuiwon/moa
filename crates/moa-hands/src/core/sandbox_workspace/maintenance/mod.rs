@@ -76,7 +76,7 @@ pub struct WorkspaceRetentionPass {
 /// One provider-inventory reconciliation pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkspaceInventoryPass {
-    /// Provider-account generations observed.
+    /// Provider-account generations exclusively claimed by this replica.
     pub accounts: u64,
     /// Provider resources observed.
     pub resources: u64,
@@ -150,6 +150,7 @@ pub struct WorkspaceMaintenanceCoordinator {
     hand_providers: Arc<HashMap<String, Arc<dyn HandProvider>>>,
     retention: CheckpointRetentionConfig,
     reconciliation_claim_ttl: Duration,
+    inventory_claim_owner: Uuid,
 }
 
 impl WorkspaceMaintenanceCoordinator {
@@ -259,6 +260,7 @@ impl WorkspaceMaintenanceCoordinator {
             hand_providers: Arc::new(hand_providers),
             retention,
             reconciliation_claim_ttl,
+            inventory_claim_owner: Uuid::now_v7(),
         })
     }
 

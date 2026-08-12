@@ -94,6 +94,102 @@ impl WorkerFanInSettledKind {
     }
 }
 
+/// Bounded nonterminal execution phases exported for fleet run counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionRunMetricPhase {
+    /// Accepted work waiting for controller activation.
+    Queued,
+    /// Work currently advancing or running an attempt.
+    Running,
+    /// Storage-only wait for user or external input.
+    WaitingInput,
+    /// Storage-only wait for tenant review.
+    WaitingReview,
+    /// Storage-only wait for a named signal.
+    WaitingSignal,
+    /// Storage-only wait for an exact durable timer.
+    WaitingTimer,
+    /// Storage-only wait for an asynchronous external job.
+    WaitingExternal,
+    /// A pause has been requested but active work is still settling.
+    PauseRequested,
+    /// The run is checkpointing and releasing resources before pausing.
+    Pausing,
+    /// The run is fully parked by an operator request.
+    Paused,
+    /// The run is reversing committed compensatable effects.
+    Compensating,
+}
+
+impl ExecutionRunMetricPhase {
+    /// Returns the stable low-cardinality phase label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::WaitingInput => "waiting_input",
+            Self::WaitingReview => "waiting_review",
+            Self::WaitingSignal => "waiting_signal",
+            Self::WaitingTimer => "waiting_timer",
+            Self::WaitingExternal => "waiting_external",
+            Self::PauseRequested => "pause_requested",
+            Self::Pausing => "pausing",
+            Self::Paused => "paused",
+            Self::Compensating => "compensating",
+        }
+    }
+}
+
+/// Bounded long-horizon resources governed by execution admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionAdmissionResource {
+    /// Nonterminal runs that are not fully parked.
+    ActiveRuns,
+    /// Task attempts currently holding active-compute reservations.
+    ActiveAttempts,
+    /// Runs retained in storage-only waiting or paused states.
+    ParkedRuns,
+    /// Pending durable trigger rows.
+    ScheduledTriggers,
+    /// Nonterminal asynchronous provider jobs.
+    ExternalJobs,
+}
+
+impl ExecutionAdmissionResource {
+    /// Returns the stable low-cardinality resource label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ActiveRuns => "active_runs",
+            Self::ActiveAttempts => "active_attempts",
+            Self::ParkedRuns => "parked_runs",
+            Self::ScheduledTriggers => "scheduled_triggers",
+            Self::ExternalJobs => "external_jobs",
+        }
+    }
+}
+
+/// Bounded aggregation scopes for execution admission utilization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionAdmissionScope {
+    /// Utilization of the shared fleet ceiling.
+    Fleet,
+    /// Highest utilization observed across tenant-scoped ceilings.
+    TenantPeak,
+}
+
+impl ExecutionAdmissionScope {
+    /// Returns the stable low-cardinality aggregation-scope label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fleet => "fleet",
+            Self::TenantPeak => "tenant_peak",
+        }
+    }
+}
+
 /// Bounded sandbox-provider classes permitted on workspace metric labels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxWorkspaceProviderKind {
@@ -963,6 +1059,152 @@ pub fn record_execution_owned_in_flight_tasks(count: usize) {
     histogram!("moa_execution_owned_in_flight_tasks").record(count as f64);
 }
 
+/// Sets the current fleet count for one bounded nonterminal execution phase.
+pub fn record_execution_run_phase(phase: ExecutionRunMetricPhase, count: u64) {
+    gauge!("moa_execution_runs", "phase" => phase.as_str()).set(count as f64);
+}
+
+/// Sets the age of the oldest task currently ready for dispatch.
+pub fn record_execution_oldest_ready_age(age: Duration) {
+    gauge!("moa_execution_oldest_ready_age_seconds").set(age.as_secs_f64());
+}
+
+/// Sets the number of nonterminal runs whose absolute deadline has elapsed.
+pub fn record_execution_overdue_deadlines(count: u64) {
+    gauge!("moa_execution_overdue_deadlines").set(count as f64);
+}
+
+/// Sets trigger delivery lag, capped depth, and sample-completeness from one fleet snapshot.
+pub fn record_execution_trigger_queue(
+    lag: Duration,
+    due_triggers: u64,
+    due_sample_saturated: bool,
+    dead_letters: u64,
+    dead_letter_sample_saturated: bool,
+) {
+    gauge!("moa_execution_trigger_lag_seconds").set(lag.as_secs_f64());
+    gauge!("moa_execution_trigger_due").set(due_triggers as f64);
+    gauge!("moa_execution_trigger_dead_letters").set(dead_letters as f64);
+    gauge!(
+        "moa_execution_queue_sample_saturated",
+        "queue" => "trigger",
+        "sample" => "due"
+    )
+    .set(if due_sample_saturated { 1.0 } else { 0.0 });
+    gauge!(
+        "moa_execution_queue_sample_saturated",
+        "queue" => "trigger",
+        "sample" => "dead_letter"
+    )
+    .set(if dead_letter_sample_saturated {
+        1.0
+    } else {
+        0.0
+    });
+}
+
+/// Sets outbox delivery lag, capped depth, and sample-completeness from one fleet snapshot.
+pub fn record_execution_outbox_queue(
+    lag: Duration,
+    claimable_dispatches: u64,
+    claimable_sample_saturated: bool,
+    dead_letters: u64,
+    dead_letter_sample_saturated: bool,
+) {
+    gauge!("moa_execution_outbox_lag_seconds").set(lag.as_secs_f64());
+    gauge!("moa_execution_outbox_claimable").set(claimable_dispatches as f64);
+    gauge!("moa_execution_outbox_dead_letters").set(dead_letters as f64);
+    gauge!(
+        "moa_execution_queue_sample_saturated",
+        "queue" => "outbox",
+        "sample" => "claimable"
+    )
+    .set(if claimable_sample_saturated { 1.0 } else { 0.0 });
+    gauge!(
+        "moa_execution_queue_sample_saturated",
+        "queue" => "outbox",
+        "sample" => "dead_letter"
+    )
+    .set(if dead_letter_sample_saturated {
+        1.0
+    } else {
+        0.0
+    });
+}
+
+/// Sets the age of the oldest active task-attempt lease.
+pub fn record_execution_active_attempt_oldest_age(age: Duration) {
+    gauge!("moa_execution_active_attempt_oldest_age_seconds").set(age.as_secs_f64());
+}
+
+/// Sets the age of the oldest nonterminal asynchronous external job.
+pub fn record_execution_external_job_oldest_age(age: Duration) {
+    gauge!("moa_execution_external_job_oldest_age_seconds").set(age.as_secs_f64());
+}
+
+/// Sets admission utilization for one bounded resource and aggregation scope.
+pub fn record_execution_admission_utilization(
+    resource: ExecutionAdmissionResource,
+    scope: ExecutionAdmissionScope,
+    ratio: f64,
+) {
+    gauge!(
+        "moa_execution_admission_utilization_ratio",
+        "resource" => resource.as_str(),
+        "scope" => scope.as_str()
+    )
+    .set(ratio.clamp(0.0, 1.0));
+}
+
+/// Sets the largest tenant share of one fleet execution resource.
+///
+/// This exposes fairness pressure without tenant identifiers or one series per
+/// tenant. Callers calculate the maximum share from a complete fleet snapshot.
+pub fn record_execution_tenant_max_share(resource: ExecutionAdmissionResource, ratio: f64) {
+    gauge!(
+        "moa_execution_tenant_max_share_ratio",
+        "resource" => resource.as_str()
+    )
+    .set(ratio.clamp(0.0, 1.0));
+}
+
+/// Sets maintenance health from the durable last-success reconciliation receipt.
+///
+/// A missing receipt is exported as positive infinity so it is unambiguously
+/// older than every finite staleness threshold.
+pub fn record_execution_maintenance(ready: bool, last_success_age: Option<Duration>) {
+    gauge!("moa_execution_maintenance_ready").set(if ready { 1.0 } else { 0.0 });
+    gauge!("moa_execution_maintenance_last_success_age_seconds")
+        .set(last_success_age.map_or(f64::INFINITY, |duration| duration.as_secs_f64()));
+}
+
+/// Sets execution-retention health from its independent durable success receipt.
+///
+/// A missing receipt is exported as positive infinity so a process restart cannot
+/// make retention appear fresh before a bounded retention pass has succeeded.
+pub fn record_execution_retention(ready: bool, last_success_age: Option<Duration>) {
+    gauge!("moa_execution_retention_ready").set(if ready { 1.0 } else { 0.0 });
+    gauge!("moa_execution_retention_last_success_age_seconds")
+        .set(last_success_age.map_or(f64::INFINITY, |duration| duration.as_secs_f64()));
+}
+
+/// Sets draining Restate deployment age and resource-cost snapshots.
+///
+/// Replica-hours is a gauge because the maintenance owner derives the complete
+/// current value from Kubernetes observations rather than incrementing it from
+/// potentially duplicated process-local samples.
+pub fn record_restate_draining_deployments(
+    deployments: u64,
+    replicas: u64,
+    oldest_age: Duration,
+    replica_hours: f64,
+) {
+    gauge!("moa_restate_draining_deployments").set(deployments as f64);
+    gauge!("moa_restate_draining_deployment_replicas").set(replicas as f64);
+    gauge!("moa_restate_draining_deployment_oldest_age_seconds").set(oldest_age.as_secs_f64());
+    gauge!("moa_restate_draining_deployment_replica_hours").set(replica_hours.max(0.0));
+}
+
 /// Records whether one worker terminal delivery was accepted or deduplicated.
 pub fn record_worker_terminal_delivery(result: WorkerTerminalDeliveryResult) {
     counter!(
@@ -1111,6 +1353,45 @@ pub fn record_sandbox_workspace_reaper(
     gauge!("moa_sandbox_workspace_reaper_backlog").set(backlog as f64);
     gauge!("moa_sandbox_workspace_reaper_oldest_work_age_seconds")
         .set(oldest_work_age.as_secs_f64());
+}
+
+/// Sets active sandbox-hand compute by bounded provider class.
+pub fn record_sandbox_workspace_active_hands(provider: SandboxWorkspaceProviderKind, count: u64) {
+    gauge!(
+        "moa_sandbox_workspace_active_hands",
+        "provider_kind" => provider.as_str()
+    )
+    .set(count as f64);
+}
+
+/// Sets the number of parked execution tasks that still own active compute.
+///
+/// This must remain zero. The aggregate intentionally carries no run, task, or
+/// tenant label so an invariant check cannot create an unbounded series.
+pub fn record_sandbox_workspace_parked_tasks_with_active_hands(count: u64) {
+    gauge!("moa_sandbox_workspace_parked_tasks_with_active_hands").set(count as f64);
+}
+
+/// Records one portable-checkpoint restore into fresh sandbox compute.
+pub fn record_sandbox_workspace_restore(provider: SandboxWorkspaceProviderKind) {
+    counter!(
+        "moa_sandbox_workspace_restores_total",
+        "provider_kind" => provider.as_str()
+    )
+    .increment(1);
+}
+
+/// Records one checkpoint-and-release result at an execution yield boundary.
+pub fn record_sandbox_workspace_release(
+    provider: SandboxWorkspaceProviderKind,
+    result: SandboxWorkspaceMetricResult,
+) {
+    counter!(
+        "moa_sandbox_workspace_releases_total",
+        "provider_kind" => provider.as_str(),
+        "result" => result.as_str()
+    )
+    .increment(1);
 }
 
 /// Records checkpoint bytes and latency for one bounded lifecycle outcome.
@@ -1515,6 +1796,94 @@ fn register_metric_descriptions() {
         "moa_execution_owned_in_flight_tasks",
         "Task calls owned by an ExecutionRun after a bounded dispatch refill."
     );
+    describe_gauge!(
+        "moa_execution_runs",
+        "Current nonterminal execution runs by bounded product phase."
+    );
+    describe_gauge!(
+        "moa_execution_oldest_ready_age_seconds",
+        "Age in seconds of the oldest execution task ready for dispatch."
+    );
+    describe_gauge!(
+        "moa_execution_overdue_deadlines",
+        "Nonterminal execution runs whose absolute deadline has elapsed."
+    );
+    describe_gauge!(
+        "moa_execution_trigger_lag_seconds",
+        "Age in seconds of the oldest due undelivered execution trigger."
+    );
+    describe_gauge!(
+        "moa_execution_trigger_due",
+        "Due execution triggers observed in the bounded fleet queue-health sample."
+    );
+    describe_gauge!(
+        "moa_execution_trigger_dead_letters",
+        "Execution triggers currently held in dead-letter state."
+    );
+    describe_gauge!(
+        "moa_execution_outbox_lag_seconds",
+        "Age in seconds of the oldest undispatched execution outbox row."
+    );
+    describe_gauge!(
+        "moa_execution_outbox_claimable",
+        "Claimable dispatch-outbox rows observed in the bounded fleet queue-health sample."
+    );
+    describe_gauge!(
+        "moa_execution_outbox_dead_letters",
+        "Execution dispatch-outbox rows currently held in dead-letter state."
+    );
+    describe_gauge!(
+        "moa_execution_queue_sample_saturated",
+        "Whether a bounded execution queue-health sample reached its observation cap, by fixed queue and sample kind."
+    );
+    describe_gauge!(
+        "moa_execution_active_attempt_oldest_age_seconds",
+        "Age in seconds of the oldest active execution task-attempt lease."
+    );
+    describe_gauge!(
+        "moa_execution_external_job_oldest_age_seconds",
+        "Age in seconds of the oldest nonterminal asynchronous execution job."
+    );
+    describe_gauge!(
+        "moa_execution_admission_utilization_ratio",
+        "Execution admission utilization by bounded resource and aggregation scope."
+    );
+    describe_gauge!(
+        "moa_execution_tenant_max_share_ratio",
+        "Largest tenant share of one bounded fleet execution resource."
+    );
+    describe_gauge!(
+        "moa_execution_maintenance_ready",
+        "Whether the singleton execution-maintenance owner is healthy."
+    );
+    describe_gauge!(
+        "moa_execution_maintenance_last_success_age_seconds",
+        "Age in seconds of the durable last successful bounded execution reconciliation receipt."
+    );
+    describe_gauge!(
+        "moa_execution_retention_ready",
+        "Whether execution retention has a healthy durable success receipt."
+    );
+    describe_gauge!(
+        "moa_execution_retention_last_success_age_seconds",
+        "Age in seconds of the durable last successful bounded execution-retention receipt."
+    );
+    describe_gauge!(
+        "moa_restate_draining_deployments",
+        "Restate service deployment revisions still draining active invocations."
+    );
+    describe_gauge!(
+        "moa_restate_draining_deployment_replicas",
+        "Kubernetes replicas retained by draining Restate deployment revisions."
+    );
+    describe_gauge!(
+        "moa_restate_draining_deployment_oldest_age_seconds",
+        "Age in seconds of the oldest draining Restate deployment revision."
+    );
+    describe_gauge!(
+        "moa_restate_draining_deployment_replica_hours",
+        "Replica-hours currently attributable to draining Restate revisions."
+    );
     describe_counter!(
         "moa_worker_terminal_deliveries_total",
         "Worker terminal deliveries by bounded acceptance result."
@@ -1578,6 +1947,22 @@ fn register_metric_descriptions() {
     describe_gauge!(
         "moa_sandbox_workspace_reaper_oldest_work_age_seconds",
         "Age in seconds of the oldest workspace reaper item."
+    );
+    describe_gauge!(
+        "moa_sandbox_workspace_active_hands",
+        "Active sandbox-hand compute by bounded provider class."
+    );
+    describe_gauge!(
+        "moa_sandbox_workspace_parked_tasks_with_active_hands",
+        "Parked execution tasks that incorrectly retain active sandbox compute."
+    );
+    describe_counter!(
+        "moa_sandbox_workspace_restores_total",
+        "Portable-checkpoint restores into fresh compute by bounded provider class."
+    );
+    describe_counter!(
+        "moa_sandbox_workspace_releases_total",
+        "Checkpoint-and-release outcomes at execution yield boundaries."
     );
     describe_counter!(
         "moa_sandbox_workspace_checkpoint_bytes_total",
@@ -1870,6 +2255,148 @@ mod tests {
             assert!(
                 !coordination_series.contains(forbidden),
                 "coordination series must not carry high-cardinality label `{forbidden}`:\n{coordination_series}"
+            );
+        }
+    }
+
+    #[test]
+    fn long_horizon_metrics_export_descriptions_and_only_bounded_labels() {
+        // Pins: execution, drain, and sandbox-yield health reaches production
+        // exporters without tenant, run, task, deployment-version, or provider-account IDs.
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            register_metric_descriptions();
+            for phase in [
+                ExecutionRunMetricPhase::Queued,
+                ExecutionRunMetricPhase::Running,
+                ExecutionRunMetricPhase::WaitingInput,
+                ExecutionRunMetricPhase::WaitingReview,
+                ExecutionRunMetricPhase::WaitingSignal,
+                ExecutionRunMetricPhase::WaitingTimer,
+                ExecutionRunMetricPhase::WaitingExternal,
+                ExecutionRunMetricPhase::PauseRequested,
+                ExecutionRunMetricPhase::Pausing,
+                ExecutionRunMetricPhase::Paused,
+                ExecutionRunMetricPhase::Compensating,
+            ] {
+                record_execution_run_phase(phase, 1);
+            }
+            record_execution_oldest_ready_age(Duration::from_secs(31));
+            record_execution_overdue_deadlines(2);
+            record_execution_trigger_queue(Duration::from_secs(7), 11, true, 1, false);
+            record_execution_outbox_queue(Duration::from_secs(8), 12, false, 1, true);
+            record_execution_active_attempt_oldest_age(Duration::from_secs(61));
+            record_execution_external_job_oldest_age(Duration::from_secs(62));
+            record_execution_admission_utilization(
+                ExecutionAdmissionResource::ActiveAttempts,
+                ExecutionAdmissionScope::Fleet,
+                0.75,
+            );
+            record_execution_admission_utilization(
+                ExecutionAdmissionResource::ParkedRuns,
+                ExecutionAdmissionScope::TenantPeak,
+                0.5,
+            );
+            record_execution_tenant_max_share(ExecutionAdmissionResource::ActiveRuns, 0.4);
+            record_execution_maintenance(true, Some(Duration::from_secs(3)));
+            record_execution_maintenance(false, None);
+            record_execution_retention(true, Some(Duration::from_secs(3_600)));
+            record_execution_retention(false, None);
+            record_restate_draining_deployments(2, 3, Duration::from_secs(3_600), 4.5);
+            record_sandbox_workspace_active_hands(SandboxWorkspaceProviderKind::E2b, 2);
+            record_sandbox_workspace_parked_tasks_with_active_hands(0);
+            record_sandbox_workspace_restore(SandboxWorkspaceProviderKind::E2b);
+            record_sandbox_workspace_release(
+                SandboxWorkspaceProviderKind::E2b,
+                SandboxWorkspaceMetricResult::Succeeded,
+            );
+        });
+        let rendered = handle.render();
+
+        let metrics = [
+            "moa_execution_runs",
+            "moa_execution_oldest_ready_age_seconds",
+            "moa_execution_overdue_deadlines",
+            "moa_execution_trigger_lag_seconds",
+            "moa_execution_trigger_due",
+            "moa_execution_trigger_dead_letters",
+            "moa_execution_outbox_lag_seconds",
+            "moa_execution_outbox_claimable",
+            "moa_execution_outbox_dead_letters",
+            "moa_execution_queue_sample_saturated",
+            "moa_execution_active_attempt_oldest_age_seconds",
+            "moa_execution_external_job_oldest_age_seconds",
+            "moa_execution_admission_utilization_ratio",
+            "moa_execution_tenant_max_share_ratio",
+            "moa_execution_maintenance_ready",
+            "moa_execution_maintenance_last_success_age_seconds",
+            "moa_execution_retention_ready",
+            "moa_execution_retention_last_success_age_seconds",
+            "moa_restate_draining_deployments",
+            "moa_restate_draining_deployment_replicas",
+            "moa_restate_draining_deployment_oldest_age_seconds",
+            "moa_restate_draining_deployment_replica_hours",
+            "moa_sandbox_workspace_active_hands",
+            "moa_sandbox_workspace_parked_tasks_with_active_hands",
+            "moa_sandbox_workspace_restores_total",
+            "moa_sandbox_workspace_releases_total",
+        ];
+        for metric in metrics {
+            assert!(
+                rendered.contains(&format!("# HELP {metric} ")),
+                "long-horizon metric {metric} should export a HELP description; rendered:\n{rendered}"
+            );
+        }
+
+        assert!(
+            rendered.contains("moa_execution_maintenance_ready 0"),
+            "a missing durable success receipt must make maintenance unready:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("moa_execution_maintenance_last_success_age_seconds inf"),
+            "a missing durable success receipt must be older than every finite SLO:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("moa_execution_retention_ready 0"),
+            "a missing durable retention receipt must make retention unready:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("moa_execution_retention_last_success_age_seconds inf"),
+            "a missing durable retention receipt must be older than every finite SLO:\n{rendered}"
+        );
+
+        for label in [
+            "phase=\"waiting_timer\"",
+            "resource=\"active_attempts\"",
+            "scope=\"fleet\"",
+            "scope=\"tenant_peak\"",
+            "provider_kind=\"e2b\"",
+            "result=\"succeeded\"",
+            "queue=\"trigger\"",
+            "sample=\"due\"",
+            "queue=\"outbox\"",
+            "sample=\"dead_letter\"",
+        ] {
+            assert!(
+                rendered.contains(label),
+                "long-horizon metrics should include bounded label `{label}`:\n{rendered}"
+            );
+        }
+        for forbidden in [
+            "tenant_id",
+            "run_id",
+            "run_uid",
+            "task_id",
+            "task_uid",
+            "deployment_id",
+            "deployment_version",
+            "provider_account_id",
+            "external_job_id",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "long-horizon metrics must not carry high-cardinality label `{forbidden}`:\n{rendered}"
             );
         }
     }

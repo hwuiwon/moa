@@ -445,7 +445,7 @@ async fn seed_ambiguous_absent_operation(pool: &sqlx::PgPool) -> Result<Workspac
         expected_writer_epoch: row.3,
         expected_instance_generation: row.4,
         quantities: vec![CapacityQuantity {
-            dimension: WorkspaceCapacityDimension::Workspaces,
+            dimension: WorkspaceCapacityDimension::Volumes,
             quantity: 1,
         }],
     };
@@ -470,7 +470,7 @@ async fn seed_ambiguous_absent_operation(pool: &sqlx::PgPool) -> Result<Workspac
     let reservations = PostgresWorkspaceCapacityRepository::new(pool.clone())
         .reserve(&request)
         .await
-        .context("reserve exact absent-operation capacity owner")?;
+        .context("reserve exact absent storage-operation capacity owner")?;
     assert_eq!(reservations.len(), 1);
     assert!(
         operations

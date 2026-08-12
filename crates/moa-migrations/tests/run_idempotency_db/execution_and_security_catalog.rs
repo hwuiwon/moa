@@ -2,6 +2,35 @@
 
 use super::support::*;
 
+const LONG_HORIZON_EXECUTION_SQL: &str =
+    include_str!("../../migrations/postgres/V000059__long_horizon_execution.sql");
+
+#[test]
+fn long_horizon_task_guard_source_is_canonical_offline() {
+    // Pins: V59 owns one complete task-update guard instead of editing the
+    // inherited function body and layering a second ordinary trigger over it.
+    assert_eq!(
+        LONG_HORIZON_EXECUTION_SQL
+            .matches("CREATE OR REPLACE FUNCTION moa.enforce_execution_task_update()")
+            .count(),
+        1
+    );
+    assert!(!LONG_HORIZON_EXECUTION_SQL.contains("$execution_task_long_horizon_transitions$"));
+    assert!(!LONG_HORIZON_EXECUTION_SQL.contains("enforce_execution_task_long_horizon_update"));
+    for required_clause in [
+        "OLD.status = 'running'\n          AND NEW.status = 'ready'",
+        "OLD.status = 'waiting_input' AND NEW.status = 'ready'",
+        "NEW.attempt_generation <> OLD.attempt_generation + 1",
+        "NEW.status <> 'ready'",
+        "NEW.attempt_state <> 'idle'",
+    ] {
+        assert!(
+            LONG_HORIZON_EXECUTION_SQL.contains(required_clause),
+            "canonical task guard is missing: {required_clause}"
+        );
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
 async fn privacy_export_auditor_final_catalog_reads_typed_surface_db() {
@@ -799,6 +828,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 planning_context_hash,owner_user_id,goal_contract,
                 initial_plan,active_plan,initial_plan_hash,active_plan_hash,
                 capability_catalog,authorization_envelope,source_provenance,input,
+                admitted_identity,
                 status,source_kind
             ) VALUES (
                 '00000000-0000-0000-0000-000000337041',
@@ -806,7 +836,36 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 '00000000-0000-0000-0000-000000337010',11,
                 '00000000-0000-0000-0000-000000337040',repeat('5',64),
                 'owner','{"requirements":[],"completion_checks":[]}',
-                '{}','{}',repeat('3',64),repeat('3',64),'{}','{}',
+                jsonb_build_object(
+                    'definition',jsonb_build_object(
+                        'cancel_policy','retain_effects','input_schema','{}'::JSONB,
+                        'output_schema','{}'::JSONB,
+                        'input_wait_policy',jsonb_build_object(
+                            'expiry',jsonb_build_object(
+                                'kind','after','delay_seconds',1
+                            ),
+                            'on_expiry',jsonb_build_object('kind','fail_run')
+                        ),
+                        'nodes','[]'::JSONB
+                    ),
+                    'plan_hash',repeat('3',64),'catalog_hash',repeat('0',64),
+                    'estimate','{}'::JSONB,'report','{}'::JSONB
+                ),
+                jsonb_build_object(
+                    'definition',jsonb_build_object(
+                        'cancel_policy','retain_effects','input_schema','{}'::JSONB,
+                        'output_schema','{}'::JSONB,
+                        'input_wait_policy',jsonb_build_object(
+                            'expiry',jsonb_build_object(
+                                'kind','after','delay_seconds',1
+                            ),
+                            'on_expiry',jsonb_build_object('kind','fail_run')
+                        ),
+                        'nodes','[]'::JSONB
+                    ),
+                    'plan_hash',repeat('3',64),'catalog_hash',repeat('0',64),
+                    'estimate','{}'::JSONB,'report','{}'::JSONB
+                ),repeat('3',64),repeat('3',64),'{}','{}',
                 jsonb_build_object(
                     'kind','generated_plan',
                     'planner',jsonb_build_object(
@@ -817,7 +876,13 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                         'repair_attempts',0
                     )
                 ),
-                '{}','queued','generated_plan'
+                '{}',jsonb_build_object(
+                    'identity_type','operator',
+                    'id','00000000-0000-0000-0000-000000337021',
+                    'tenant_id','00000000-0000-0000-0000-000000337020',
+                    'api_key_id',NULL,
+                    'acting_on_behalf_of',NULL
+                ),'queued','generated_plan'
             );
             INSERT INTO moa.execution_task (
                 task_id,run_uid,tenant_id,contact_id,node_id,item_key,
@@ -907,6 +972,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                     planning_context_hash,owner_user_id,goal_contract,\
                     initial_plan,active_plan,initial_plan_hash,active_plan_hash,\
                     capability_catalog,authorization_envelope,source_provenance,input,\
+                    admitted_identity,\
                     status,source_kind\
                  ) VALUES (\
                     '00000000-0000-0000-0000-000000337052',\
@@ -914,7 +980,36 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                     '00000000-0000-0000-0000-000000337010',12,\
                     '00000000-0000-0000-0000-000000337050',repeat('7',64),\
                     'owner','{\"requirements\":[],\"completion_checks\":[]}',\
-                    '{}','{}',repeat('3',64),repeat('3',64),'{}','{}',\
+                    jsonb_build_object(\
+                        'definition',jsonb_build_object(\
+                            'cancel_policy','retain_effects',\
+                            'input_schema','{}'::JSONB,'output_schema','{}'::JSONB,\
+                            'input_wait_policy',jsonb_build_object(\
+                                'expiry',jsonb_build_object(\
+                                    'kind','after','delay_seconds',1\
+                                ),\
+                                'on_expiry',jsonb_build_object('kind','fail_run')\
+                            ),\
+                            'nodes','[]'::JSONB\
+                        ),\
+                        'plan_hash',repeat('3',64),'catalog_hash',repeat('0',64),\
+                        'estimate','{}'::JSONB,'report','{}'::JSONB\
+                    ),\
+                    jsonb_build_object(\
+                        'definition',jsonb_build_object(\
+                            'cancel_policy','retain_effects',\
+                            'input_schema','{}'::JSONB,'output_schema','{}'::JSONB,\
+                            'input_wait_policy',jsonb_build_object(\
+                                'expiry',jsonb_build_object(\
+                                    'kind','after','delay_seconds',1\
+                                ),\
+                                'on_expiry',jsonb_build_object('kind','fail_run')\
+                            ),\
+                            'nodes','[]'::JSONB\
+                        ),\
+                        'plan_hash',repeat('3',64),'catalog_hash',repeat('0',64),\
+                        'estimate','{}'::JSONB,'report','{}'::JSONB\
+                    ),repeat('3',64),repeat('3',64),'{}','{}',\
                     jsonb_build_object(\
                         'kind','generated_plan',\
                         'planner',jsonb_build_object(\
@@ -925,7 +1020,13 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                             'repair_attempts',0\
                         )\
                     ),\
-                    '{}','queued','generated_plan'\
+                    '{}',jsonb_build_object(\
+                        'identity_type','operator',\
+                        'id','00000000-0000-0000-0000-000000337021',\
+                        'tenant_id','00000000-0000-0000-0000-000000337020',\
+                        'api_key_id',NULL,\
+                        'acting_on_behalf_of',NULL\
+                    ),'queued','generated_plan'\
                  )",
             )
             .await
@@ -1377,4 +1478,676 @@ async fn full_database_runner_installs_execution_schema_and_foreign_keys_db() {
     assert!(normalized_columns_present);
     assert_eq!(session_fk_targets, vec!["public.sessions"; 2]);
     assert_eq!(execution_fk_targets, vec!["moa.execution_run"; 2]);
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_catalog_db() {
+    // Pins: V59 refuses to reinterpret a live legacy workflow, then preserves
+    // terminal evidence while installing the tenant-fenced activation catalog.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect long-horizon migration maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create long-horizon migration database");
+    let target_url = with_database(&admin_url, &db_name);
+
+    let outcome = async {
+        install_required_extensions(&target_url).await?;
+        apply_through_migration(&target_url, "sandbox_workspaces").await?;
+        let target = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&target_url)
+            .await?;
+
+        let tenant_id = uuid::Uuid::new_v4();
+        let session_id = uuid::Uuid::new_v4();
+        let planning_context_uid = uuid::Uuid::new_v4();
+        let run_uid = uuid::Uuid::new_v4();
+        let plan_hash = "1".repeat(64);
+        let plan = serde_json::json!({
+            "definition": {
+                "cancel_policy": "retain_effects",
+                "input_schema": {},
+                "output_schema": {},
+                "nodes": [{
+                    "id": "output",
+                    "requirement_ids": [],
+                    "depends_on": [],
+                    "when": null,
+                    "input": {},
+                    "output_schema": {},
+                    "operation": {"kind": "output", "value": {}},
+                    "compensation": null,
+                    "retry": {
+                        "max_attempts": 1,
+                        "initial_backoff_ms": 1,
+                        "max_backoff_ms": 1
+                    },
+                    "budget": null
+                }]
+            },
+            "plan_hash": plan_hash,
+            "catalog_hash": "0".repeat(64),
+            "estimate": {
+                "cost_microusd": 0,
+                "tokens": 0,
+                "tool_calls": 0,
+                "retrieved_bytes": 0,
+                "tasks": 1
+            },
+            "report": {"issues": []}
+        });
+        sqlx::query(
+            "INSERT INTO moa.execution_planning_context ( \
+                planning_context_uid, tenant_id, session_id, \
+                originating_user_sequence_num, originating_user_event_hash, \
+                owner_user_id, planning_context_hash, snapshot \
+             ) VALUES ($1, $2, $3, 0, $4, 'migration-test', $4, '{}'::JSONB)",
+        )
+        .bind(planning_context_uid)
+        .bind(tenant_id)
+        .bind(session_id)
+        .bind("2".repeat(64))
+        .execute(&target)
+        .await?;
+        sqlx::query(
+            "INSERT INTO moa.execution_run ( \
+                run_uid, tenant_id, session_id, originating_user_sequence_num, \
+                planning_context_uid, planning_context_hash, owner_user_id, goal_contract, \
+                initial_plan, active_plan, initial_plan_hash, active_plan_hash, \
+                capability_catalog, authorization_envelope, source_provenance, source_kind, \
+                input, status \
+             ) VALUES ( \
+                $1, $2, $3, 0, $4, $5, 'migration-test', $6, $7, $7, $8, $8, \
+                $9, $10, $11, 'generated_plan', '{}'::JSONB, 'queued' \
+             )",
+        )
+        .bind(run_uid)
+        .bind(tenant_id)
+        .bind(session_id)
+        .bind(planning_context_uid)
+        .bind("2".repeat(64))
+        .bind(serde_json::json!({
+            "objective": "migration",
+            "requirements": [],
+            "deliverables": [],
+            "coverage": [],
+            "constraints": [],
+            "completion_checks": []
+        }))
+        .bind(&plan)
+        .bind(&plan_hash)
+        .bind(serde_json::json!({
+            "capabilities": [],
+            "catalog_hash": "0".repeat(64)
+        }))
+        .bind(serde_json::json!({"capability_refs": [], "skill_refs": []}))
+        .bind(serde_json::json!({
+            "kind": "generated_plan",
+            "planner": {
+                "model": "migration-test",
+                "prompt_version": "planner",
+                "candidate_hash": "3".repeat(64),
+                "compiler_report_hash": "4".repeat(64),
+                "final_plan_hash": plan_hash,
+                "repair_attempts": 0
+            }
+        }))
+        .execute(&target)
+        .await?;
+
+        let cutover_error = run_reporting_applied_serialized(&target_url)
+            .await
+            .expect_err("V59 must reject a nonterminal legacy execution run")
+            .to_string();
+        let schema_not_partially_installed: bool = sqlx::query_scalar(
+            "SELECT to_regclass('moa.execution_trigger') IS NULL \
+                 AND NOT EXISTS ( \
+                     SELECT 1 FROM information_schema.columns \
+                     WHERE table_schema = 'moa' AND table_name = 'execution_run' \
+                       AND column_name = 'controller_generation' \
+                 )",
+        )
+        .fetch_one(&target)
+        .await?;
+
+        sqlx::query(
+            "UPDATE moa.execution_run \
+             SET status = 'cancelled', cancellation_reason = 'cutover test', \
+                 terminal_cause = '{\"kind\":\"cancellation\"}'::JSONB, \
+                 terminal_reason = 'cancelled', \
+                 terminal_satisfied_requirement_count = 0, \
+                 terminal_requirement_count = 0, completed_at = now() \
+             WHERE run_uid = $1",
+        )
+        .bind(run_uid)
+        .execute(&target)
+        .await?;
+
+        let applied = run_reporting_applied_serialized(&target_url).await?;
+        let second = run_reporting_applied_serialized(&target_url).await?;
+
+        let retry_task_id = uuid::Uuid::new_v4();
+        let input_task_id = uuid::Uuid::new_v4();
+        let invalid_attempt_task_id = uuid::Uuid::new_v4();
+        for (task_id, status, attempt_state) in [
+            (retry_task_id, "running", "running"),
+            (input_task_id, "waiting_input", "waiting"),
+            (invalid_attempt_task_id, "waiting_review", "waiting"),
+        ] {
+            sqlx::query(
+                "INSERT INTO moa.execution_task ( \
+                    task_id, run_uid, tenant_id, node_id, item_key, plan_revision, status, \
+                    input, task_kind, retry_policy, estimate_cost_microusd, estimate_tokens, \
+                    estimate_tasks, estimate_tool_calls, estimate_retrieved_bytes, \
+                    attempt_state \
+                 ) VALUES ( \
+                    $1, $2, $3, $4, $4, 1, $5, '{}', \
+                    '{\"kind\":\"output\",\"value\":null}', \
+                    '{\"max_attempts\":2,\"initial_backoff_ms\":1,\"max_backoff_ms\":1}', \
+                    0, 0, 1, 0, 0, $6 \
+                 )",
+            )
+            .bind(task_id)
+            .bind(run_uid)
+            .bind(tenant_id)
+            .bind(format!("counter-guard-{task_id}"))
+            .bind(status)
+            .bind(attempt_state)
+            .execute(&target)
+            .await?;
+        }
+
+        let retry_counters: (i32, i64, i64) = sqlx::query_as(
+            "UPDATE moa.execution_task \
+             SET status='ready', attempt_state='idle', attempt=attempt+1, \
+                 generation=generation+1, attempt_generation=attempt_generation+1 \
+             WHERE task_id=$1 RETURNING attempt, generation, attempt_generation",
+        )
+        .bind(retry_task_id)
+        .fetch_one(&target)
+        .await?;
+        let input_resume_counters: (i32, i64, i64) = sqlx::query_as(
+            "UPDATE moa.execution_task \
+             SET status='ready', attempt_state='idle', generation=generation+1, \
+                 attempt_generation=attempt_generation+1 \
+             WHERE task_id=$1 RETURNING attempt, generation, attempt_generation",
+        )
+        .bind(input_task_id)
+        .fetch_one(&target)
+        .await?;
+        let invalid_attempt_generation_rejected = sqlx::query(
+            "UPDATE moa.execution_task \
+             SET status='ready', attempt_state='idle', \
+                 attempt_generation=attempt_generation+2 \
+             WHERE task_id=$1",
+        )
+        .bind(invalid_attempt_task_id)
+        .execute(&target)
+        .await
+        .is_err();
+
+        let catalog_shape: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+            r#"
+            SELECT
+                (SELECT count(*) = 142
+                 FROM information_schema.columns
+                 WHERE table_schema = 'moa'
+                   AND (
+                     (table_name = 'execution_run' AND column_name IN (
+                        'admitted_identity', 'controller_generation', 'activation_state',
+                        'next_wake_at', 'waiting_since', 'last_progress_at',
+                        'pause_requested_at', 'paused_at', 'ready_task_count',
+                        'active_task_count', 'waiting_task_count',
+                        'waiting_input_task_count', 'waiting_input_user_task_count',
+                        'waiting_input_tenant_admin_task_count',
+                        'waiting_input_external_task_count', 'waiting_review_task_count',
+                        'waiting_signal_task_count', 'waiting_timer_task_count',
+                        'waiting_external_task_count', 'waiting_replan_task_count',
+                        'waiting_reasons_truncated'
+                        ,'schedule_uid', 'schedule_incarnation',
+                        'schedule_occurrence_sequence', 'terminal_archive_uid',
+                        'terminal_archive_hash', 'terminal_details_archived_at'
+                     ))
+                     OR
+                     (table_name = 'execution_task' AND column_name IN (
+                        'attempt_generation', 'attempt_state', 'attempt_started_at',
+                        'last_progress_at', 'attempt_deadline_at', 'waiting_since',
+                        'ready_at', 'active_dispatch_uid', 'dispatch_sequence',
+                        'external_job_uid', 'failure_fingerprint'
+                     ))
+                     OR
+                     (table_name = 'execution_compensation' AND column_name IN (
+                        'attempt_generation', 'attempt_state', 'attempt_started_at',
+                        'last_progress_at', 'attempt_deadline_at', 'waiting_since',
+                        'active_dispatch_uid', 'dispatch_sequence', 'external_job_uid',
+                        'release_intent'
+                     ))
+                     OR
+                     (table_name = 'execution_external_job' AND column_name IN (
+                        'compensation_id', 'compensation_generation',
+                        'compensation_attempt_generation',
+                        'declared_provider', 'provider_contract_violation'
+                     ))
+                     OR
+                     (table_name = 'execution_node_state' AND column_name IN (
+                        'aggregate_output', 'aggregate_output_hash', 'reduce_round',
+                        'reduce_batch_cursor', 'reduce_round_input_count',
+                        'reduce_round_task_count', 'reduce_round_terminal_task_count',
+                        'materialization_complete', 'aggregate_cursor_item_key',
+                        'aggregate_complete'
+                     ))
+                     OR
+                     (table_name = 'execution_completion_scan' AND column_name IN (
+                        'plan_revision', 'controller_generation', 'scan_kind',
+                        'excluded_task_id', 'source_progress_at', 'task_cursor',
+                        'node_cursor', 'scanned_task_count', 'task_evidence', 'scan_complete',
+                        'node_scan_complete', 'completion_evidence',
+                        'verifiers_materialized', 'created_at', 'updated_at'
+                     ))
+                     OR
+                     (table_name = 'execution_amendment_receipt' AND column_name IN (
+                        'base_plan_revision', 'amendment_hash', 'receipt_kind',
+                        'superseded_task_id', 'task_generation',
+                        'task_ids_to_release', 'created_at'
+                     ))
+                     OR
+                     (table_name = 'execution_replan_stop_intent' AND column_name IN (
+                        'controller_generation', 'wake_epoch', 'origin_task_id',
+                        'task_generation', 'base_plan_revision', 'stop_reason',
+                        'detail', 'amendment_hash', 'created_at', 'updated_at'
+                     ))
+                     OR
+                     (table_name = 'execution_schedule' AND column_name IN (
+                        'template_revision_uid', 'run_as_identity', 'creation_origin',
+                        'schedule_incarnation', 'start_at', 'next_occurrence_local'
+                     ))
+                     OR
+                     (table_name = 'execution_trigger' AND column_name = 'schedule_incarnation')
+                     OR
+                     (table_name = 'execution_capacity_reservation' AND column_name IN (
+                        'trigger_uid', 'external_job_uid'
+                     ))
+                     OR
+                     (table_name = 'execution_task_checkpoint' AND column_name IN (
+                        'checkpoint_sequence', 'controller_generation',
+                        'task_generation', 'attempt_generation', 'dispatch_uid',
+                        'checkpoint_kind', 'schema_version', 'payload', 'payload_hash',
+                        'workspace_release_receipt', 'superseded_at'
+                     ))
+                     OR
+                     (table_name = 'execution_terminal_archive' AND column_name IN (
+                        'format_version', 'terminal_status', 'terminal_completed_at',
+                        'goal_hash', 'initial_plan_hash', 'active_plan_hash',
+                        'source_record_count', 'source_logical_bytes', 'segment_count',
+                        'source_cursor', 'rolling_chain_digest', 'root_digest',
+                        'archive_generation', 'finalized_at',
+                        'details_deleted_at'
+                     ))
+                     OR
+                     (table_name = 'execution_terminal_archive_segment' AND column_name IN (
+                        'archive_uid', 'segment_kind', 'segment_sequence',
+                        'format_version', 'record_count', 'payload', 'content_digest'
+                     ))
+                     OR
+                     (table_name = 'execution_maintenance_checkpoint' AND column_name IN (
+                        'next_run_at', 'scheduled_generation', 'claim_owner',
+                        'claimed_generation', 'claim_expires_at'
+                     ))
+                   )),
+                (SELECT count(*) = 15
+                 FROM pg_class relation
+                 JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+                 WHERE namespace.nspname = 'moa'
+                   AND relation.relkind = 'r'
+                   AND relation.relname IN (
+                     'execution_node_state', 'execution_trigger',
+                     'execution_dispatch_outbox', 'execution_external_job',
+                     'execution_capacity_reservation', 'execution_schedule',
+                     'execution_capacity_bucket', 'execution_tenant_dispatch_state',
+                     'execution_external_job_callback_receipt',
+                     'execution_completion_scan',
+                     'execution_amendment_receipt',
+                     'execution_replan_stop_intent',
+                     'execution_task_checkpoint', 'execution_terminal_archive',
+                     'execution_terminal_archive_segment'
+                   )),
+                (SELECT count(*) = 15 AND bool_and(relrowsecurity AND relforcerowsecurity)
+                 FROM pg_class relation
+                 JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+                 WHERE namespace.nspname = 'moa'
+                   AND relation.relname IN (
+                     'execution_node_state', 'execution_trigger',
+                     'execution_dispatch_outbox', 'execution_external_job',
+                     'execution_capacity_reservation', 'execution_schedule',
+                     'execution_capacity_bucket', 'execution_tenant_dispatch_state',
+                     'execution_external_job_callback_receipt',
+                     'execution_completion_scan',
+                     'execution_amendment_receipt',
+                     'execution_replan_stop_intent',
+                     'execution_task_checkpoint', 'execution_terminal_archive',
+                     'execution_terminal_archive_segment'
+                   )),
+                (SELECT count(*) = 46
+                 FROM pg_indexes
+                 WHERE schemaname = 'moa'
+                   AND indexname IN (
+                     'execution_run_terminal_retention_idx',
+                     'execution_task_ready_idx',
+                     'execution_task_active_attempt_watchdog_idx',
+                     'execution_trigger_due_idx',
+                     'execution_dispatch_outbox_pending_idx',
+                     'execution_dispatch_outbox_task_attempt_uidx',
+                     'execution_trigger_schedule_occurrence_uidx',
+                     'execution_schedule_due_idx',
+                     'execution_task_terminal_retention_idx',
+                     'execution_dispatch_outbox_compensation_attempt_uidx',
+                     'execution_compensation_active_watchdog_idx',
+                     'execution_capacity_bucket_lock_order_idx',
+                     'execution_tenant_dispatch_fairness_idx',
+                     'execution_dispatch_outbox_claim_expiry_idx',
+                     'execution_trigger_claim_expiry_idx'
+                     ,'execution_run_schedule_occurrence_uidx'
+                     ,'execution_external_job_callback_receipt_retention_idx'
+                     ,'execution_trigger_dead_letter_idx'
+                     ,'execution_dispatch_outbox_dead_letter_idx'
+                     ,'execution_dispatch_outbox_task_attempt_cancel_uidx'
+                     ,'execution_dispatch_outbox_compensation_attempt_cancel_uidx'
+                     ,'execution_task_checkpoint_current_uidx'
+                     ,'execution_task_checkpoint_retention_idx'
+                     ,'execution_terminal_archive_retention_idx'
+                     ,'execution_terminal_archive_segment_scan_idx'
+                     ,'execution_terminal_archive_segment_sequence_key'
+                     ,'execution_maintenance_checkpoint_due_idx'
+                     ,'execution_run_activation_idx'
+                     ,'execution_node_state_actionable_idx'
+                     ,'execution_node_state_aggregate_actionable_idx'
+                     ,'execution_capacity_reservation_active_run_owner_uidx'
+                     ,'execution_capacity_reservation_parked_run_owner_uidx'
+                     ,'execution_capacity_reservation_trigger_owner_uidx'
+                     ,'execution_capacity_reservation_external_job_owner_uidx'
+                     ,'execution_task_cancelling_reconciliation_idx'
+                     ,'execution_compensation_cancelling_reconciliation_idx'
+                     ,'execution_completion_scan_actionable_idx'
+                     ,'execution_task_failure_fingerprint_idx'
+                     ,'execution_amendment_receipt_retention_idx'
+                     ,'execution_replan_stop_intent_current_idx'
+                     ,'execution_node_state_run_order_uidx'
+                     ,'execution_external_job_task_attempt_uidx'
+                     ,'execution_external_job_compensation_attempt_uidx'
+                     ,'execution_task_waiting_projection_idx'
+                     ,'execution_trigger_run_wake_idx'
+                     ,'execution_dispatch_outbox_external_cancel_uidx'
+                   )),
+                moa.execution_admitted_identity_is_valid(admitted_identity, tenant_id)
+                    AND activation_state = 'terminal'
+                    AND status = 'cancelled',
+                (SELECT count(*) = 8
+                 FROM pg_constraint
+                 WHERE conname IN (
+                    'execution_trigger_compensation_tenant_fk',
+                    'execution_dispatch_outbox_compensation_tenant_fk',
+                    'execution_capacity_reservation_compensation_tenant_fk',
+                    'execution_capacity_reservation_trigger_tenant_fk',
+                    'execution_capacity_reservation_external_job_tenant_fk',
+                    'execution_external_job_compensation_tenant_fk',
+                    'execution_compensation_external_job_tenant_fk',
+                    'execution_completion_scan_excluded_task_tenant_fk'
+                 )
+                   AND (
+                     (conname IN (
+                        'execution_trigger_compensation_tenant_fk',
+                        'execution_dispatch_outbox_compensation_tenant_fk',
+                        'execution_capacity_reservation_compensation_tenant_fk',
+                        'execution_external_job_compensation_tenant_fk'
+                      ) AND pg_get_constraintdef(oid)
+                            LIKE '%compensation_id, run_uid, tenant_id%')
+                     OR
+                     (conname = 'execution_capacity_reservation_trigger_tenant_fk'
+                      AND pg_get_constraintdef(oid) LIKE '%trigger_uid, tenant_id%')
+                     OR
+                     (conname = 'execution_capacity_reservation_external_job_tenant_fk'
+                      AND pg_get_constraintdef(oid) LIKE '%external_job_uid, tenant_id%')
+                     OR
+                     (conname = 'execution_compensation_external_job_tenant_fk'
+                      AND pg_get_constraintdef(oid) LIKE '%external_job_uid, tenant_id%')
+                     OR
+                     (conname = 'execution_completion_scan_excluded_task_tenant_fk'
+                      AND pg_get_constraintdef(oid)
+                            LIKE '%excluded_task_id, run_uid, tenant_id%')
+                   ))
+                AND
+                (SELECT count(*) = 3
+                        AND bool_and(privilege_type IN ('SELECT', 'INSERT', 'UPDATE'))
+                 FROM information_schema.role_table_grants
+                 WHERE table_schema = 'moa'
+                   AND table_name = 'execution_maintenance_checkpoint'
+                   AND grantee = 'moa_app')
+                AND
+                (SELECT count(*) = 10
+                 FROM pg_constraint
+                 WHERE conname IN (
+                    'execution_compensation_release_intent_shape_check',
+                    'execution_run_waiting_task_counts_check',
+                    'execution_run_waiting_input_audience_counts_check',
+                    'execution_run_waiting_reasons_bounded_check',
+                    'execution_external_job_binding_shape_check',
+                    'execution_external_job_contract_violation_shape_check',
+                    'execution_amendment_receipt_release_shape_check',
+                    'execution_task_output_inline_size_check',
+                    'execution_trigger_start_recovery_shape_check',
+                    'execution_completion_scan_kind_shape_check'
+                 ))
+                AND
+                (SELECT count(*) = 2
+                        AND bool_and(convalidated)
+                        AND bool_and(
+                            pg_get_constraintdef(oid)
+                                LIKE '%execution_plan_snapshot_is_current%'
+                            AND pg_get_constraintdef(oid) LIKE '%completed%'
+                            AND pg_get_constraintdef(oid) LIKE '%cancelled%'
+                        )
+                 FROM pg_constraint
+                 WHERE conrelid = 'moa.execution_run'::regclass
+                   AND conname IN (
+                       'execution_run_initial_plan_check',
+                       'execution_run_active_plan_check'
+                   ))
+                AND
+                (SELECT pg_get_constraintdef(oid) LIKE '%waiting_external%'
+                 FROM pg_constraint
+                 WHERE conname = 'execution_compensation_attempt_state_check')
+                AND
+                (SELECT pg_get_constraintdef(oid)
+                            LIKE '%capability_external_start%'
+                 FROM pg_constraint
+                 WHERE conrelid = 'moa.execution_task_checkpoint'::regclass
+                   AND conname = 'execution_task_checkpoint_checkpoint_kind_check')
+                AND
+                (SELECT count(*) = 4
+                        AND count(*) FILTER (WHERE cmd = 'ALL') = 1
+                        AND count(*) FILTER (WHERE cmd = 'SELECT') = 1
+                        AND count(*) FILTER (WHERE cmd = 'INSERT') = 1
+                        AND count(*) FILTER (WHERE cmd = 'UPDATE') = 1
+                        AND bool_and(
+                            policyname = 'execution_capacity_bucket_control_plane'
+                            OR COALESCE(qual, with_check, '') LIKE '%scope_kind%fleet%'
+                        )
+                        AND bool_and(
+                            policyname = 'execution_capacity_bucket_control_plane'
+                            OR COALESCE(qual, with_check, '') LIKE '%current_tenant_id%'
+                        )
+                 FROM pg_policies
+                 WHERE schemaname = 'moa'
+                   AND tablename = 'execution_capacity_bucket')
+                AND
+                EXISTS (
+                    SELECT 1 FROM pg_trigger
+                    WHERE tgname = 'execution_capacity_bucket_owner_immutable'
+                      AND NOT tgisinternal
+                )
+                AND
+                (SELECT indexdef LIKE 'CREATE UNIQUE INDEX%'
+                 FROM pg_indexes
+                 WHERE schemaname = 'moa'
+                   AND indexname = 'execution_node_state_run_order_uidx')
+                AND
+                (SELECT indexdef LIKE 'CREATE UNIQUE INDEX%'
+                 FROM pg_indexes
+                 WHERE schemaname = 'moa'
+                   AND indexname = 'execution_terminal_archive_segment_sequence_key')
+                AND
+                (SELECT indexdef LIKE '%WHERE (provider IS NOT NULL)%'
+                 FROM pg_indexes
+                 WHERE schemaname = 'moa'
+                   AND indexname = 'execution_external_job_provider_identity_key')
+                AND
+                (SELECT tgdeferrable AND tginitdeferred
+                 FROM pg_trigger
+                 WHERE tgname = 'execution_external_job_intent_capacity_guard')
+                AND
+                EXISTS (
+                    SELECT 1 FROM pg_trigger
+                    WHERE tgname = 'execution_node_aggregate_cursor_update_guard'
+                      AND NOT tgisinternal
+                )
+                AND
+                EXISTS (
+                    SELECT 1 FROM pg_trigger
+                    WHERE tgname = 'execution_replan_stop_intent_immutable_guard'
+                      AND NOT tgisinternal
+                )
+                AND
+                EXISTS (
+                    SELECT 1 FROM pg_trigger
+                    WHERE tgname = 'execution_completion_scan_update_guard'
+                      AND NOT tgisinternal
+                )
+                AND
+                EXISTS (
+                    SELECT 1 FROM pg_trigger
+                    WHERE tgname = 'execution_terminal_archive_segment_mutation_guard'
+                      AND NOT tgisinternal
+                )
+                AND
+                (SELECT count(*) = 1
+                        AND bool_and(trigger.tgname = 'execution_task_update_guard')
+                        AND bool_and(proc.proname = 'enforce_execution_task_update')
+                 FROM pg_trigger AS trigger
+                 JOIN pg_proc AS proc ON proc.oid = trigger.tgfoid
+                 WHERE trigger.tgrelid = 'moa.execution_task'::REGCLASS
+                   AND NOT trigger.tgisinternal)
+                AND
+                to_regprocedure('moa.enforce_execution_task_long_horizon_update()') IS NULL
+                AND
+                (SELECT regexp_replace(
+                            pg_get_functiondef(
+                                'moa.enforce_execution_task_update()'::REGPROCEDURE
+                            ),
+                            '[[:space:]]+', ' ', 'g'
+                        ) LIKE '%OLD.status = ''running'' AND NEW.status = ''ready''%'
+                        AND regexp_replace(
+                            pg_get_functiondef(
+                                'moa.enforce_execution_task_update()'::REGPROCEDURE
+                            ),
+                            '[[:space:]]+', ' ', 'g'
+                        ) LIKE '%OLD.status = ''waiting_input'' AND NEW.status = ''ready''%'
+                        AND regexp_replace(
+                            pg_get_functiondef(
+                                'moa.enforce_execution_task_update()'::REGPROCEDURE
+                            ),
+                            '[[:space:]]+', ' ', 'g'
+                        ) LIKE '%NEW.attempt_generation <> OLD.attempt_generation + 1%')
+            FROM moa.execution_run
+            WHERE run_uid = $1
+            "#,
+        )
+        .bind(run_uid)
+        .fetch_one(&target)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO moa.execution_dispatch_outbox ( \
+                dispatch_uid, tenant_id, run_uid, dispatch_kind, \
+                controller_generation, wake_epoch \
+             ) VALUES ($1, $2, $3, 'run_activation', 1, 1)",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(tenant_id)
+        .bind(run_uid)
+        .execute(&target)
+        .await?;
+        let duplicate_activation_rejected = sqlx::query(
+            "INSERT INTO moa.execution_dispatch_outbox ( \
+                dispatch_uid, tenant_id, run_uid, dispatch_kind, \
+                controller_generation, wake_epoch \
+             ) VALUES ($1, $2, $3, 'run_activation', 1, 1)",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(tenant_id)
+        .bind(run_uid)
+        .execute(&target)
+        .await
+        .is_err();
+
+        target.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+            cutover_error,
+            schema_not_partially_installed,
+            applied,
+            second,
+            retry_counters,
+            input_resume_counters,
+            invalid_attempt_generation_rejected,
+            catalog_shape,
+            duplicate_activation_rejected,
+        ))
+    }
+    .await;
+
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+
+    let (
+        cutover_error,
+        schema_not_partially_installed,
+        applied,
+        second,
+        retry_counters,
+        input_resume_counters,
+        invalid_attempt_generation_rejected,
+        catalog_shape,
+        duplicate_activation_rejected,
+    ) = outcome.expect("long-horizon migration assertions should complete");
+    assert!(
+        cutover_error.contains("legacy execution run(s) are nonterminal"),
+        "cutover diagnostic must identify the live-run precondition: {cutover_error}"
+    );
+    assert!(
+        schema_not_partially_installed,
+        "the failed migration must leave no partial V59 catalog"
+    );
+    assert_eq!(
+        applied,
+        expected_migration_labels_from("long_horizon_execution")
+    );
+    assert!(second.is_empty(), "V59 must not reapply: {second:?}");
+    assert_eq!(retry_counters, (2, 2, 2));
+    assert_eq!(input_resume_counters, (1, 2, 2));
+    assert!(
+        invalid_attempt_generation_rejected,
+        "attempt generation may only advance one fence at a time"
+    );
+    assert_eq!(catalog_shape, (true, true, true, true, true, true));
+    assert!(
+        duplicate_activation_rejected,
+        "one run generation/wake epoch must have exactly one dispatch"
+    );
 }

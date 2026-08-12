@@ -1,7 +1,6 @@
 //! Shared execution-service mutation handoff types and conversion helpers.
 
 use super::*;
-use moa_observability::runtime_metrics::record_execution_mutation_run_wake_ack;
 
 pub(super) fn scoped_catalog_error(
     error: crate::connector_catalog::ScopedConnectorCatalogError,
@@ -38,13 +37,6 @@ impl ExecutionMutationAccepted {
         }
     }
 
-    pub(super) fn task_ids_to_release(&self) -> &[moa_execution::state::ExecutionTaskId] {
-        match self {
-            Self::Accepted { handoff, .. } => &handoff.task_ids_to_release,
-            Self::Rejected { .. } => &[],
-        }
-    }
-
     pub(super) fn with_task_ids_to_release(
         mut self,
         task_ids_to_release: Vec<moa_execution::state::ExecutionTaskId>,
@@ -62,7 +54,7 @@ impl ExecutionMutationAccepted {
     }
 }
 pub(super) fn replan_evaluation_request(
-    snapshot: &moa_execution::repository::ExecutionSchedulingSnapshot,
+    snapshot: &moa_execution::repository::amendment::ExecutionAmendmentSnapshot,
     proposed_plan: &moa_execution::compiler::CanonicalExecutionPlan,
     proposed_estimate: ExecutionEstimate,
     remaining_budget: moa_artifacts::execution_plan::ExecutionBudgetLimit,
@@ -97,7 +89,7 @@ pub(super) fn replan_evaluation_request(
 }
 
 pub(super) fn replan_loop_evaluation_request(
-    snapshot: &moa_execution::repository::ExecutionSchedulingSnapshot,
+    snapshot: &moa_execution::repository::amendment::ExecutionAmendmentSnapshot,
     proposed_amendment_fingerprint: ExecutionHash,
     amendment: PlanAmendment,
     config: ExecutionConfig,
@@ -105,21 +97,7 @@ pub(super) fn replan_loop_evaluation_request(
 ) -> moa_execution::Result<ReplanLoopEvaluationRequest> {
     let seen_amendment_fingerprints =
         durable_amendment_operation_fingerprints(&snapshot.run.plan_history)?;
-    let failures = snapshot
-        .projection
-        .tasks
-        .iter()
-        .filter(|task| task.task_id != waiting_task.task_id)
-        .filter_map(task_failure_fingerprint)
-        .collect::<Vec<_>>();
     let current_failure = task_failure_fingerprint(waiting_task);
-    let mut failure_fingerprint_counts =
-        durable_failure_fingerprint_counts(&snapshot.run.plan_history);
-    for failure in failures {
-        if let Ok(fingerprint) = failure_fingerprint(&failure) {
-            *failure_fingerprint_counts.entry(fingerprint).or_insert(0) += 1;
-        }
-    }
     let unresolved_requirement_ids = snapshot
         .run
         .goal
@@ -143,7 +121,7 @@ pub(super) fn replan_loop_evaluation_request(
     Ok(ReplanLoopEvaluationRequest {
         proposed_amendment_fingerprint,
         seen_amendment_fingerprints,
-        failure_fingerprint_counts,
+        failure_fingerprint_counts: snapshot.prior_failure_fingerprint_counts.clone(),
         current_failure,
         unresolved_requirement_ids,
         amendment,
@@ -170,30 +148,6 @@ pub(super) fn durable_amendment_operation_fingerprints(
         fingerprints.insert(amendment_operations_fingerprint(&amendment)?);
     }
     Ok(fingerprints)
-}
-
-pub(super) fn durable_failure_fingerprint_counts(
-    plan_history: &[Value],
-) -> BTreeMap<ExecutionHash, u32> {
-    let mut counts: BTreeMap<ExecutionHash, u32> = BTreeMap::new();
-    for entry in plan_history {
-        let Some(fingerprint) = entry
-            .get("failure_fingerprint")
-            .and_then(Value::as_str)
-            .and_then(|value| value.parse::<ExecutionHash>().ok())
-        else {
-            continue;
-        };
-        let count = entry
-            .get("failure_fingerprint_count")
-            .and_then(Value::as_u64)
-            .map_or(1, |count| u32::try_from(count).unwrap_or(u32::MAX));
-        counts
-            .entry(fingerprint)
-            .and_modify(|persisted| *persisted = (*persisted).max(count))
-            .or_insert(count);
-    }
-    counts
 }
 
 pub(super) fn task_failure_fingerprint(
@@ -538,29 +492,6 @@ pub(super) fn execution_run_started_delivery(
     }
 }
 
-/// Joins the run wake handoff before an externally visible mutation returns.
-pub(super) async fn call_run_wake(
-    ctx: &Context<'_>,
-    run_uid: uuid::Uuid,
-    wake_epoch: u64,
-    reason: ExecutionRunWakeReason,
-    handoff_started: std::time::Instant,
-) -> Result<(), HandlerError> {
-    crate::restate_identity::replay_safe_request(
-        ctx.workflow_client::<ExecutionRunClient>(run_uid.to_string())
-            .wake(Json::from(ExecutionRunWakeRequest {
-                run_uid,
-                wake_epoch,
-                reason,
-            })),
-    )
-    .call()
-    .await
-    .map_err(HandlerError::from)?;
-    record_execution_mutation_run_wake_ack(handoff_started.elapsed());
-    Ok(())
-}
-
 #[cfg(feature = "integration")]
 pub(super) async fn pause_execution_mutation_handoff_for_test() {
     if std::env::var("MOA_EXECUTION_TEST_PAUSE_MUTATION_HANDOFF").as_deref() == Ok("true") {
@@ -578,11 +509,5 @@ pub(super) fn invalid_execution_request(message: impl Into<String>) -> HandlerEr
 }
 
 pub(super) fn execution_error(error: moa_execution::Error) -> HandlerError {
-    match error {
-        moa_execution::Error::Storage { message } => {
-            TerminalError::new_with_code(503, format!("execution storage unavailable: {message}"))
-                .into()
-        }
-        other => invalid_execution_request(other.to_string()),
-    }
+    crate::workflows::errors::execution_error_to_handler_error(error)
 }

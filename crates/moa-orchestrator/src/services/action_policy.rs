@@ -574,6 +574,7 @@ mod tests {
                 run_uid: Uuid::from_u128(72),
                 task_uid: Uuid::from_u128(73),
                 generation: 1,
+                attempt_generation: 1,
             }),
         );
         request.capability_policy_context = Some(CapabilityPolicyContext::artifact(
@@ -635,6 +636,7 @@ mod tests {
                 run_uid: Uuid::from_u128(78),
                 task_uid: Uuid::from_u128(79),
                 generation: 1,
+                attempt_generation: 1,
             }),
         );
         request.capability_policy_context = Some(CapabilityPolicyContext::artifact(
@@ -759,6 +761,7 @@ mod tests {
                     run_uid: Uuid::from_u128(10),
                     task_uid: Uuid::from_u128(20),
                     generation: 3,
+                    attempt_generation: 3,
                 }),
             );
 

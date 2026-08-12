@@ -2,6 +2,10 @@
 #![allow(clippy::result_large_err)]
 
 use crate::connector_credential_proxy::ConnectorCredentialProxy;
+use crate::external_job_callback_proxy::{
+    EXTERNAL_JOB_CALLBACK_PUBLIC_ROUTE, ExternalJobCallbackProxy,
+    MAX_EXTERNAL_JOB_CALLBACK_BODY_BYTES,
+};
 use crate::ingress::call_path;
 use crate::{headers, proxy::OrchestratorProxy};
 use axum::Router;
@@ -44,6 +48,7 @@ pub(crate) mod auth_accounts;
 mod connectors;
 mod contact_messages;
 pub(crate) mod dashboard;
+mod external_jobs;
 mod knowledge;
 pub(crate) mod lineage;
 mod memory;
@@ -94,6 +99,8 @@ pub struct AppState {
     pub proxy: Arc<OrchestratorProxy>,
     /// Exact-path proxy to private orchestrator credential ingress.
     pub connector_credentials: Arc<ConnectorCredentialProxy>,
+    /// Exact-path proxy to private asynchronous-provider callback ingress.
+    pub external_job_callbacks: Arc<ExternalJobCallbackProxy>,
     /// ClickHouse lineage store when `[clickhouse]` is configured; lineage
     /// reads and offboarding deletes follow the write backend.
     pub clickhouse_lineage: Option<Arc<moa_lineage_sink::ClickHouseStore>>,
@@ -180,6 +187,11 @@ pub(crate) fn base_router(state: AppState) -> Router {
             post(auth_accounts::set_user_password),
         )
         .route("/v1/whoami", get(whoami::handle))
+        .route(
+            EXTERNAL_JOB_CALLBACK_PUBLIC_ROUTE,
+            post(external_jobs::handle_callback)
+                .layer(DefaultBodyLimit::max(MAX_EXTERNAL_JOB_CALLBACK_BODY_BYTES)),
+        )
         .route(
             "/.well-known/oauth-authorization-server",
             get(oauth::authorization_server_metadata),

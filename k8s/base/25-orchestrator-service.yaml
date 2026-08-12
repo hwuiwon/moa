@@ -18,8 +18,8 @@ spec:
     - name: health
       port: 9081
       targetPort: health
-    # Private connector credential ingress. ClusterIP plus the orchestrator
+    # Private connector-credential and provider-callback ingress. ClusterIP plus the orchestrator
     # NetworkPolicy limits this port to moa-edge pods in moa-system.
-    - name: credentials
+    - name: internal
       port: 10023
-      targetPort: credentials
+      targetPort: internal

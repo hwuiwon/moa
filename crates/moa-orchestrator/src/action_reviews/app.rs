@@ -433,8 +433,9 @@ pub(crate) async fn mark_owner_registered(
     pool: sqlx::PgPool,
     storage_partition_id: StoragePartitionId,
     review_id: Uuid,
+    expected_owner: Option<&ActionReviewOwner>,
 ) -> Result<(), HandlerError> {
-    store::mark_owner_registered(pool, storage_partition_id, review_id).await
+    store::mark_owner_registered(pool, storage_partition_id, review_id, expected_owner).await
 }
 
 fn decision_from_request(request: &DecideActionReviewRequest) -> ActionReviewDecision {

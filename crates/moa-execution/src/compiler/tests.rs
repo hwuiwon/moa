@@ -1,12 +1,13 @@
 //! Unit tests for deterministic execution compilation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::Utc;
 use moa_artifacts::execution_plan::{
     CompletionCheck, CompletionCheckKind, ExecutionBudgetLimit, ExecutionCancelPolicy,
     ExecutionGoalContract, ExecutionNode, ExecutionOperation, ExecutionPlanDefinition,
-    ExecutionRequirement, PlanAmendment, PlanAmendmentOperation, RetryPolicy,
+    ExecutionRequirement, ExecutionTemporalTarget, ExecutionWaitExpiryAction, ExecutionWaitPolicy,
+    PlanAmendment, PlanAmendmentOperation, RetryPolicy,
 };
 use moa_config::ExecutionConfig;
 use serde_json::json;
@@ -54,13 +55,14 @@ fn execution_planning_amendment_cannot_remove_sole_goal_serving_output() {
                 node_id: "output".to_string(),
             }],
         },
-        projection: ExecutionProjection {
+        projection: ExecutionAmendmentProjection {
             plan_revision: 1,
             node_statuses: BTreeMap::from([(
                 "output".to_string(),
                 crate::state::ExecutionNodeStatus::Pending,
             )]),
-            tasks: Vec::new(),
+            started_node_ids: BTreeSet::new(),
+            replan_tasks: Vec::new(),
         },
         catalog: request.catalog,
         authorization: request.authorization,
@@ -74,6 +76,148 @@ fn execution_planning_amendment_cannot_remove_sole_goal_serving_output() {
         outcome.report.issues.iter().any(|issue| {
             issue.code == "unserved_requirement" || issue.code == "plan_structure"
         })
+    );
+}
+
+#[test]
+fn execution_planning_compiler_rejects_completion_metadata_over_activation_bound() {
+    // Pins: bounded terminal evaluation never inherits an unbounded goal/check collection from
+    // an otherwise valid plan; completion metadata has its own ceiling within the activation.
+    let mut request = output_only_compile_request();
+    request.config.maximum_activation_steps = 1;
+
+    let outcome = compile(request);
+
+    assert!(outcome.compiled.is_none());
+    assert!(
+        outcome
+            .report
+            .issues
+            .iter()
+            .any(|issue| { issue.code == "completion_metadata_exceeds_activation_bound" })
+    );
+}
+
+#[test]
+fn execution_planning_compiler_rejects_plan_nodes_over_activation_bound() {
+    // Pins: run admission can seed every node aggregate atomically because canonical plans cannot
+    // encode high cardinality as nodes; large work must remain inside pageable map/reduce tasks.
+    let mut request = output_only_compile_request();
+    request.config.maximum_activation_steps = 2;
+    let template = request.plan.nodes[0].clone();
+    request.plan.nodes = (0..2)
+        .map(|index| ExecutionNode {
+            id: format!("output_{index}"),
+            ..template.clone()
+        })
+        .collect();
+    let exact_bound = compile(request.clone());
+    assert!(
+        exact_bound
+            .report
+            .issues
+            .iter()
+            .all(|issue| issue.code != "plan_nodes_exceed_activation_bound")
+    );
+
+    request.plan.nodes.push(ExecutionNode {
+        id: "output_2".to_string(),
+        ..template
+    });
+
+    let outcome = compile(request);
+
+    assert!(outcome.compiled.is_none());
+    assert!(
+        outcome
+            .report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "plan_nodes_exceed_activation_bound")
+    );
+}
+
+#[test]
+fn execution_planning_amendment_rejects_result_over_activation_bound() {
+    // Pins: an amendment cannot bypass the initial node bound by appending many small nodes.
+    let request = output_only_compile_request();
+    let compiled = compile(request.clone())
+        .compiled
+        .expect("output-only fixture should compile");
+    let template = compiled.plan.definition.nodes[0].clone();
+    let outcome = validate_amendment(ValidateAmendmentRequest {
+        goal: compiled.goal,
+        active_plan: compiled.plan,
+        amendment: PlanAmendment {
+            base_plan_revision: 1,
+            reason: "Attempt to bypass the node bound".to_string(),
+            evidence: json!({}),
+            operations: (0..2)
+                .map(|index| PlanAmendmentOperation::AddNode {
+                    node: ExecutionNode {
+                        id: format!("extra_{index}"),
+                        ..template.clone()
+                    },
+                })
+                .collect(),
+        },
+        projection: ExecutionAmendmentProjection {
+            plan_revision: 1,
+            node_statuses: BTreeMap::from([(
+                "output".to_string(),
+                crate::state::ExecutionNodeStatus::Completed,
+            )]),
+            started_node_ids: BTreeSet::from(["output".to_string()]),
+            replan_tasks: Vec::new(),
+        },
+        catalog: request.catalog,
+        authorization: request.authorization,
+        remaining_budget: generous_budget(),
+        config: ExecutionConfig {
+            maximum_activation_steps: 2,
+            ..ExecutionConfig::default()
+        },
+        now: Utc::now(),
+    });
+
+    assert!(outcome.plan.is_none());
+    assert!(
+        outcome
+            .report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "plan_nodes_exceed_activation_bound")
+    );
+}
+
+#[test]
+fn execution_planning_compiler_rejects_verifiers_over_dispatch_batch() {
+    // Pins: verifier materialization cannot commit more compute-ready tasks than one hard
+    // dispatcher batch even when the general activation-step limit is larger.
+    let mut request = output_only_compile_request();
+    request.config.dispatch_batch_size = 1;
+    for index in 0..2 {
+        request.goal.completion_checks.push(CompletionCheck {
+            id: format!("verifier_{index}"),
+            description: format!("Verify completion pass {index}."),
+            requirement_ids: vec!["req_report".to_string()],
+            constraint_ids: Vec::new(),
+            kind: CompletionCheckKind::AgentVerifier {
+                instructions: "Return a persisted pass/fail verdict.".to_string(),
+                max_turns: 1,
+            },
+        });
+    }
+
+    let outcome = compile(request);
+
+    assert!(outcome.compiled.is_none());
+    assert!(
+        outcome
+            .report
+            .issues
+            .iter()
+            .any(|issue| { issue.code == "completion_verifiers_exceed_dispatch_bound" })
     );
 }
 
@@ -100,6 +244,10 @@ fn output_only_compile_request() -> CompileExecutionRequest {
         },
         plan: ExecutionPlanDefinition {
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
+            input_wait_policy: ExecutionWaitPolicy {
+                expiry: ExecutionTemporalTarget::After { delay_seconds: 60 },
+                on_expiry: ExecutionWaitExpiryAction::FailTask,
+            },
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
             nodes: vec![ExecutionNode {
@@ -140,6 +288,6 @@ fn generous_budget() -> ExecutionBudgetLimit {
         max_tasks: Some(100),
         max_tool_calls: Some(100),
         max_retrieved_bytes: Some(1_000_000),
-        deadline_at: None,
+        deadline_at: Some(Utc::now() + chrono::Duration::days(1)),
     }
 }

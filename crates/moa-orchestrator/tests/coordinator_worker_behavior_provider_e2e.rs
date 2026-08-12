@@ -2037,6 +2037,7 @@ async fn assert_generated_plan_audits_and_authorization(
                 contact_id: None,
                 session_id: harness.session.session_id,
                 originating_user_sequence_num: originating_sequence,
+                deadline_at: chrono::Utc::now() + chrono::TimeDelta::days(1),
                 requested_template: None,
             },
         )
@@ -2489,6 +2490,30 @@ async fn recovery_matrix_blocked_llm_invocation(
         }
     }
     bail!("{workflow_service} has no incomplete LLMGateway child: {parents:?}")
+}
+
+async fn recovery_matrix_execution_task_attempt_key(
+    fixture: &OrchestratorTestFixture,
+    run_uid: uuid::Uuid,
+) -> Result<String> {
+    let pool = sqlx::PgPool::connect(&fixture.postgres_url)
+        .await
+        .context("connect recovery-matrix execution database")?;
+    let dispatch_uids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT dispatch_uid FROM moa.execution_dispatch_outbox \
+         WHERE run_uid = $1 AND dispatch_kind = 'task_attempt' \
+         ORDER BY created_at, dispatch_uid",
+    )
+    .bind(run_uid)
+    .fetch_all(&pool)
+    .await
+    .context("load recovery-matrix task-attempt dispatch identity")?;
+    let [dispatch_uid] = dispatch_uids.as_slice() else {
+        bail!(
+            "expected exactly one task-attempt dispatch for run {run_uid}, got {dispatch_uids:?}"
+        );
+    };
+    Ok(dispatch_uid.to_string())
 }
 
 async fn recovery_matrix_assert_child_joined(
@@ -3053,6 +3078,12 @@ fn recovery_matrix_execution_candidate(
         },
         plan: ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
+            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
+                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
+                    delay_seconds: 86_400,
+                },
+                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailRun,
+            },
             input_schema: json!({"type": "object", "additionalProperties": false}),
             output_schema: output_schema.clone(),
             nodes: vec![
@@ -3180,7 +3211,7 @@ async fn recovery_matrix_wait_for_execution_status(
                 fixture,
                 "SELECT id, invoked_by_id, target_service_name, target_service_key, status \
                  FROM sys_invocation WHERE target_service_name IN \
-                 ('ExecutionRun', 'ExecutionTask', 'LLMGateway') \
+                 ('ExecutionRunController', 'ExecutionTaskAttempt', 'ExecutionDispatcher', 'LLMGateway') \
                  ORDER BY target_service_name, id",
             )
             .await
@@ -3225,9 +3256,9 @@ async fn recovery_matrix_wait_for_session_unfenced(
 #[ignore = "requires Docker for the Postgres/Restate/OpenFGA/Redis scripted-provider fixture"]
 async fn recovery_matrix_execution_task_llm_cancel_crash_restart_fences_budget_service_e2e()
 -> Result<()> {
-    // Pins: cancelling a durable run joins its blocked ExecutionTask LLM child across a hard
-    // orchestrator crash, records one cancelled run/task with zero actual usage, and permits a
-    // fresh replacement durable run to execute its task exactly once.
+    // Pins: cancelling a durable run joins its blocked ExecutionTaskAttempt LLM child across a
+    // hard orchestrator crash, records one cancelled run/task with zero actual usage, and permits
+    // a fresh replacement durable run to execute its task exactly once.
     let fixture = OrchestratorTestFixture::with_script(recovery_matrix_blocked_execution_script()?)
         .await
         .context("boot execution-task recovery-matrix fixture")?;
@@ -3268,8 +3299,14 @@ async fn recovery_matrix_execution_task_llm_cancel_crash_restart_fences_budget_s
         Duration::from_secs(60),
     )
     .await?;
-    let (parent_invocation_id, child_invocation_id) =
-        recovery_matrix_blocked_llm_invocation(&fixture, "ExecutionTask", None).await?;
+    let task_attempt_key =
+        recovery_matrix_execution_task_attempt_key(&fixture, execution_run_uid).await?;
+    let (parent_invocation_id, child_invocation_id) = recovery_matrix_blocked_llm_invocation(
+        &fixture,
+        "ExecutionTaskAttempt",
+        Some(&task_attempt_key),
+    )
+    .await?;
 
     let session_snapshot = session.snapshot().await?;
     ensure!(

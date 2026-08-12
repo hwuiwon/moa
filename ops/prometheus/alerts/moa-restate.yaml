@@ -127,3 +127,12 @@ spec:
           annotations:
             summary: Restate has a partition without an effective leader
             description: "Only {{ $value }} effective partition leaders are visible. Compare with restate_num_partitions and inspect cluster membership before changing placement."
+
+        - alert: MOARestateOldDeploymentDrainAge
+          expr: max(moa_restate_draining_deployment_oldest_age_seconds) > 3600
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: An old Restate deployment revision is draining too long
+            description: "The oldest draining MOA service revision is {{ $value }} seconds old (threshold 1h). Check remaining invocations and the draining-revision HPA before retaining full old-version capacity."
