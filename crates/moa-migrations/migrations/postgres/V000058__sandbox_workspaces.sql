@@ -402,8 +402,6 @@ CREATE TABLE moa.sandbox_workspace_checkpoints (
         UNIQUE (checkpoint_id, workspace_id, tenant_id),
     CONSTRAINT sandbox_workspace_checkpoints_identity_generation_key
         UNIQUE (checkpoint_id, workspace_id, tenant_id, generation),
-    CONSTRAINT sandbox_workspace_checkpoints_generation_key
-        UNIQUE (tenant_id, workspace_id, generation),
     CONSTRAINT sandbox_workspace_checkpoints_workspace_fk
         FOREIGN KEY (workspace_id, tenant_id)
         REFERENCES moa.sandbox_workspaces (workspace_id, tenant_id) ON DELETE RESTRICT,
@@ -486,6 +484,12 @@ CREATE TABLE moa.sandbox_workspace_checkpoints (
     )
 );
 
+-- Failed attempts remain immutable audit rows but do not consume the next
+-- committed revision number forever.
+CREATE UNIQUE INDEX sandbox_workspace_checkpoints_generation_key
+    ON moa.sandbox_workspace_checkpoints (tenant_id, workspace_id, generation)
+    WHERE lifecycle_state IN ('creating', 'available', 'deleting', 'deleted');
+
 CREATE INDEX sandbox_workspace_checkpoints_gc_candidates_idx
     ON moa.sandbox_workspace_checkpoints (
         tenant_id, retention_state, gc_retry_not_before, created_at, generation
@@ -566,6 +570,10 @@ BEGIN
 
     IF OLD.lifecycle_state = 'deleted' AND NEW IS DISTINCT FROM OLD THEN
         RAISE EXCEPTION 'sandbox checkpoint tombstone is immutable'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    IF OLD.lifecycle_state = 'failed' AND NEW IS DISTINCT FROM OLD THEN
+        RAISE EXCEPTION 'failed sandbox checkpoint audit is immutable'
             USING ERRCODE = 'check_violation';
     END IF;
     RETURN NEW;

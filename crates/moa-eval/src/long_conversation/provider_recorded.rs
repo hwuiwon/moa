@@ -3,7 +3,6 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use moa_core::transcript::{ProviderEvent, Transcript};
 use moa_core::{
     error::MoaError, error::Result as MoaResult, traits::LLMProvider,
     types::completion::CompletionContent, types::completion::CompletionRequestView,
@@ -12,6 +11,7 @@ use moa_core::{
     types::completion::TokenUsage, types::context::MessageRole, types::identifiers::ModelId,
     types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
 };
+use moa_eval_core::transcript::{ProviderEvent, Transcript};
 
 const COMPACTION_MAX_OUTPUT_TOKENS: usize = 700;
 const RECORDED_COMPACTION_SUMMARY: &str =

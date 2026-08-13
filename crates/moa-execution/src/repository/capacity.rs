@@ -359,6 +359,11 @@ impl ExecutionRepository {
         let mut admitted = Vec::with_capacity(bounded_limit);
         let mut saturated_tenants = Vec::<Uuid>::new();
         let mut exhausted_runs = Vec::<Uuid>::new();
+        // The transaction retains each tenant row lock until commit. Cache its remaining
+        // capacity so a same-tenant batch does not re-issue the identical INSERT and FOR UPDATE
+        // for every admitted task while still decrementing only after all durable state for that
+        // task has been written below.
+        let mut tenant_available_by_id = BTreeMap::<Uuid, u64>::new();
         while admitted.len() < bounded_limit {
             let Some(tenant_id) = select_fair_ready_tenant(
                 &mut conn,
@@ -371,21 +376,28 @@ impl ExecutionRepository {
             else {
                 break;
             };
-            ensure_tenant_bucket(
-                conn.as_mut(),
-                TenantId::from(tenant_id),
-                "active_tasks",
-                i64::from(config.max_tenant_active_tasks),
-            )
-            .await?;
-            let tenant_available = lock_capacity_bucket(
-                conn.as_mut(),
-                "tenant",
-                Some(tenant_id),
-                "active_tasks",
-                i64::from(config.max_tenant_active_tasks),
-            )
-            .await?;
+            let tenant_available = match tenant_available_by_id.get(&tenant_id) {
+                Some(available) => *available,
+                None => {
+                    ensure_tenant_bucket(
+                        conn.as_mut(),
+                        TenantId::from(tenant_id),
+                        "active_tasks",
+                        i64::from(config.max_tenant_active_tasks),
+                    )
+                    .await?;
+                    let available = lock_capacity_bucket(
+                        conn.as_mut(),
+                        "tenant",
+                        Some(tenant_id),
+                        "active_tasks",
+                        i64::from(config.max_tenant_active_tasks),
+                    )
+                    .await?;
+                    tenant_available_by_id.insert(tenant_id, available);
+                    available
+                }
+            };
             if tenant_available == 0 {
                 saturated_tenants.push(tenant_id);
                 continue;
@@ -565,6 +577,18 @@ impl ExecutionRepository {
             )
             .await?;
             advance_tenant_fairness(&mut conn, tenant_id, now).await?;
+            let tenant_available = tenant_available_by_id.get_mut(&tenant_id).ok_or_else(|| {
+                Error::InvalidRepositoryData {
+                    message: "admitted task has no locked tenant capacity bucket".to_string(),
+                }
+            })?;
+            *tenant_available =
+                tenant_available
+                    .checked_sub(1)
+                    .ok_or_else(|| Error::InvalidRepositoryData {
+                        message: "locked tenant active_tasks capacity was over-admitted"
+                            .to_string(),
+                    })?;
             admitted.push(ExecutionAdmissionItem {
                 dispatch_uid,
                 capacity_reservation_uid,

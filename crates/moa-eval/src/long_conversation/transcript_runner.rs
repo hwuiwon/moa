@@ -16,7 +16,6 @@ use moa_brain::{
     runtime_events::RuntimeEvent,
 };
 use moa_config::MoaConfig;
-use moa_core::transcript::Transcript;
 use moa_core::{
     error::MoaError, events::Event, traits::LLMProvider, traits::SessionStore,
     types::completion::CompletionRequestView, types::completion::CompletionStream,
@@ -31,6 +30,7 @@ use moa_core::{
     types::segments::TaskSegment, types::segments::deterministic_segment_id,
     types::session::SessionMeta,
 };
+use moa_eval_core::transcript::Transcript;
 use moa_eval_core::{
     AgentConfig, ConversationCost, EngineOptions, Error, EvalResult, EvalScore, EvalScoreValue,
     EvalStatus, LongConversationMode, LongSessionInterleaving, LongTestCase, Result, TestCase,

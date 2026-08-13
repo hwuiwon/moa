@@ -607,6 +607,27 @@ const SENDERS: &[SenderManifestEntry] = &[
         "dispatch"
     ),
     sender!(
+        "crates/moa-orchestrator/src/services/execution_amendment_planner.rs",
+        "complete",
+        TRACE_HELPER,
+        "LLMGatewayClient",
+        "complete_bounded"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_amendment_planner.rs",
+        "dispatch_parked_replan_planning",
+        TRACE_HELPER,
+        "ExecutionAmendmentPlannerClient",
+        "plan"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/services/execution_amendment_planner.rs",
+        "submit_amendment",
+        IDENTITY_TRACE_HELPER,
+        "ExecutionClient",
+        "apply_amendment"
+    ),
+    sender!(
         "crates/moa-orchestrator/src/services/execution_dispatcher.rs",
         "accept_target",
         TRACE_HELPER,
@@ -994,15 +1015,8 @@ const SENDERS: &[SenderManifestEntry] = &[
         "mark_consolidation_started"
     ),
     sender!(
-        "crates/moa-orchestrator/src/workflows/execution_compensation_attempt.rs",
+        "crates/moa-orchestrator/src/workflows/attempt_slice.rs",
         "kick_dispatcher",
-        TRACE_HELPER,
-        "ExecutionDispatcherClient",
-        "dispatch"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/execution_compensation_attempt.rs",
-        "kick_dispatcher_shared",
         TRACE_HELPER,
         "ExecutionDispatcherClient",
         "dispatch"
@@ -1036,21 +1050,7 @@ const SENDERS: &[SenderManifestEntry] = &[
         "checkpoint_and_release_execution_hands"
     ),
     sender!(
-        "crates/moa-orchestrator/src/workflows/execution_task_attempt.rs",
-        "kick_dispatcher",
-        TRACE_HELPER,
-        "ExecutionDispatcherClient",
-        "dispatch"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/execution_task_attempt.rs",
-        "kick_dispatcher_shared",
-        TRACE_HELPER,
-        "ExecutionDispatcherClient",
-        "dispatch"
-    ),
-    sender!(
-        "crates/moa-orchestrator/src/workflows/execution_task_attempt/active.rs",
+        "crates/moa-orchestrator/src/workflows/execution_task_attempt/active/agent.rs",
         "execute_agent_turn",
         TRACE_HELPER,
         "LLMGatewayClient",
@@ -1624,6 +1624,14 @@ const RECEIVERS: &[ReceiverManifestEntry] = &[
         client: "ExecutionClient",
         receiver: ReceiverKind::MoaHandler {
             path: "crates/moa-orchestrator/src/services/execution/handlers.rs",
+            symbol: "*",
+            adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
+        },
+    },
+    ReceiverManifestEntry {
+        client: "ExecutionAmendmentPlannerClient",
+        receiver: ReceiverKind::MoaHandler {
+            path: "crates/moa-orchestrator/src/services/execution_amendment_planner.rs",
             symbol: "*",
             adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
         },

@@ -39,6 +39,7 @@ workspace-hack = { workspace = true }
 
 [dev-dependencies]
 insta.workspace = true
+moa-eval-core = { workspace = true }
 moa-memory-graph = { workspace = true }
 moa-runtime-store = { workspace = true, features = ["redis"] }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }

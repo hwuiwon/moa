@@ -14,7 +14,7 @@ use crate::workflows::{
     durable_utc_now,
     errors::execution_error_to_handler_error,
     execution_task_attempt::{
-        ExecutionTaskAttemptImpl, active::TaskAttemptContinuation, task_attempt_fence,
+        ExecutionTaskAttemptImpl, continuation::TaskAttemptContinuation, task_attempt_fence,
         yielding::checkpoint_task_hands_workflow,
     },
 };

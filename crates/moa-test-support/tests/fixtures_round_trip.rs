@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use moa_core::transcript::{ProviderEvent, Transcript, TranscriptError, Turn, UserUtterance};
+use moa_eval_core::transcript::{ProviderEvent, Transcript, TranscriptError, Turn, UserUtterance};
 use moa_test_support::postgres::bootstrap_test_db;
 use moa_test_support::pricing::PricingTable;
 use sqlx::Row;

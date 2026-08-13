@@ -15,6 +15,8 @@ async fn one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_a
     const RUN_COUNT: usize = 1_000;
     const FLEET_CAP: usize = 32;
     const ADMISSION_CONCURRENCY: usize = 8;
+    // Matches `MoaExecutionOldestReadyAgeHigh` in the checked-in alert rules.
+    const OLDEST_READY_ALERT_SECONDS: f64 = 120.0;
     // Seconds between admission and the shared absolute wake, and the margin by
     // which every run must already be parked before that wake arrives.
     const PRE_WAKE_SECONDS: i64 = 180;
@@ -195,7 +197,7 @@ async fn one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_a
                 && metric
                     .data_points()
                     .iter()
-                    .any(|point| point.value() > 0.0 && point.value() <= 60.0)
+                    .any(|point| point.value() > 0.0 && point.value() <= OLDEST_READY_ALERT_SECONDS)
         })
         .await
         .context("observe checked production oldest-ready-age metric")?;
@@ -203,11 +205,11 @@ async fn one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_a
         oldest_ready_metric
             .data_points()
             .iter()
-            .any(|point| point.value() > 0.0 && point.value() <= 60.0)
+            .any(|point| { point.value() > 0.0 && point.value() <= OLDEST_READY_ALERT_SECONDS })
     );
 
     let mut released = 0;
-    let mut maximum_oldest_ready_seconds = 0.0_f64;
+    let mut maximum_raw_oldest_ready_seconds = 0.0_f64;
     let drain_deadline = Instant::now() + DRAIN_BUDGET;
     while released < RUN_COUNT {
         let next = (released + FLEET_CAP).min(RUN_COUNT);
@@ -218,28 +220,29 @@ async fn one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_a
             );
         }
         controller.wait_for_calls(next, remaining).await?;
-        let wave_active: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(quantity), 0)::BIGINT FROM moa.execution_capacity_reservation \
-             WHERE tenant_id = $1 AND resource_dimension = 'active_tasks' AND state <> 'released'",
+        // Observe both invariants from one statement snapshot so diagnostics do not hold every
+        // fleet-capped wave across a second database round trip.
+        let (wave_active, oldest): (i64, f64) = sqlx::query_as(
+            "SELECT \
+                 (SELECT COALESCE(SUM(quantity), 0)::BIGINT \
+                  FROM moa.execution_capacity_reservation \
+                  WHERE tenant_id = $1 AND resource_dimension = 'active_tasks' \
+                    AND state <> 'released'), \
+                 (SELECT COALESCE(EXTRACT(EPOCH FROM (now() - MIN(ready_at))), 0)::DOUBLE PRECISION \
+                  FROM moa.execution_task WHERE tenant_id = $1 AND status = 'ready')",
         )
         .bind(tenant_id.0)
         .fetch_one(&pool)
         .await?;
         assert!(wave_active <= FLEET_CAP as i64);
-        let oldest: f64 = sqlx::query_scalar(
-            "SELECT COALESCE(EXTRACT(EPOCH FROM (now() - MIN(ready_at))), 0)::DOUBLE PRECISION \
-             FROM moa.execution_task WHERE tenant_id = $1 AND status = 'ready'",
-        )
-        .bind(tenant_id.0)
-        .fetch_one(&pool)
-        .await?;
-        maximum_oldest_ready_seconds = maximum_oldest_ready_seconds.max(oldest);
+        maximum_raw_oldest_ready_seconds = maximum_raw_oldest_ready_seconds.max(oldest);
         controller.release(next - released);
         released = next;
     }
     assert!(
-        maximum_oldest_ready_seconds <= 60.0,
-        "oldest ready task exceeded bounded age: {maximum_oldest_ready_seconds}s"
+        maximum_raw_oldest_ready_seconds <= OLDEST_READY_ALERT_SECONDS,
+        "raw oldest-ready age exceeded the production alert threshold: \
+         {maximum_raw_oldest_ready_seconds}s"
     );
     // The terminal settle is the tail of the same fleet-capped drain the loop above
     // budgets `DRAIN_BUDGET` for: every one of `RUN_COUNT` runs still has to finish

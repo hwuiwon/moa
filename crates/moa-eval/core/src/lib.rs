@@ -16,6 +16,7 @@ pub mod reliability;
 pub mod replay;
 pub mod resource_report;
 pub mod results;
+pub mod transcript;
 pub mod types;
 
 pub use admission::{

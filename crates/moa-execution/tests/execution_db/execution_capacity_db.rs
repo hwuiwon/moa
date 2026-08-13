@@ -300,6 +300,73 @@ async fn weighted_admission_is_atomic_bounded_and_fleet_owned_db() -> TestResult
 }
 
 #[tokio::test]
+async fn same_tenant_batch_stops_at_capacity_ceiling_db() -> TestResult {
+    // Pins: one multi-item admission stops exactly at the tenant ceiling, leaves excess work
+    // ready, and keeps task state, receipts, and fleet/tenant counters consistent.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let repository = ExecutionRepository::new(pool.clone());
+    let tenant_id = TenantId::new();
+    let run_uid = ready_run(&repository, tenant_id, "same-tenant-capacity", 5).await?;
+    let config = ExecutionConfig {
+        max_fleet_active_tasks: 5,
+        max_tenant_active_tasks: 3,
+        max_in_flight_tasks: 5,
+        ..ExecutionConfig::default()
+    };
+
+    let first = repository
+        .admit_ready_attempts(&config, 5, Utc::now())
+        .await?;
+    assert_eq!(first.admitted.len(), 3);
+    assert!(
+        first
+            .admitted
+            .iter()
+            .all(|item| item.tenant_id == tenant_id),
+        "the batch must contain only the owning tenant's tasks"
+    );
+    assert!(first.retry_after.is_some());
+
+    let task_counts: (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE status='dispatching'), \
+                count(*) FILTER (WHERE status='ready') \
+         FROM moa.execution_task WHERE run_uid=$1",
+    )
+    .bind(run_uid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(task_counts, (3, 2));
+    let bucket_counts: (i64, i64) = sqlx::query_as(
+        "SELECT \
+             max(reserved_quantity) FILTER (WHERE scope_kind='fleet'), \
+             max(reserved_quantity) FILTER (WHERE scope_kind='tenant' AND tenant_id=$1) \
+         FROM moa.execution_capacity_bucket WHERE resource_dimension='active_tasks'",
+    )
+    .bind(tenant_id.0)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(bucket_counts, (3, 3));
+    let reservation_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM moa.execution_capacity_reservation \
+         WHERE tenant_id=$1 AND run_uid=$2 AND resource_dimension='active_tasks' \
+           AND state='reserved'",
+    )
+    .bind(tenant_id.0)
+    .bind(run_uid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(reservation_count, 3);
+
+    let second = repository
+        .admit_ready_attempts(&config, 5, Utc::now())
+        .await?;
+    assert!(second.admitted.is_empty());
+    assert!(second.retry_after.is_some());
+    Ok(())
+}
+
+#[tokio::test]
 async fn requested_admission_limit_is_a_hard_bound_independent_of_vec_capacity_db() -> TestResult {
     // Pins: a dispatcher request for one attempt admits exactly one durable task/outbox/watchdog
     // tuple even when fleet, tenant, run, and allocator capacity could accept a larger batch.

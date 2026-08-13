@@ -7,10 +7,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{
-    types::completion::StopReason, types::completion::TokenUsage,
-    types::completion::ToolCallContent,
-};
+use moa_core::types::completion::{StopReason, TokenUsage, ToolCallContent};
 
 /// A recorded scenario transcript.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

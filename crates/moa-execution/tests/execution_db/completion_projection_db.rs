@@ -510,6 +510,19 @@ async fn replan_stop_completion_pages_rebind_exact_wake_without_duplicate_verifi
         },
     };
     sqlx::query(
+        "UPDATE moa.execution_task SET status='reserved',updated_at=NOW() WHERE run_uid=$1",
+    )
+    .bind(run.run_uid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE moa.execution_task SET status='running',attempt_state='running', \
+             last_progress_at=NOW(),updated_at=NOW() WHERE run_uid=$1",
+    )
+    .bind(run.run_uid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
         "UPDATE moa.execution_task SET status='failed',attempt_state='terminal', \
              current_outcome=$2,completed_at=NOW(),updated_at=NOW() \
          WHERE run_uid=$1 AND task_id<>$3",
@@ -537,6 +550,7 @@ async fn replan_stop_completion_pages_rebind_exact_wake_without_duplicate_verifi
     .bind(run.run_uid)
     .execute(&pool)
     .await?;
+    set_run_status_path(&pool, run.run_uid, &["running"]).await?;
     sqlx::query(
         "UPDATE moa.execution_run SET status='waiting_replan',ready_task_count=0, \
              active_task_count=0,waiting_task_count=1,waiting_replan_task_count=1, \

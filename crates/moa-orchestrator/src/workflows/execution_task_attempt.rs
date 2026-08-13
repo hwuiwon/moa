@@ -1,6 +1,7 @@
 //! One immutable, bounded task-attempt workflow per durable dispatch identity.
 
 mod active;
+mod continuation;
 mod external;
 mod watchdog;
 mod yielding;

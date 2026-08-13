@@ -123,3 +123,20 @@ For codebase questions, first use `codegraph_explore` when a `.codegraph/`
 index exists. If MCP tools are not available, use
 `./scripts/codegraph explore "<question>"`. For focused local checks, use
 `./scripts/codegraph node`, `query`, `callers`, `callees`, or `impact`.
+
+## Bounded Repository Workflow
+
+Before broad repository work, resolve changed or named paths through
+`.agents/subsystems.toml`; use `cargo xtask plan-subsystem-audit` when a durable
+context packet is useful. Discovery is read-only first. Use at most four
+discovery agents by default, give each only its routed paths, canonical docs,
+and applicable `AGENTS.md` files, and reconcile their exact-path evidence before
+editing.
+
+Implementation write sets must be disjoint. One integration owner runs broad
+Cargo, Docker, or E2E validation after workers stop editing; workers run only
+focused checks for their owned surface. Bound terminal output, keep durable
+reports under `target/agent-audits/`, and update that run's `checkpoint.md` after
+each completed phase so later work can resume without replaying discovery.
+Live, billed, credentialed, 24-hour, and 7-day gates require explicit user
+authorization; a registry entry describes prerequisites but never grants it.

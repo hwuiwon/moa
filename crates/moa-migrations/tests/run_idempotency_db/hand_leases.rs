@@ -925,6 +925,20 @@ async fn hand_storage_v58_requires_legacy_drain_and_installs_tenant_schema_db() 
         )
         .fetch_one(&pool)
         .await?;
+        let checkpoint_generation_index = sqlx::query_scalar::<_, String>(
+            "SELECT indexdef FROM pg_indexes \
+             WHERE schemaname='moa' AND tablename='sandbox_workspace_checkpoints' \
+               AND indexname='sandbox_workspace_checkpoints_generation_key'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let checkpoint_generation_constraint = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_constraint \
+             WHERE conrelid='moa.sandbox_workspace_checkpoints'::regclass \
+               AND conname='sandbox_workspace_checkpoints_generation_key')",
+        )
+        .fetch_one(&pool)
+        .await?;
         pool.close().await;
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
             first_error,
@@ -935,6 +949,8 @@ async fn hand_storage_v58_requires_legacy_drain_and_installs_tenant_schema_db() 
             composite_fk,
             release_receipt_fks,
             release_receipt_retention_guards,
+            checkpoint_generation_index,
+            checkpoint_generation_constraint,
         ))
     }
     .await;
@@ -948,6 +964,8 @@ async fn hand_storage_v58_requires_legacy_drain_and_installs_tenant_schema_db() 
         composite_fk,
         release_receipt_fks,
         release_receipt_retention_guards,
+        checkpoint_generation_index,
+        checkpoint_generation_constraint,
     ) = outcome.expect("V58 should apply after legacy compute is drained");
     assert!(
         first_error.contains("legacy hands remain live"),
@@ -979,5 +997,15 @@ async fn hand_storage_v58_requires_legacy_drain_and_installs_tenant_schema_db() 
     assert!(
         release_receipt_retention_guards,
         "task hand release receipts must reject post-archive writes and fence retention deletes"
+    );
+    assert!(
+        checkpoint_generation_index.contains(
+            "WHERE (lifecycle_state = ANY (ARRAY['creating'::text, 'available'::text, 'deleting'::text, 'deleted'::text]))"
+        ),
+        "only live checkpoint rows may reserve a committed generation: {checkpoint_generation_index}"
+    );
+    assert!(
+        !checkpoint_generation_constraint,
+        "failed checkpoint attempts must not permanently consume the next committed generation"
     );
 }

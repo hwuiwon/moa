@@ -30,7 +30,7 @@ use crate::{
         errors::execution_error_to_handler_error,
         execution_task_attempt::{
             ExecutionTaskAttemptImpl,
-            active::{TaskAttemptContinuation, TaskAttemptContinuationState},
+            continuation::{TaskAttemptContinuation, TaskAttemptContinuationState},
             task_attempt_fence,
             yielding::{begin_release_shared, checkpoint_task_hands_shared},
         },

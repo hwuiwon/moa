@@ -83,3 +83,6 @@ tracing.workspace = true
 url = { workspace = true, optional = true }
 uuid.workspace = true
 workspace-hack = { workspace = true }
+
+[dev-dependencies]
+moa-eval-core = { workspace = true }

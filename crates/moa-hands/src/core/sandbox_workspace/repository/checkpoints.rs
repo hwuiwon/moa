@@ -628,9 +628,18 @@ async fn checkpoint_capacity_matches(
           AND reservation.expected_writer_epoch = $6
           AND reservation.expected_instance_generation = $7
           AND reservation.resource_dimension IN ('checkpoints', 'logical_bytes')
-          AND reservation.reservation_state IN ('pending', 'committed', 'reconciling')
           AND operation.operation_kind = $9
-          AND operation.outcome_class IN ('not_sent', 'unknown')
+          AND (
+                (
+                    operation.outcome_class IN ('not_sent', 'unknown')
+                    AND reservation.reservation_state IN ('pending', 'reconciling')
+                )
+                OR (
+                    operation.outcome_class = 'confirmed'
+                    AND operation.confirmed_disposition = 'resource_present'
+                    AND reservation.reservation_state = 'committed'
+                )
+          )
         "#,
     )
     .bind(binding.tenant_id)

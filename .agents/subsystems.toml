@@ -1,0 +1,333 @@
+version = 1
+
+[audit]
+max_agents = 4
+report_word_limit = 1200
+artifact_root = "target/agent-audits"
+
+[[subsystem]]
+id = "platform-core-configuration"
+owner = "moa-core"
+path_prefixes = [
+  "crates/moa-core/",
+  "crates/moa-config/",
+  "crates/moa-crypto/",
+  "crates/moa-db/",
+  "crates/moa-kms/",
+  "crates/moa-runtime-store/",
+  "crates/moa-wire/",
+]
+docs = [
+  "docs/01-architecture-overview.md",
+  "docs/08-security.md",
+  "docs/10-technology-stack.md",
+  "docs/15-architecture-policy.md",
+  "docs/23-environment-variables.md",
+]
+agent_files = ["AGENTS.md"]
+test_profiles = ["fast-pr", "db-session"]
+make_targets = ["test-fast", "test-db-session"]
+
+[[subsystem]]
+id = "execution-domain-artifacts"
+owner = "moa-execution"
+path_prefixes = ["crates/moa-execution/", "crates/moa-artifacts/"]
+docs = [
+  "docs/01-architecture-overview.md",
+  "docs/02-brain-orchestration.md",
+  "docs/09-skills-and-learning.md",
+  "docs/15-architecture-policy.md",
+]
+agent_files = ["AGENTS.md"]
+local_agents = [
+  { path_prefix = "crates/moa-execution/", file = "crates/moa-execution/AGENTS.md" },
+]
+test_profiles = ["fast-pr", "db-session", "execution-eval-pr"]
+make_targets = ["test-fast", "test-db-session", "e2e-clean-live"]
+
+[[subsystem.live_gates]]
+id = "execution-service-e2e"
+make_target = "e2e-clean-live"
+authorization_env = ["MOA_RUN_LIVE_E2E"]
+services = ["docker", "postgres", "restate", "openfga", "valkey"]
+billed = false
+
+[[subsystem]]
+id = "orchestration-edge-sessions-messaging"
+owner = "moa-orchestrator"
+path_prefixes = [
+  "crates/moa-orchestrator/",
+  "crates/moa-edge/",
+  "crates/moa-session/",
+  "crates/moa-messaging/",
+]
+docs = [
+  "docs/02-brain-orchestration.md",
+  "docs/03-communication-layer.md",
+  "docs/05-session-event-log.md",
+  "docs/12-restate-architecture.md",
+]
+agent_files = ["AGENTS.md"]
+local_agents = [
+  { path_prefix = "crates/moa-orchestrator/", file = "crates/moa-orchestrator/AGENTS.md" },
+]
+test_profiles = [
+  "fast-pr",
+  "db-session",
+  "db-memory",
+  "restate-service-e2e",
+  "orchestrator-service-e2e",
+  "restate-recovery-pr",
+]
+make_targets = ["test-fast", "test-db-session", "test-db-memory", "e2e-clean-live"]
+
+[[subsystem.live_gates]]
+id = "orchestrator-service-e2e"
+make_target = "e2e-clean-live"
+authorization_env = ["MOA_RUN_LIVE_E2E"]
+services = ["docker", "postgres", "restate", "openfga", "valkey", "pii"]
+billed = false
+
+[[subsystem]]
+id = "hands-sandbox-workspaces"
+owner = "moa-hands"
+path_prefixes = ["crates/moa-hands/"]
+docs = [
+  "docs/06-hands-and-mcp.md",
+  "docs/08-security.md",
+  "docs/25-sandbox-workspaces.md",
+]
+agent_files = ["AGENTS.md"]
+local_agents = [
+  { path_prefix = "crates/moa-hands/", file = "crates/moa-hands/AGENTS.md" },
+]
+test_profiles = ["fast-pr", "db-session", "db-memory", "restate-recovery-pr"]
+make_targets = ["test-fast", "test-db-session", "test-db-memory", "e2e-clean-live"]
+
+[[subsystem.live_gates]]
+id = "sandbox-workspace-service-e2e"
+make_target = "e2e-clean-live"
+authorization_env = ["MOA_RUN_LIVE_E2E"]
+services = ["docker", "postgres", "restate", "openfga", "valkey"]
+billed = false
+
+[[subsystem]]
+id = "connectors-knowledge-outbound-security"
+owner = "moa-connectors"
+path_prefixes = [
+  "crates/moa-connectors/",
+  "crates/moa-knowledge/",
+  "crates/moa-security/",
+]
+docs = [
+  "docs/08-security.md",
+  "docs/21-tenant-knowledge-base.md",
+  "docs/24-connectors-and-connections.md",
+]
+agent_files = ["AGENTS.md"]
+local_agents = [
+  { path_prefix = "crates/moa-connectors/", file = "crates/moa-connectors/AGENTS.md" },
+]
+test_profiles = ["fast-pr", "db-session", "db-memory", "restate-service-e2e"]
+make_targets = ["test-fast", "test-db-session", "test-db-memory", "e2e-clean-live"]
+
+[[subsystem.live_gates]]
+id = "connector-service-e2e"
+make_target = "e2e-clean-live"
+authorization_env = ["MOA_RUN_LIVE_E2E"]
+services = ["docker", "postgres", "restate", "openfga"]
+billed = false
+
+[[subsystem]]
+id = "providers-model-governance"
+owner = "moa-providers"
+path_prefixes = ["crates/moa-providers/"]
+docs = [
+  "docs/08-security.md",
+  "docs/10-technology-stack.md",
+  "docs/23-environment-variables.md",
+]
+agent_files = ["AGENTS.md"]
+test_profiles = ["fast-pr", "provider-e2e"]
+make_targets = ["test-fast", "test-provider-e2e"]
+
+[[subsystem.live_gates]]
+id = "provider-e2e"
+make_target = "test-provider-e2e"
+authorization_env = ["MOA_RUN_LIVE_E2E", "MOA_RUN_LIVE_PROVIDER_TESTS"]
+credentials_any_of = ["MOA_ANTHROPIC_API_KEY", "MOA_OPENAI_API_KEY", "MOA_GOOGLE_API_KEY"]
+services = ["docker", "postgres", "restate", "openfga", "valkey"]
+billed = true
+
+[[subsystem]]
+id = "memory-retrieval-brain-context"
+owner = "moa-brain"
+path_prefixes = ["crates/moa-memory/", "crates/moa-retrieval/", "crates/moa-brain/"]
+docs = [
+  "docs/04-memory-architecture.md",
+  "docs/07-context-pipeline.md",
+  "docs/16-evaluation.md",
+  "docs/prompt-caching-architecture.md",
+]
+agent_files = ["AGENTS.md"]
+local_agents = [
+  { path_prefix = "crates/moa-memory/", file = "crates/moa-memory/AGENTS.md" },
+]
+test_profiles = ["fast-pr", "db-memory", "eval-recorded", "provider-e2e"]
+make_targets = ["test-fast", "test-db-memory", "test-provider-e2e"]
+
+[[subsystem.live_gates]]
+id = "brain-provider-e2e"
+make_target = "test-provider-e2e"
+authorization_env = ["MOA_RUN_LIVE_E2E", "MOA_RUN_LIVE_PROVIDER_TESTS"]
+credentials_any_of = ["MOA_ANTHROPIC_API_KEY", "MOA_OPENAI_API_KEY", "MOA_GOOGLE_API_KEY"]
+services = ["docker", "postgres", "restate", "openfga", "valkey"]
+billed = true
+
+[[subsystem]]
+id = "auth-principals-contacts"
+owner = "moa-authz"
+path_prefixes = ["crates/moa-auth/", "crates/moa-agents/", "crates/moa-contacts/"]
+docs = [
+  "docs/03-communication-layer.md",
+  "docs/08-security.md",
+  "docs/14-multi-tenancy-and-learning.md",
+  "docs/15-architecture-policy.md",
+]
+agent_files = ["AGENTS.md"]
+local_agents = [
+  { path_prefix = "crates/moa-auth/", file = "crates/moa-auth/AGENTS.md" },
+]
+test_profiles = ["fast-pr", "db-session", "authz-pentest"]
+make_targets = ["test-fast", "test-db-session", "test-authz-pentest"]
+
+[[subsystem]]
+id = "lineage-observability-analytics"
+owner = "moa-lineage-core"
+path_prefixes = [
+  "crates/moa-lineage/",
+  "crates/moa-analytics/",
+  "crates/moa-analytics-export/",
+  "crates/moa-observability/",
+  "crates/moa-ocsf/",
+]
+docs = ["docs/17-observability.md", "docs/18-performance.md", "docs/analytics.md"]
+agent_files = ["AGENTS.md"]
+test_profiles = ["fast-pr", "db-session", "clickhouse-docker"]
+make_targets = ["test-fast", "test-db-session", "test-clickhouse"]
+
+[[subsystem.live_gates]]
+id = "clickhouse-docker"
+make_target = "test-clickhouse"
+authorization_env = ["MOA_RUN_CLICKHOUSE_DOCKER_TESTS"]
+services = ["docker", "clickhouse"]
+billed = false
+
+[[subsystem]]
+id = "skills-experiments-eval-test-support"
+owner = "moa-eval"
+path_prefixes = [
+  "crates/moa-skills/",
+  "crates/moa-experiments/",
+  "crates/moa-eval/",
+  "crates/moa-loadtest/",
+  "crates/moa-test-support/",
+]
+docs = [
+  "docs/09-skills-and-learning.md",
+  "docs/16-evaluation.md",
+  "docs/20-testing.md",
+  "docs/22-load-and-chaos-testing.md",
+]
+agent_files = ["AGENTS.md"]
+test_profiles = [
+  "fast-pr",
+  "db-session",
+  "db-memory",
+  "eval-recorded",
+  "behavior-lab-service-e2e",
+  "execution-eval-pr",
+  "loadtest-service-e2e",
+]
+make_targets = [
+  "test-fast",
+  "test-db-session",
+  "test-db-memory",
+  "test-behavior-lab-live",
+]
+
+[[subsystem.live_gates]]
+id = "behavior-lab-live"
+make_target = "test-behavior-lab-live"
+authorization_env = ["MOA_RUN_LIVE_E2E", "MOA_RUN_LIVE_PROVIDER_TESTS"]
+credentials_any_of = ["MOA_ANTHROPIC_API_KEY", "MOA_OPENAI_API_KEY", "MOA_GOOGLE_API_KEY"]
+budget_env = ["MOA_BEHAVIOR_LAB_BUDGET_USD"]
+services = ["docker", "postgres", "restate", "openfga", "valkey"]
+billed = true
+
+[[subsystem]]
+id = "migrations-database-operations"
+owner = "moa-migrations"
+path_prefixes = ["crates/moa-migrations/"]
+docs = [
+  "docs/15-architecture-policy.md",
+  "docs/19-data-operations.md",
+  "docs/20-testing.md",
+]
+agent_files = ["AGENTS.md"]
+test_profiles = ["fast-pr", "db-session"]
+make_targets = ["test-fast", "test-db-session"]
+
+[[subsystem]]
+id = "repository-tooling-deployment-docs"
+owner = "xtask"
+path_prefixes = [
+  ".agents/",
+  ".cargo/",
+  ".claude/",
+  ".codex/",
+  ".config/",
+  ".githooks/",
+  ".github/",
+  ".vscode/",
+  "crates/xtask/",
+  "crates/workspace-hack/",
+  "dashboards/",
+  "docker/",
+  "docs/",
+  "k8s/",
+  "live/",
+  "ops/",
+  "paper/",
+  "scripts/",
+  "services/",
+  ".dockerignore",
+  ".env.example",
+  ".envrc",
+  ".gitignore",
+  ".mcp.json",
+  "AGENTS.md",
+  "ARCHITECTURE.md",
+  "CHANGELOG.md",
+  "CLAUDE.md",
+  "CONTRIBUTING.md",
+  "Cargo.lock",
+  "Cargo.toml",
+  "Dockerfile",
+  "LICENSE",
+  "Makefile",
+  "README.md",
+  "SEQUENCE-DIAGRAMS.md",
+  "docker-compose.chaos.yml",
+  "docker-compose.edge.yml",
+  "docker-compose.yml",
+  "rust-toolchain.toml",
+]
+docs = [
+  "docs/10-technology-stack.md",
+  "docs/15-architecture-policy.md",
+  "docs/20-testing.md",
+]
+agent_files = ["AGENTS.md"]
+test_profiles = ["fast-pr", "ci"]
+make_targets = ["test-fast", "test-ci", "test-affected"]

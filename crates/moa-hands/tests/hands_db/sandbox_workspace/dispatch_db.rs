@@ -51,7 +51,7 @@ use moa_hands::{
             HandLeaseWorkspaceAttachment, LeaseHandle, PostgresHandLeaseStore,
         },
         sandbox_workspace::{
-            capacity::PostgresWorkspaceCapacityRepository,
+            capacity::{ActiveHandCapacityRequest, PostgresWorkspaceCapacityRepository},
             checkpoint::model::{CreateCheckpointRequest, PublishCheckpointCommitRequest},
             model::{
                 ActivateHydratedWorkspaceRequest, CreateWorkspaceRequest, SandboxWorkspace,
@@ -353,6 +353,21 @@ async fn hydration_and_checkpoint_commits_are_atomic_replay_safe_and_generation_
         provisioning.provisioning_operation_id,
         HandHandle::local(PathBuf::from(format!("/tmp/{workspace_id}"))),
     );
+    let active_capacity = ActiveHandCapacityRequest {
+        tenant_id,
+        workspace_id,
+        provider_account_id: account_id,
+        provider_account_generation: 1,
+        provisioning_operation_id: provisioning.provisioning_operation_id,
+        hand_lease_generation: provisioning.generation,
+        expected_writer_epoch: restoring.writer_epoch,
+        expected_instance_generation: restoring.instance_generation,
+    };
+    let capacity = PostgresWorkspaceCapacityRepository::new(pool.clone());
+    capacity
+        .reserve_active_hand(&active_capacity)
+        .await
+        .expect("reserve exact active hand before activation");
     assert!(
         workspaces
             .activate_hydrated(ActivateHydratedWorkspaceRequest {
@@ -362,6 +377,12 @@ async fn hydration_and_checkpoint_commits_are_atomic_replay_safe_and_generation_
             })
             .await
             .expect("activate exact hydrated lease")
+    );
+    assert!(
+        capacity
+            .commit_active_hand(&active_capacity)
+            .await
+            .expect("commit exact active hand after activation")
     );
     let mut active_workspace = workspaces
         .get(tenant_id, workspace_id)
@@ -700,6 +721,20 @@ async fn hydration_and_checkpoint_commits_are_atomic_replay_safe_and_generation_
             assert_eq!(
                 abandoned_state,
                 ("failed".to_string(), "released".to_string())
+            );
+            let failed_revival = sqlx::query(
+                "UPDATE moa.sandbox_workspace_checkpoints SET lifecycle_state='creating' \
+                 WHERE checkpoint_id=$1",
+            )
+            .bind(abandoned_checkpoint_id)
+            .execute(&pool)
+            .await
+            .expect_err("failed checkpoint audit must not re-enter the live generation index");
+            assert!(
+                failed_revival
+                    .to_string()
+                    .contains("failed sandbox checkpoint audit is immutable"),
+                "unexpected failed-checkpoint mutation error: {failed_revival}"
             );
         } else {
             assert_eq!(active_workspace.state, SandboxWorkspaceState::Ready);
