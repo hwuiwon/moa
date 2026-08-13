@@ -193,8 +193,14 @@ env -u MOA_ANTHROPIC_API_KEY -u MOA_OPENAI_API_KEY \
   MOA_LONG_HORIZON_CANARY_WINDOW=24h \
   cargo nextest run -p moa-orchestrator --locked \
     --test long_horizon_execution_canary_live \
+    -E 'test(/^deployed_long_horizon_invariants_hold_for_24_hours_live$/)' \
     --run-ignored ignored-only --no-tests fail
 ```
+
+Use the corresponding exact seven-day test name when
+`MOA_LONG_HORIZON_CANARY_WINDOW=7d`. A named canary fails closed when its test
+name and configured window differ, so a wrong selection cannot report a
+successful soak that sampled nothing.
 
 T3 certifies the 10k+ QPS claim as arithmetic validated by measurement:
 `replicas_needed = ceil(10_000 / per_replica_rate)` must be ≤ HPA max, and a

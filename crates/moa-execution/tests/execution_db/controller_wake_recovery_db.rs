@@ -395,6 +395,11 @@ async fn resumed_recovery_fails_the_run_once_its_budget_is_exhausted_db() -> Tes
     );
     assert_eq!(commit.run.status, ExecutionRunStatus::Failed);
     assert_eq!(
+        activation_failure_count(&pool, run.run_uid).await?,
+        0,
+        "successful pending-terminal wake settlement resets the consecutive-failure budget"
+    );
+    assert_eq!(
         commit.run.terminal_reason,
         Some(ExecutionTerminalReason::InternalFailure)
     );

@@ -232,6 +232,60 @@ pub async fn execute_docker(
 /// `timeout_secs: 86400` would otherwise hold a sandbox for a day.
 pub const MAX_BASH_TIMEOUT_SECS: u64 = 300;
 
+/// Returns the wall-clock bound a tool invocation promises, when it declares one.
+///
+/// The attempt watchdog widens its staleness window to this value, because the durable
+/// heartbeat is written at step boundaries and never during a step: without the bound, a
+/// command that legitimately runs longer than the configured floor reads as a stall.
+///
+/// Only bash declares a bound today. Every other tool returns `None` and is held to the
+/// configured floor, which is the intended contract rather than an omission: a tool with no
+/// declared ceiling has nothing to justify a wider window with.
+#[must_use]
+pub fn declared_tool_step_bound(tool_name: &str, input: &serde_json::Value) -> Option<Duration> {
+    if tool_name != "bash" {
+        return None;
+    }
+    // An unparseable input never reaches a sandbox, so it cannot be running long; the
+    // floor applies rather than a fabricated bound.
+    let params = BashToolInput::parse(&input.to_string()).ok()?;
+    Some(params.timeout(DEFAULT_BASH_TIMEOUT, None, None))
+}
+
+/// Wall-clock bound applied to a bash call that names no `timeout_secs` of its own.
+///
+/// Deliberately well below [`MAX_BASH_TIMEOUT_SECS`]: the ceiling exists so a caller that
+/// knows it needs a long command can ask for one, not so every unqualified call holds a
+/// sandbox for the maximum. A model that wants five minutes has to say so, which is also
+/// what lets the watchdog keep a tight window for everything that does not.
+pub const DEFAULT_BASH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Resolves the wall-clock ceiling for one synchronous sandbox tool call.
+///
+/// Bash may request its own validated ceiling; every other synchronous tool
+/// uses the provider default. In both cases the caller's remaining deadline is
+/// authoritative and an allowance below one second is rejected before remote
+/// I/O starts.
+pub fn effective_synchronous_timeout(
+    tool_name: &str,
+    input: &str,
+    default_timeout: Duration,
+    run_deadline: Option<Duration>,
+) -> Result<Duration> {
+    let timeout = if tool_name == "bash" {
+        BashToolInput::parse(input)?.timeout(default_timeout, None, run_deadline)
+    } else {
+        run_deadline.map_or(default_timeout, |remaining| default_timeout.min(remaining))
+    };
+    if timeout < Duration::from_secs(1) {
+        return Err(MoaError::ToolError(
+            "synchronous tool execution has less than one second remaining before dispatch"
+                .to_string(),
+        ));
+    }
+    Ok(timeout)
+}
+
 /// A caller-supplied bash timeout that has already cleared tool policy.
 ///
 /// Validation lives in the type's own deserialization rather than in each

@@ -805,7 +805,7 @@ async fn agent_action_review_parks_then_resumes_persisted_continuation_service_e
         u64::try_from(checkpoint.try_get::<i64, _>("task_generation")?)?,
         waiting.generation
     );
-    assert_eq!(checkpoint.try_get::<i64, _>("attempt_generation")?, 1);
+    assert_eq!(checkpoint.try_get::<i64, _>("attempt_generation")?, 2);
     assert_eq!(checkpoint.try_get::<i64, _>("released_capacity")?, 1);
     assert_eq!(checkpoint.try_get::<i64, _>("controller_activations")?, 1);
     let release_receipt: Value = checkpoint
@@ -903,15 +903,15 @@ async fn agent_action_review_parks_then_resumes_persisted_continuation_service_e
     .bind(task_id(&completed_task).as_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(redispatch.try_get::<i64, _>("dispatch_count")?, 2);
-    assert_eq!(redispatch.try_get::<i64, _>("distinct_dispatches")?, 2);
+    assert_eq!(redispatch.try_get::<i64, _>("dispatch_count")?, 3);
+    assert_eq!(redispatch.try_get::<i64, _>("distinct_dispatches")?, 3);
     assert_eq!(
         redispatch.try_get::<Option<i64>, _>("first_generation")?,
         Some(1)
     );
     assert_eq!(
         redispatch.try_get::<Option<i64>, _>("last_generation")?,
-        Some(2)
+        Some(3)
     );
     let terminal = await_run_status(&test, &run, ExecutionRunStatus::Completed).await?;
     assert_eq!(terminal.output, Some(json!({"review": "complete"})));

@@ -27,8 +27,18 @@ pub struct ExecutionConfig {
     pub dispatch_batch_size: usize,
     /// Maximum duration of one active task attempt, in seconds.
     pub active_attempt_timeout_seconds: u64,
-    /// Interval without durable attempt progress after which an active attempt is stalled,
-    /// in seconds.
+    /// Floor of the window without durable attempt progress after which an attempt is
+    /// stalled, in seconds.
+    ///
+    /// This is a floor, not the whole window. The heartbeat is written at step boundaries
+    /// and not while a step runs, so the effective window is the larger of this value and
+    /// the bound the in-flight step declared plus
+    /// `moa_execution::repository::ATTEMPT_STEP_BOUND_MARGIN_SECONDS`. A step that declares
+    /// a long timeout therefore widens only its own window, instead of forcing every
+    /// attempt to wait out the slowest step the platform allows.
+    ///
+    /// It must stay strictly below `active_attempt_timeout_seconds`: a floor at or beyond
+    /// the attempt deadline can never classify a stall before the deadline does.
     pub attempt_heartbeat_staleness_seconds: u64,
     /// Maximum non-parked execution runs admitted for one tenant.
     pub max_tenant_active_runs: u32,
@@ -94,6 +104,9 @@ impl Default for ExecutionConfig {
             maximum_activation_steps: 128,
             dispatch_batch_size: DEFAULT_MAX_IN_FLIGHT_TASKS,
             active_attempt_timeout_seconds: 10 * 60,
+            // Covers a step that declares no bound of its own: a model turn, and any tool
+            // call that does not ask for longer than the default sandbox command timeout.
+            // A step that declares more widens its own window instead of this floor.
             attempt_heartbeat_staleness_seconds: 2 * 60,
             max_tenant_active_runs: 100,
             max_fleet_active_runs: 1_000,

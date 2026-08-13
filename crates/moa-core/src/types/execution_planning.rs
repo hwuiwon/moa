@@ -574,6 +574,10 @@ pub enum ExecutionPlanningAuditPayload {
         provider_model: String,
         /// Stable planner prompt version.
         prompt_version: String,
+        /// Normalized provider token usage for this exact planner call.
+        usage: ExecutionRouteUsage,
+        /// Provider cost attributed to this exact planner call in integer micro-US-dollars.
+        cost_microusd: u64,
         /// Candidate or raw-response hash when required by the outcome.
         candidate_hash: Option<String>,
         /// Canonical strict candidate JSON when required by the outcome.
@@ -1420,6 +1424,8 @@ pub fn planning_audit_semantically_equal(
                 outcome: left_outcome,
                 provider_model: left_model,
                 prompt_version: left_prompt,
+                usage: left_usage,
+                cost_microusd: left_cost,
                 candidate_hash: left_hash,
                 candidate_json: left_candidate,
                 compiler_report: left_report,
@@ -1433,6 +1439,8 @@ pub fn planning_audit_semantically_equal(
                 outcome: right_outcome,
                 provider_model: right_model,
                 prompt_version: right_prompt,
+                usage: right_usage,
+                cost_microusd: right_cost,
                 candidate_hash: right_hash,
                 candidate_json: right_candidate,
                 compiler_report: right_report,
@@ -1447,6 +1455,8 @@ pub fn planning_audit_semantically_equal(
                 left_outcome,
                 left_model,
                 left_prompt,
+                left_usage,
+                left_cost,
                 left_hash,
                 left_candidate,
                 left_report,
@@ -1458,6 +1468,8 @@ pub fn planning_audit_semantically_equal(
                 right_outcome,
                 right_model,
                 right_prompt,
+                right_usage,
+                right_cost,
                 right_hash,
                 right_candidate,
                 right_report,
@@ -1552,6 +1564,8 @@ pub fn validate_planning_audit_envelope(
             outcome,
             provider_model,
             prompt_version,
+            usage,
+            cost_microusd,
             candidate_hash,
             candidate_json,
             compiler_report,
@@ -1587,6 +1601,16 @@ pub fn validate_planning_audit_envelope(
             }
             ensure_nonempty_bytes("payload.provider_model", provider_model, 128)?;
             ensure_nonempty_bytes("payload.prompt_version", prompt_version, 64)?;
+            if matches!(outcome, ExecutionPlannerOutcome::ProviderError)
+                && (!usage.is_zero() || *cost_microusd != 0)
+            {
+                return Err(ExecutionPlanningContractError::InvalidField {
+                    field: "payload.usage".to_string(),
+                    message:
+                        "planner calls without a collected response cannot carry usage or cost"
+                            .to_string(),
+                });
+            }
             let requires_candidate = !matches!(outcome, ExecutionPlannerOutcome::ProviderError);
             if requires_candidate != candidate_hash.is_some() {
                 return Err(ExecutionPlanningContractError::InvalidField {
@@ -2436,6 +2460,8 @@ mod tests {
                 outcome,
                 provider_model: "planner-model".to_string(),
                 prompt_version: "execution-planner".to_string(),
+                usage: ExecutionRouteUsage::default(),
+                cost_microusd: 0,
                 candidate_hash,
                 candidate_json,
                 compiler_report,
@@ -2869,6 +2895,16 @@ mod tests {
             &accepted,
             &accepted_replay
         ));
+        if let ExecutionPlanningAuditPayload::PlannerCall { usage, .. } =
+            &mut accepted_replay.payload
+        {
+            usage.output_tokens = 1;
+        }
+        assert!(
+            !planning_audit_semantically_equal(&accepted, &accepted_replay),
+            "planner usage is billed replay evidence, not an ignorable measurement"
+        );
+        accepted_replay = accepted.clone();
         if let ExecutionPlanningAuditPayload::PlannerCall {
             compiler_report, ..
         } = &mut accepted_replay.payload
@@ -2888,6 +2924,30 @@ mod tests {
         assert!(!planning_audit_semantically_equal(
             &accepted,
             &accepted_replay
+        ));
+    }
+
+    #[test]
+    fn provider_error_planner_audit_rejects_unattributed_usage_offline() {
+        // Pins: a provider failure without a collected response cannot invent billed token or cost
+        // attribution; only calls carrying an authoritative response may report those counters.
+        let mut audit =
+            planner_call_envelope(ExecutionPlannerOutcome::ProviderError, None, None, None);
+        assert_eq!(validate_planning_audit_envelope(&audit), Ok(()));
+        let ExecutionPlanningAuditPayload::PlannerCall {
+            usage,
+            cost_microusd,
+            ..
+        } = &mut audit.payload
+        else {
+            panic!("fixture must be a planner call");
+        };
+        usage.input_tokens_uncached = 1;
+        *cost_microusd = 1;
+        assert!(matches!(
+            validate_planning_audit_envelope(&audit),
+            Err(ExecutionPlanningContractError::InvalidField { field, .. })
+                if field == "payload.usage"
         ));
     }
 

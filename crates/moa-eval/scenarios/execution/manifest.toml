@@ -7,7 +7,7 @@ count = 328
 
 [contract]
 path = "contract-recorded.jsonl"
-sha256 = "a7d2f680db94d508f8265ac8551fcfd46cdc137605b1efd18aa4e45c000e110a"
+sha256 = "3099323222930134e78f6945fe288015c3704c3b09c2f6b7d18def0a2035de5a"
 count = 80
 
 [task_quality]

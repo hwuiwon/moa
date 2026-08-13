@@ -86,11 +86,12 @@ pub(super) const INSERT_PLANNER_AUDIT_SQL: &str = r#"
         audit_uid, tenant_id, contact_id, session_id, originating_sequence,
         run_uid, plan_revision, call_kind, call_ordinal, outcome,
         provider_model, prompt_version, candidate_hash, candidate_json,
-        compiler_report, duration_micros, created_at
+        compiler_report, input_tokens_uncached, input_tokens_cache_write,
+        input_tokens_cache_read, output_tokens, cost_microusd, duration_micros, created_at
     )
     VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-        $11, $12, $13, $14::JSON, $15::JSON, $16, $17
+        $11, $12, $13, $14::JSON, $15::JSON, $16, $17, $18, $19, $20, $21, $22
     )
     ON CONFLICT DO NOTHING
     RETURNING
@@ -98,7 +99,8 @@ pub(super) const INSERT_PLANNER_AUDIT_SQL: &str = r#"
         provider_model, prompt_version, candidate_hash,
         candidate_json::TEXT AS candidate_json,
         compiler_report::TEXT AS compiler_report,
-        duration_micros
+        input_tokens_uncached, input_tokens_cache_write, input_tokens_cache_read,
+        output_tokens, cost_microusd, duration_micros
 "#;
 
 pub(super) const LOAD_PLANNER_AUDIT_SQL: &str = r#"
@@ -107,7 +109,8 @@ pub(super) const LOAD_PLANNER_AUDIT_SQL: &str = r#"
         provider_model, prompt_version, candidate_hash,
         candidate_json::TEXT AS candidate_json,
         compiler_report::TEXT AS compiler_report,
-        duration_micros
+        input_tokens_uncached, input_tokens_cache_write, input_tokens_cache_read,
+        output_tokens, cost_microusd, duration_micros
     FROM moa.execution_planner_call_audit
     WHERE tenant_id = $1
       AND contact_id IS NOT DISTINCT FROM $2
@@ -363,7 +366,7 @@ pub(super) const LOAD_TASK_BATCH_SQL: &str = r#"
         task.actual_tool_calls, task.actual_retrieved_bytes,
         task.current_outcome, task.output, task.error, task.citations,
         task.generation_history, task.outcome_audit, task.attempt_generation, task.attempt_state, task.attempt_started_at,
-        task.last_progress_at, task.attempt_deadline_at, task.waiting_since, task.ready_at,
+        task.last_progress_at, task.progress_step_bound_seconds, task.attempt_deadline_at, task.waiting_since, task.ready_at,
         task.external_job_uid, task.active_dispatch_uid, task.dispatch_sequence,
         task.created_at, task.updated_at, task.reserved_at,
         task.started_at, task.completed_at
@@ -388,7 +391,7 @@ pub(super) const LOAD_TASK_FOR_UPDATE_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
-        attempt_generation, attempt_state, attempt_started_at, last_progress_at,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
         attempt_deadline_at, waiting_since, ready_at, external_job_uid,
         active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
@@ -409,7 +412,7 @@ pub(super) const LOAD_TASK_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
-        attempt_generation, attempt_state, attempt_started_at, last_progress_at,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
         attempt_deadline_at, waiting_since, ready_at, external_job_uid,
         active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
@@ -485,7 +488,7 @@ pub(super) const RESERVE_TASK_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
-        attempt_generation, attempt_state, attempt_started_at, last_progress_at,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
         attempt_deadline_at, waiting_since, ready_at, external_job_uid,
         active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
@@ -513,7 +516,7 @@ pub(super) const MARK_TASK_RUNNING_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
-        attempt_generation, attempt_state, attempt_started_at, last_progress_at,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
         attempt_deadline_at, waiting_since, ready_at, external_job_uid,
         active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
@@ -555,7 +558,7 @@ pub(super) const RESUME_TASK_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
-        attempt_generation, attempt_state, attempt_started_at, last_progress_at,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
         attempt_deadline_at, waiting_since, ready_at, external_job_uid,
         active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
@@ -573,7 +576,7 @@ pub(super) const LIST_TASKS_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
-        attempt_generation, attempt_state, attempt_started_at, last_progress_at,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
         attempt_deadline_at, waiting_since, ready_at, external_job_uid,
         active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
@@ -628,6 +631,8 @@ pub(super) const RECORD_TASK_OUTCOME_SQL: &str = r#"
             ELSE NULL
         END,
         attempt_deadline_at = CASE WHEN $4 = 'running' THEN attempt_deadline_at ELSE NULL END,
+        progress_step_bound_seconds = CASE WHEN $4 = 'running'
+                                           THEN progress_step_bound_seconds ELSE NULL END,
         last_progress_at = GREATEST(last_progress_at, NOW()),
         reserved_cost_microusd = $5,
         reserved_tokens = $6,
@@ -661,7 +666,7 @@ pub(super) const RECORD_TASK_OUTCOME_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
-        attempt_generation, attempt_state, attempt_started_at, last_progress_at,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
         attempt_deadline_at, waiting_since, ready_at, external_job_uid,
         active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
@@ -705,7 +710,7 @@ pub(super) const RECORD_RESERVATION_REJECTION_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
-        attempt_generation, attempt_state, attempt_started_at, last_progress_at,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
         attempt_deadline_at, waiting_since, ready_at, external_job_uid,
         active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
@@ -727,7 +732,7 @@ pub(super) const APPEND_TASK_OUTCOME_AUDIT_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
-        attempt_generation, attempt_state, attempt_started_at, last_progress_at,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
         attempt_deadline_at, waiting_since, ready_at, external_job_uid,
         active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
@@ -766,7 +771,7 @@ pub(super) const SUPERSEDE_REPLAN_TASK_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
-        attempt_generation, attempt_state, attempt_started_at, last_progress_at,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
         attempt_deadline_at, waiting_since, ready_at, external_job_uid,
         active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at

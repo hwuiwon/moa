@@ -1,5 +1,7 @@
 //! Shared fixtures and catalog helpers for the migration database test lane.
 
+use anyhow::Context;
+
 pub(super) use sqlx::postgres::PgPoolOptions;
 pub(super) use sqlx::{Executor, PgPool};
 
@@ -352,6 +354,16 @@ pub(super) fn expected_migration_labels() -> Vec<String> {
     migrations.into_iter().map(|(_, label)| label).collect()
 }
 
+/// Returns the current maximum embedded migration version.
+pub(super) fn current_migration_version() -> i32 {
+    embedded_for_cutover_proof::migrations::runner()
+        .get_migrations()
+        .iter()
+        .map(refinery::Migration::version)
+        .max()
+        .expect("the central migration epoch must not be empty")
+}
+
 /// Returns the embedded migration labels from one semantic migration onward.
 ///
 /// A scenario that applies through the preceding migration and then runs the
@@ -389,7 +401,7 @@ pub(super) fn migration_version(migration_name: &str) -> Result<i32, std::io::Er
 pub(super) async fn apply_through_migration(
     target_url: &str,
     migration_name: &str,
-) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+) -> anyhow::Result<Vec<String>> {
     let version = migration_version(migration_name)?;
     let mut migrations = embedded_for_cutover_proof::migrations::runner()
         .get_migrations()
@@ -410,7 +422,8 @@ pub(super) async fn apply_through_migration(
     let result = runner
         .set_target(refinery::Target::Version(version))
         .run_async(&mut client)
-        .await;
+        .await
+        .with_context(|| format!("apply migrations through {migration_name}"));
     drop(client);
     connection_task.await??;
     let unlock_result = sqlx::query("SELECT pg_advisory_unlock($1)")

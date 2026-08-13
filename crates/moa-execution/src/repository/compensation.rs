@@ -4220,13 +4220,7 @@ async fn advance_pending_terminal_page_in_conn(
                 "UPDATE moa.execution_run SET pending_terminal_status=$4, \
                      pending_terminal_reason=$5, pending_terminal_cause=$6, \
                      pending_terminal_output=$7, cancellation_reason=$8, \
-                     waiting_reasons='[]'::JSONB, next_wake_at=NULL, waiting_since=NULL, \
-                     waiting_task_count=0, waiting_input_task_count=0, \
-                     waiting_review_task_count=0, waiting_signal_task_count=0, \
-                     waiting_timer_task_count=0, waiting_external_task_count=0, \
-                     waiting_replan_task_count=0, waiting_input_user_task_count=0, \
-                     waiting_input_tenant_admin_task_count=0, \
-                     waiting_input_external_task_count=0, waiting_reasons_truncated=FALSE, \
+                     next_wake_at=NULL, \
                      updated_at=$9 WHERE run_uid=$1 AND controller_generation=$2 \
                      AND wake_epoch=$3 AND pending_terminal_status IS NULL \
                      AND status NOT IN ('completed','partial','blocked','unsupported', \
@@ -4278,14 +4272,30 @@ async fn advance_pending_terminal_page_in_conn(
     .fetch_all(conn.as_mut())
     .await
     .map_err(sqlx_error)?;
+    let tasks = task_rows
+        .iter()
+        .map(task_from_row)
+        .collect::<Result<Vec<_>>>()?;
     let processed_task_count =
-        u32::try_from(task_rows.len()).map_err(|_| Error::InvalidRepositoryData {
+        u32::try_from(tasks.len()).map_err(|_| Error::InvalidRepositoryData {
             message: "terminal drain task page exceeds u32".to_string(),
         })?;
+    let storage_task_ids = tasks
+        .iter()
+        .filter(|task| {
+            task.status != ExecutionTaskStatus::WaitingExternal
+                && !matches!(
+                    task.attempt_state,
+                    ExecutionAttemptState::Dispatching | ExecutionAttemptState::Running
+                )
+        })
+        .map(|task| task.task_id.as_uuid())
+        .collect::<Vec<_>>();
+    supersede_storage_task_waits(&mut conn, run.run_uid, run.tenant_id.0, &storage_task_ids)
+        .await?;
     let mut settled_task_count = 0_u64;
-    let mut cancellation_dispatches = Vec::with_capacity(task_rows.len());
-    for row in task_rows {
-        let task = task_from_row(&row)?;
+    let mut cancellation_dispatches = Vec::with_capacity(tasks.len());
+    for task in tasks {
         if task.status == ExecutionTaskStatus::WaitingExternal {
             let external_job_uid =
                 task.external_job_uid
@@ -4346,7 +4356,6 @@ async fn advance_pending_terminal_page_in_conn(
             );
             continue;
         }
-        supersede_storage_task_waits(&mut conn, &task).await?;
         let original_status = task.status;
         match record_task_outcome_in_conn(
             &mut conn,
@@ -5140,30 +5149,101 @@ fn compensation_outcome_from_review_resolution(
 
 async fn supersede_storage_task_waits(
     conn: &mut ScopedConn<'_>,
-    task: &ExecutionTaskRecord,
+    run_uid: Uuid,
+    tenant_id: Uuid,
+    task_ids: &[Uuid],
 ) -> Result<()> {
+    if task_ids.is_empty() {
+        return Ok(());
+    }
     let trigger_uids = sqlx::query_scalar::<_, Uuid>(
         "UPDATE moa.execution_trigger SET state='superseded', updated_at=NOW() \
-             WHERE run_uid=$1 AND task_id=$2 \
+             WHERE run_uid=$1 AND task_id = ANY($2::UUID[]) \
              AND trigger_kind <> 'task_watchdog' AND state = 'pending' \
              RETURNING trigger_uid",
     )
-    .bind(task.run_uid)
-    .bind(task.task_id.as_uuid())
+    .bind(run_uid)
+    .bind(task_ids)
     .fetch_all(conn.as_mut())
     .await
     .map_err(sqlx_error)?;
-    if !trigger_uids.is_empty() {
-        sqlx::query(
-            "UPDATE moa.execution_dispatch_outbox SET state='superseded', claim_owner=NULL, \
-             claimed_at=NULL, claim_expires_at=NULL, updated_at=NOW() \
-             WHERE trigger_uid=ANY($1::UUID[]) \
-             AND state IN ('pending','dispatching')",
-        )
-        .bind(&trigger_uids)
-        .execute(conn.as_mut())
-        .await
-        .map_err(sqlx_error)?;
+    if trigger_uids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE moa.execution_dispatch_outbox \
+         SET state='cancelled', claim_owner=NULL, claimed_at=NULL, claim_expires_at=NULL, \
+             updated_at=NOW() \
+         WHERE trigger_uid = ANY($1::UUID[]) AND state IN ('pending','dispatching')",
+    )
+    .bind(&trigger_uids)
+    .execute(conn.as_mut())
+    .await
+    .map_err(sqlx_error)?;
+    let receipt_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM moa.execution_capacity_reservation AS reservation \
+         JOIN moa.execution_trigger AS trigger \
+           ON trigger.trigger_uid=reservation.trigger_uid \
+          AND trigger.tenant_id=reservation.tenant_id \
+          AND trigger.run_uid IS NOT DISTINCT FROM reservation.run_uid \
+          AND trigger.controller_generation IS NOT DISTINCT FROM reservation.controller_generation \
+         WHERE reservation.trigger_uid = ANY($1::UUID[]) \
+           AND reservation.tenant_id=$2 AND reservation.run_uid=$3 \
+           AND reservation.resource_dimension='scheduled_triggers'",
+    )
+    .bind(&trigger_uids)
+    .bind(tenant_id)
+    .bind(run_uid)
+    .fetch_one(conn.as_mut())
+    .await
+    .map_err(sqlx_error)?;
+    if usize::try_from(receipt_count).ok() != Some(trigger_uids.len()) {
+        return Err(Error::InvalidRepositoryData {
+            message: "storage-wait trigger capacity receipts do not match their exact owners"
+                .to_string(),
+        });
+    }
+    let released_quantities = sqlx::query_scalar::<_, i64>(
+        "UPDATE moa.execution_capacity_reservation \
+         SET state='released', released_at=NOW(), updated_at=NOW() \
+         WHERE trigger_uid = ANY($1::UUID[]) AND tenant_id=$2 AND run_uid=$3 \
+           AND resource_dimension='scheduled_triggers' \
+           AND state IN ('reserved','reconciling') AND released_at IS NULL \
+         RETURNING quantity",
+    )
+    .bind(&trigger_uids)
+    .bind(tenant_id)
+    .bind(run_uid)
+    .fetch_all(conn.as_mut())
+    .await
+    .map_err(sqlx_error)?;
+    let released_quantity = released_quantities
+        .into_iter()
+        .try_fold(0_i64, i64::checked_add)
+        .ok_or_else(|| Error::InvalidRepositoryData {
+            message: "storage-wait trigger capacity quantity overflowed PostgreSQL BIGINT"
+                .to_string(),
+        })?;
+    if released_quantity == 0 {
+        return Ok(());
+    }
+    let buckets = sqlx::query(
+        "UPDATE moa.execution_capacity_bucket \
+         SET reserved_quantity=reserved_quantity-$2, version=version+1, updated_at=NOW() \
+         WHERE resource_dimension='scheduled_triggers' AND reserved_quantity >= $2 \
+           AND ((scope_kind='fleet' AND tenant_id IS NULL) \
+                OR (scope_kind='tenant' AND tenant_id=$1))",
+    )
+    .bind(tenant_id)
+    .bind(released_quantity)
+    .execute(conn.as_mut())
+    .await
+    .map_err(sqlx_error)?;
+    if buckets.rows_affected() != 2 {
+        return Err(Error::InvalidRepositoryData {
+            message: "storage-wait trigger release did not decrement both capacity buckets"
+                .to_string(),
+        });
     }
     Ok(())
 }
@@ -5226,7 +5306,7 @@ async fn checkpoint_pending_terminal_wake(
     let row = sqlx::query(
         "UPDATE moa.execution_run SET status=$4, activation_state='idle', \
              next_wake_at=NULL, waiting_since=NULL, ready_task_count=$5, \
-             active_task_count=$6, processed_wake_epoch=$3, \
+             active_task_count=$6, processed_wake_epoch=$3, activation_failure_count=0, \
              last_progress_at=GREATEST(last_progress_at,$7), updated_at=NOW() \
          WHERE run_uid=$1 AND controller_generation=$2 AND wake_epoch >= $3 \
            AND processed_wake_epoch < $3 \
@@ -5363,7 +5443,7 @@ async fn finalize_pending_terminal_exact(
              waiting_input_user_task_count=0, waiting_input_tenant_admin_task_count=0, \
              waiting_input_external_task_count=0, waiting_reasons_truncated=FALSE, \
              waiting_since=NULL, ready_task_count=0, active_task_count=0, \
-             processed_wake_epoch=$3, completed_at=$12, \
+             processed_wake_epoch=$3, activation_failure_count=0, completed_at=$12, \
              last_progress_at=GREATEST(last_progress_at,$12), updated_at=NOW() \
          WHERE run_uid=$1 AND controller_generation=$2 AND wake_epoch >= $3 \
            AND processed_wake_epoch < $3 AND pending_terminal_cause=$13 \

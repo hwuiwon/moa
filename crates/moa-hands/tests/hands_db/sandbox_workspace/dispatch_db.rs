@@ -752,6 +752,12 @@ async fn synchronous_absence_and_reconciled_absence_use_distinct_proof_rules_db(
         .persist_intent(&synchronous)
         .await
         .expect("persist synchronous operation");
+    assert!(
+        operations
+            .begin_provider_attempt(tenant_id, synchronous_id)
+            .await
+            .expect("fence the synchronous provider attempt")
+    );
     sqlx::query(
         r#"
         INSERT INTO moa.sandbox_capacity_reservations (

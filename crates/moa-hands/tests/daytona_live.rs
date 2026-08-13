@@ -745,6 +745,21 @@ async fn daytona_provider_round_trip() {
             search.to_text()
         );
 
+        // Pins: the real Daytona stop endpoint reaches exact `stopped` before
+        // capacity may be released, and execution resumes to exact `running`
+        // without losing the retained filesystem.
+        provider.suspend(&handle).await?;
+        assert_eq!(provider.status(&handle).await?, HandStatus::Stopped);
+        let resumed_read = provider
+            .execute(
+                &handle,
+                "file_read",
+                &json!({ "path": file_path }).to_string(),
+            )
+            .await?;
+        assert_eq!(resumed_read.to_text(), marker);
+        assert_eq!(provider.status(&handle).await?, HandStatus::Running);
+
         let unsupported_tool = provider
             .execute(
                 &handle,

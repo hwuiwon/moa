@@ -365,9 +365,10 @@ that identity; no activation re-derives authority from ambient request state.
 Pending and waiting rows are storage-only.
 
 `ExecutionRunController/advance` is keyed by `run_uid`. One activation claims a
-persisted wake epoch, applies at most `maximum_activation_steps`, dispatches at
-most `dispatch_batch_size` stable ready rows, records aggregate progress, and
-returns. `ExecutionTaskAttempt/run` executes one task generation within the
+persisted wake epoch, charges bounded scheduler inspection and settlement work
+against `maximum_activation_steps`, independently dispatches at most
+`dispatch_batch_size` stable ready rows, records aggregate progress, and returns.
+`ExecutionTaskAttempt/run` executes one task generation within the
 active-attempt timeout. Compensation uses one bounded
 `ExecutionCompensationAttempt` slice per immutable dispatch identity. No
 activation sleeps until a product event or retains an attached child for the
@@ -391,7 +392,9 @@ one-off plan. Nonzero `After { delay_seconds }` is resolved from the instant the
 task enters the wait. Reusable templates reject `At` and use `After`, so earlier
 dependency duration cannot make a template timer stale. Entering any wait
 persists `due_at`, releases attempt and hand capacity, and schedules an immutable
-trigger; expiry follows `FailTask`, `FailTask`, or `ContinueWith { output }`.
+trigger. Node-owned waits expire through `FailTask` or `ContinueWith { output }`;
+the plan-level runtime-input policy accepts only `FailTask` because it has no
+single node output schema against which to validate a continuation value.
 
 Before dispatch, the repository atomically reserves worst-case microusd,
 tokens, tasks, tool calls, retrieved bytes, deadline allowance, and tenant/fleet
@@ -595,10 +598,12 @@ to one recovery replica and then zero when its invocation count reaches zero.
 Deployment requirements:
 
 - Postgres/Neon for product data.
-- Restate ingress URL for runtime invocation. Normal replicas have no Admin API
-  configuration or network grant; Operator owns registration and version
-  retention, while the revisioned bootstrap Job receives its Admin URL as an
-  explicit command argument.
+- Restate ingress URL for runtime invocation. Versioned serving replicas and the
+  singleton maintenance owner receive ingress grants for durable delivery and
+  reconciliation, but serving replicas have no Admin API configuration or network
+  grant. Operator owns registration and version retention, the revisioned bootstrap
+  Job receives its Admin URL as an explicit command argument, and maintenance has a
+  narrow Admin grant only for read-only deployment-drain observation.
 - Redis-compatible Valkey for Session turn admission, pacing, and shared runtime
   cache coordination. Orchestrator startup fails if this backend is absent or
   resolves to process-local memory.

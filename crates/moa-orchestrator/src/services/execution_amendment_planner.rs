@@ -34,6 +34,7 @@ use moa_core::{
         execution_planning::ExecutionPlanningAuditEnvelope,
         identifiers::ModelId,
         model::ModelCapabilities,
+        resource::{ResourceAmounts, ResourceBudget},
     },
 };
 use moa_execution::{
@@ -41,6 +42,11 @@ use moa_execution::{
     capability::amendment_hash,
     repository::{
         ExecutionRepository, ExecutionRunRecord, ExecutionScope,
+        planning_budget::{
+            AmendmentPlanningCallReconcileOutcome, AmendmentPlanningCallReconcileRequest,
+            AmendmentPlanningCallReservation, AmendmentPlanningCallReservationOutcome,
+            AmendmentPlanningCallReservationRequest, PlanningUsage,
+        },
         replan_stop::{NewExecutionReplanStopIntent, ReplanStopIntentWriteOutcome},
     },
     state::ExecutionRunStatus,
@@ -53,7 +59,9 @@ use serde_json::json;
 
 use crate::services::{
     execution::ExecutionClient,
-    llm_gateway::{LLMCompletionAction, LLMGatewayClient, completion_idempotency_key},
+    llm_gateway::{
+        BoundedCompletionRequest, LLMCompletionAction, LLMGatewayClient, completion_idempotency_key,
+    },
 };
 
 pub use preparation::{
@@ -160,6 +168,10 @@ impl ExecutionAmendmentPlanner for ExecutionAmendmentPlannerImpl {
 
         let provider = RestateAmendmentPlannerProvider {
             ctx: &ctx,
+            repository: self.repository.clone(),
+            scope,
+            config: &self.config,
+            deadline_at: prepared.remaining_budget.deadline_at,
             run_uid: target.run_uid,
             plan_revision: target.base_plan_revision,
             next_attempt: AtomicUsize::new(0),
@@ -218,6 +230,18 @@ impl ExecutionAmendmentPlanner for ExecutionAmendmentPlannerImpl {
                         prepared.origin,
                         ReplanStopReason::NoProgress,
                         "an internal error interrupted amendment planning".to_string(),
+                    )
+                    .await
+                    .map(Json::from);
+            }
+            ExecutionAmendmentPlanningResultKind::BudgetExhausted { message } => {
+                return self
+                    .record_planner_stop(
+                        &ctx,
+                        scope,
+                        prepared.origin,
+                        ReplanStopReason::BudgetExhausted,
+                        message,
                     )
                     .await
                     .map(Json::from);
@@ -500,6 +524,10 @@ pub(crate) async fn dispatch_parked_replan_planning(
 /// Restate-journaled planner provider that routes every model call through the gateway.
 struct RestateAmendmentPlannerProvider<'a, 'ctx> {
     ctx: &'a Context<'ctx>,
+    repository: ExecutionRepository,
+    scope: ExecutionScope,
+    config: &'a ExecutionConfig,
+    deadline_at: Option<chrono::DateTime<chrono::Utc>>,
     run_uid: uuid::Uuid,
     plan_revision: u64,
     next_attempt: AtomicUsize,
@@ -519,15 +547,77 @@ impl LLMProvider for RestateAmendmentPlannerProvider<'_, '_> {
         &self,
         request: SharedCompletionRequest,
     ) -> moa_core::error::Result<CompletionStream> {
-        // Restate's JSON transport requires the owned durable DTO. This is the
-        // explicit serialization boundary after in-process shared routing.
         let request = CompletionRequest::from_view(&request);
-        // Amendment generation and its bounded repair are sequential planner calls.
         let attempt = self.next_attempt.fetch_add(1, Ordering::Relaxed);
+        let ordinal = u8::try_from(attempt).map_err(|_| {
+            moa_core::error::MoaError::ValidationError(
+                "amendment planner call ordinal exceeds u8".to_string(),
+            )
+        })?;
+        let estimate = amendment_planning_call_estimate(&request, self.config)?;
+        let repository = self.repository.clone();
+        let scope = self.scope;
+        let run_uid = self.run_uid;
+        let plan_revision = self.plan_revision;
+        let reservation = self
+            .ctx
+            .run(|| {
+                let repository = repository.clone();
+                async move {
+                    let outcome = repository
+                        .reserve_amendment_planning_call(
+                            scope,
+                            AmendmentPlanningCallReservationRequest {
+                                run_uid,
+                                base_plan_revision: plan_revision,
+                                call_ordinal: ordinal,
+                                reservation: estimate,
+                                now: chrono::Utc::now(),
+                            },
+                        )
+                        .await
+                        .map_err(crate::workflows::errors::execution_error_to_handler_error)?;
+                    Ok::<_, HandlerError>(Json::from(JournaledPlanningReservation::from(&outcome)))
+                }
+            })
+            .name(format!(
+                "execution_amendment_reserve_{}_{}_{}",
+                self.run_uid, self.plan_revision, attempt
+            ))
+            .await
+            .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?
+            .into_inner();
+        match reservation {
+            JournaledPlanningReservation::Proceed => {}
+            JournaledPlanningReservation::Denied => {
+                return Err(moa_core::error::MoaError::BudgetExhausted(
+                    "automatic amendment planning exhausted the approved run budget".to_string(),
+                ));
+            }
+            JournaledPlanningReservation::Conflict | JournaledPlanningReservation::NotFound => {
+                return Err(moa_core::error::MoaError::ProviderError(
+                    "automatic amendment planning reservation conflicted with durable state"
+                        .to_string(),
+                ));
+            }
+        }
+
         let response = crate::restate_identity::replay_safe_request(
             self.ctx
                 .service_client::<LLMGatewayClient>()
-                .complete(Json::from(request))
+                .complete_bounded(Json::from(BoundedCompletionRequest {
+                    request,
+                    budget: ResourceBudget::new(
+                        self.deadline_at,
+                        Some(ResourceAmounts {
+                            cost_micro_usd: estimate.cost_microusd,
+                            tokens: estimate.tokens,
+                            turns: 0,
+                            model_calls: 1,
+                            tool_calls: 0,
+                        }),
+                    ),
+                }))
                 .idempotency_key(completion_idempotency_key(
                     self.ctx.invocation_id(),
                     LLMCompletionAction::ExecutionAmendment {
@@ -538,11 +628,183 @@ impl LLMProvider for RestateAmendmentPlannerProvider<'_, '_> {
                 )),
         )
         .call()
-        .await
-        .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?
-        .into_inner();
+        .await;
+        let response = match response {
+            Ok(response) => response.into_inner(),
+            Err(error) => {
+                self.reconcile_call(ordinal, attempt, PlanningUsage::default())
+                    .await?;
+                return Err(moa_core::error::MoaError::ProviderError(error.to_string()));
+            }
+        };
+        let actual = amendment_planning_call_usage(&response)?;
+        self.reconcile_call(ordinal, attempt, actual).await?;
         Ok(CompletionStream::from_response(response))
     }
+}
+
+impl RestateAmendmentPlannerProvider<'_, '_> {
+    async fn reconcile_call(
+        &self,
+        ordinal: u8,
+        attempt: usize,
+        actual: PlanningUsage,
+    ) -> moa_core::error::Result<()> {
+        let repository = self.repository.clone();
+        let scope = self.scope;
+        let run_uid = self.run_uid;
+        let plan_revision = self.plan_revision;
+        let reconcile = self
+            .ctx
+            .run(|| {
+                let repository = repository.clone();
+                async move {
+                    let outcome = repository
+                        .reconcile_amendment_planning_call(
+                            scope,
+                            AmendmentPlanningCallReconcileRequest {
+                                run_uid,
+                                base_plan_revision: plan_revision,
+                                call_ordinal: ordinal,
+                                actual,
+                                settled_at: chrono::Utc::now(),
+                            },
+                        )
+                        .await
+                        .map_err(crate::workflows::errors::execution_error_to_handler_error)?;
+                    Ok::<_, HandlerError>(Json::from(JournaledPlanningReconcile::from(&outcome)))
+                }
+            })
+            .name(format!(
+                "execution_amendment_reconcile_{}_{}_{}",
+                self.run_uid, self.plan_revision, attempt
+            ))
+            .await
+            .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?
+            .into_inner();
+        if reconcile != JournaledPlanningReconcile::Settled {
+            return Err(moa_core::error::MoaError::ProviderError(
+                "automatic amendment planning reconciliation conflicted with durable state"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum JournaledPlanningReservation {
+    Proceed,
+    Denied,
+    Conflict,
+    NotFound,
+}
+
+impl From<&AmendmentPlanningCallReservationOutcome> for JournaledPlanningReservation {
+    fn from(value: &AmendmentPlanningCallReservationOutcome) -> Self {
+        match value {
+            AmendmentPlanningCallReservationOutcome::Granted(_)
+            | AmendmentPlanningCallReservationOutcome::ReplayedOpen(_)
+            | AmendmentPlanningCallReservationOutcome::AlreadySettled(_) => Self::Proceed,
+            AmendmentPlanningCallReservationOutcome::Denied(_) => Self::Denied,
+            AmendmentPlanningCallReservationOutcome::Conflict => Self::Conflict,
+            AmendmentPlanningCallReservationOutcome::NotFound => Self::NotFound,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum JournaledPlanningReconcile {
+    Settled,
+    Conflict,
+    NotFound,
+}
+
+impl From<&AmendmentPlanningCallReconcileOutcome> for JournaledPlanningReconcile {
+    fn from(value: &AmendmentPlanningCallReconcileOutcome) -> Self {
+        match value {
+            AmendmentPlanningCallReconcileOutcome::Applied(_)
+            | AmendmentPlanningCallReconcileOutcome::Replayed(_) => Self::Settled,
+            AmendmentPlanningCallReconcileOutcome::Conflict => Self::Conflict,
+            AmendmentPlanningCallReconcileOutcome::NotFound => Self::NotFound,
+        }
+    }
+}
+
+fn amendment_planning_call_estimate(
+    request: &CompletionRequest,
+    config: &ExecutionConfig,
+) -> moa_core::error::Result<AmendmentPlanningCallReservation> {
+    // The shared estimator sizes the provider-visible messages and tools. A twofold headroom keeps
+    // this authorization conservative across model tokenizers without charging DTO serialization
+    // syntax that the provider never sees.
+    let input_token_count = moa_core::types::context::sum_message_tokens(&request.messages)
+        .saturating_add(
+            request
+                .tools
+                .iter()
+                .map(|tool| moa_core::types::context::estimate_text_tokens(&tool.to_string()))
+                .sum(),
+        )
+        .saturating_mul(2);
+    let input_tokens = u64::try_from(input_token_count).map_err(|_| {
+        moa_core::error::MoaError::ValidationError(
+            "amendment planner request token estimate exceeds u64".to_string(),
+        )
+    })?;
+    let output_tokens =
+        u64::try_from(request.max_output_tokens.unwrap_or_default()).map_err(|_| {
+            moa_core::error::MoaError::ValidationError(
+                "amendment planner output limit exceeds u64".to_string(),
+            )
+        })?;
+    let tokens = input_tokens.checked_add(output_tokens).ok_or_else(|| {
+        moa_core::error::MoaError::ValidationError(
+            "amendment planner token reservation overflow".to_string(),
+        )
+    })?;
+    let priced_cost = request
+        .model
+        .as_ref()
+        .and_then(|model| moa_providers::pricing_for_model(model.as_str()))
+        .map(|pricing| {
+            let input_rate = pricing
+                .input_per_mtok
+                .max(pricing.cached_input_per_mtok.unwrap_or_default())
+                .max(pricing.cache_write_per_mtok());
+            let dollars = input_tokens as f64 / 1_000_000.0 * input_rate
+                + output_tokens as f64 / 1_000_000.0 * pricing.output_per_mtok;
+            moa_core::types::resource::ResourceAmounts::cost_micro_usd_from_dollars(dollars)
+                .unwrap_or(u64::MAX)
+        })
+        .unwrap_or_default();
+    Ok(AmendmentPlanningCallReservation {
+        cost_microusd: priced_cost.max(config.agent_turn_cost_microusd),
+        tokens,
+    })
+}
+
+fn amendment_planning_call_usage(
+    response: &moa_core::types::completion::CompletionResponse,
+) -> moa_core::error::Result<PlanningUsage> {
+    let input = u64::try_from(response.usage.total_input_tokens()).map_err(|_| {
+        moa_core::error::MoaError::ValidationError(
+            "amendment planner input usage exceeds u64".to_string(),
+        )
+    })?;
+    let output = u64::try_from(response.usage.output_tokens).map_err(|_| {
+        moa_core::error::MoaError::ValidationError(
+            "amendment planner output usage exceeds u64".to_string(),
+        )
+    })?;
+    Ok(PlanningUsage {
+        cost_microusd: moa_providers::pricing_for_model(response.model.as_str())
+            .map(|pricing| pricing.cost_micros(&response.usage))
+            .unwrap_or_default(),
+        tokens: input.saturating_add(output),
+    })
 }
 
 #[cfg(feature = "integration")]

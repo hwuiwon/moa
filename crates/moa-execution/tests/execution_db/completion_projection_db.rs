@@ -580,6 +580,10 @@ async fn replan_stop_completion_pages_rebind_exact_wake_without_duplicate_verifi
             .load_replan_stop_intent(scope, run.run_uid, run.controller_generation, wake_epoch)
             .await?
             .expect("intent must follow its exact current wake");
+        sqlx::query("UPDATE moa.execution_run SET activation_failure_count=5 WHERE run_uid=$1")
+            .bind(run.run_uid)
+            .execute(&pool)
+            .await?;
         match repository
             .advance_replan_stop_completion_projection(
                 scope,
@@ -605,6 +609,16 @@ async fn replan_stop_completion_pages_rebind_exact_wake_without_duplicate_verifi
                     .wake_epoch
                     .expect("ReplanStop continuation has an exact wake");
                 assert!(next_wake > wake_epoch);
+                let failure_count: i64 = sqlx::query_scalar(
+                    "SELECT activation_failure_count FROM moa.execution_run WHERE run_uid=$1",
+                )
+                .bind(run.run_uid)
+                .fetch_one(&pool)
+                .await?;
+                assert_eq!(
+                    failure_count, 0,
+                    "each successful ReplanStop page acknowledgement resets crash recovery"
+                );
                 let persisted_source = sqlx::query_scalar::<_, chrono::DateTime<Utc>>(
                     "SELECT source_progress_at FROM moa.execution_completion_scan WHERE run_uid=$1",
                 )

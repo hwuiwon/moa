@@ -84,7 +84,7 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | `MOA_EXECUTION_AGENT_TURN_RETRIEVED_BYTES` | `execution.agent_turn_retrieved_bytes` | 10000000 | Worst-case retrieved-byte estimate for one agent turn |
 | `MOA_EXECUTION_AGENT_TURN_TOKENS` | `execution.agent_turn_tokens` | 8000 | Worst-case token estimate for one agent turn |
 | `MOA_EXECUTION_AGENT_TURN_TOOL_CALLS` | `execution.agent_turn_tool_calls` | 8 | Worst-case governed tool-call estimate for one agent turn |
-| `MOA_EXECUTION_ATTEMPT_HEARTBEAT_STALENESS_SECONDS` | `execution.attempt_heartbeat_staleness_seconds` | 120 | Interval without durable attempt progress after which an active attempt is classified stalled; must be less than the active attempt timeout |
+| `MOA_EXECUTION_ATTEMPT_HEARTBEAT_STALENESS_SECONDS` | `execution.attempt_heartbeat_staleness_seconds` | 120 | Minimum no-progress window used between steps or when the in-flight step declares no bound; a declared step bound widens only that attempt's window to at least the bound plus safety margin. This configured floor must be less than the active attempt timeout |
 | `MOA_EXECUTION_DISPATCH_BATCH_SIZE` | `execution.dispatch_batch_size` | 64 | Maximum ready task attempts dispatched by one controller activation |
 | `MOA_EXECUTION_MAX_COST_MICROUSD` | `execution.max_cost_microusd` | 100000000 | Default run cost limit in integer micro-USD |
 | `MOA_EXECUTION_MAX_FLEET_ACTIVE_RUNS` | `execution.max_fleet_active_runs` | 1000 | Fleet ceiling for admitted non-parked execution runs |
@@ -698,6 +698,7 @@ not trip the unknown-variable audit. They do not affect application config.
 | `MOA_LINEAGE_SINK` | Lineage sink selection: unset/`null`, `otel`, or `postgres`; ClickHouse is analytics-only |
 | `MOA_PERSIST_TURN_METRICS` | Persist per-turn metrics rows |
 | `MOA_PROVIDERS_OVERRIDE` | Provider-catalog override (tests/tools) |
+| `MOA_RESTATE_ADMIN_URL` | Optional Restate Admin endpoint override used only by the singleton maintenance deployment-drain observer; serving replicas must not receive it |
 | `MOA_SCIM_BASE_URL` | SCIM base URL |
 | `MOA_TOXIPROXY_URL` | Toxiproxy control URL (chaos tests) |
 | `MOA_TURBOPUFFER_LIVE_NEWS_FACTS` | Live Turbopuffer news-facts eval fixture |

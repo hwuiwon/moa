@@ -74,7 +74,10 @@ provider-visible hand operation identities, absolute
 create deadlines, delayed reconciliation, and a database generation-rotation
 guard that rejects pre-V57 writers before provider I/O. V59 installs bounded
 execution activations, triggers, schedules, external jobs, admission, and the
-dispatch outbox; V60 installs exact active-compute capacity reservations.
+dispatch outbox, persists the current attempt step bound so watchdog staleness
+respects the work actually in flight, and durably reserves and settles
+automatic amendment-planner provider-call budget. V60 installs exact
+active-compute capacity reservations.
 
 ## External Services
 
@@ -267,7 +270,7 @@ and deployment setup. Key groups:
 | `MOA_SKILL_BUDGET_*` | skill manifest budget controls |
 | `MOA_EXECUTION_*` | planner repair, task/token/tool/retrieval/cost defaults, unattended confirmation threshold, deadlines, and the positive per-run live-task window |
 | `MOA_CLOUD_*` | remote hand provider settings |
-| `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Normal-runtime Restate ingress and optional health URL; bootstrap Admin access is an explicit command argument |
+| `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Normal-runtime Restate ingress and optional health URL; bootstrap receives explicit Admin access, while only the singleton maintenance observer may use `MOA_RESTATE_ADMIN_URL` for read-only deployment-drain queries |
 | `MOA_AUTH_*`, `MOA_AUTHZ_*`, `MOA_ASYNC_AUTHZ_*`, `MOA_AUDIT_SECURITY_*` | identity, authorization, builtin async authorization challenges, and OCSF security-event audit |
 | `MOA_SESSION_BLOB_*` | claim-check blob backend, threshold, and explicit local path when filesystem blobs are used |
 | `MOA_SESSION_ATTACHMENT_*` | session upload object storage backend, bucket, prefix, endpoint, and cloud credentials |

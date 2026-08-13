@@ -38,8 +38,9 @@ use super::{
     run::enqueue_run_activation_in_conn,
     sqlx_error, storage_error,
     task::{
-        ExternalJobTaskSettlementOutcome, TaskAttemptExternalOutcome,
-        TaskExternalStartRetryOutcome,
+        ExternalJobTaskSettlementOutcome, TaskAttemptCheckpointKind, TaskAttemptExternalOutcome,
+        TaskAttemptFence, TaskExternalStartRetryOutcome,
+        external_start_checkpoint_payload_is_provisional,
         settle_external_job_terminal_in_conn as settle_task_external_job_terminal_in_conn,
     },
     to_i64,
@@ -462,6 +463,133 @@ impl ExecutionRepository {
         let record = row.as_ref().map(external_job_from_row).transpose()?;
         conn.commit().await.map_err(storage_error)?;
         Ok(record)
+    }
+
+    /// Loads the exact current unbound provider-start recovery that owns a running task attempt.
+    ///
+    /// A due task watchdog must defer to this intent: only the provider adapter's crash-safe
+    /// `recover_start` result can decide whether the ambiguous start created external work.
+    /// Returning `None` means no complete current recovery authority exists for the supplied
+    /// attempt fence; malformed matched durable state is reported as repository corruption.
+    pub async fn load_current_task_external_start_recovery(
+        &self,
+        fence: TaskAttemptFence,
+    ) -> Result<Option<ExecutionExternalJobStartRecoveryRequest>> {
+        let mut conn = ExecutionScope::ControlPlane.begin(&self.pool).await?;
+        let row = sqlx::query(
+            r#"
+            SELECT job.*, recovery.trigger_uid, recovery.payload AS recovery_payload,
+                   checkpoint.checkpoint_kind, checkpoint.payload AS checkpoint_payload
+            FROM moa.execution_task AS task
+            JOIN moa.execution_run AS run
+              ON run.run_uid=task.run_uid AND run.tenant_id=task.tenant_id
+            JOIN moa.execution_capacity_reservation AS active_capacity
+              ON active_capacity.reservation_uid=$7
+             AND active_capacity.tenant_id=task.tenant_id
+             AND active_capacity.run_uid=task.run_uid
+             AND active_capacity.task_id=task.task_id
+             AND active_capacity.controller_generation=$4
+             AND active_capacity.attempt_generation=$3
+             AND active_capacity.resource_dimension='active_tasks'
+             AND active_capacity.state IN ('reserved','reconciling')
+             AND active_capacity.released_at IS NULL
+            JOIN moa.execution_trigger AS watchdog
+              ON watchdog.trigger_uid=$6 AND watchdog.tenant_id=task.tenant_id
+             AND watchdog.run_uid=task.run_uid AND watchdog.task_id=task.task_id
+             AND watchdog.controller_generation=$4 AND watchdog.attempt_generation=$3
+             AND watchdog.trigger_kind='task_watchdog' AND watchdog.state='pending'
+            JOIN moa.execution_task_checkpoint AS checkpoint
+              ON checkpoint.tenant_id=task.tenant_id AND checkpoint.run_uid=task.run_uid
+             AND checkpoint.task_id=task.task_id AND checkpoint.controller_generation=$4
+             AND checkpoint.attempt_generation=$3 AND checkpoint.dispatch_uid=$5
+             AND checkpoint.superseded_at IS NULL
+            JOIN moa.execution_external_job AS job
+              ON job.tenant_id=task.tenant_id AND job.run_uid=task.run_uid
+             AND job.task_id=task.task_id AND job.attempt_generation=$3
+             AND job.state='unbound'
+            JOIN moa.execution_capacity_reservation AS job_capacity
+              ON job_capacity.tenant_id=job.tenant_id
+             AND job_capacity.external_job_uid=job.external_job_uid
+             AND job_capacity.resource_dimension='external_jobs'
+             AND job_capacity.state='reserved' AND job_capacity.released_at IS NULL
+            JOIN moa.execution_trigger AS recovery
+              ON recovery.tenant_id=job.tenant_id AND recovery.run_uid=job.run_uid
+             AND recovery.task_id=job.task_id AND recovery.attempt_generation=$3
+             AND recovery.controller_generation=$4
+             AND recovery.trigger_kind='external_start_recovery'
+             AND recovery.state='pending'
+            WHERE task.tenant_id=$1 AND task.run_uid=$2 AND task.task_id=$8
+              AND task.attempt_generation=$3 AND task.active_dispatch_uid=$5
+              AND task.status='running' AND task.attempt_state='running'
+              AND run.controller_generation=$4 AND run.pending_terminal_status IS NULL
+            "#,
+        )
+        .bind(fence.tenant_id.0)
+        .bind(fence.run_uid)
+        .bind(to_i64(fence.attempt_generation, "attempt generation")?)
+        .bind(to_i64(
+            fence.controller_generation,
+            "controller generation",
+        )?)
+        .bind(fence.dispatch_uid)
+        .bind(fence.watchdog_trigger_uid)
+        .bind(fence.capacity_reservation_uid)
+        .bind(fence.task_id.as_uuid())
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(sqlx_error)?;
+        let Some(row) = row else {
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(None);
+        };
+        let job = external_job_from_row(&row)?;
+        let checkpoint_kind = TaskAttemptCheckpointKind::parse(
+            &row.try_get::<String, _>("checkpoint_kind")
+                .map_err(super::row_error)?,
+        )?;
+        let checkpoint_payload = row
+            .try_get::<Value, _>("checkpoint_payload")
+            .map_err(super::row_error)?;
+        if !external_start_checkpoint_payload_is_provisional(checkpoint_kind, &checkpoint_payload) {
+            return Err(Error::InvalidRepositoryData {
+                message: "unbound task external job lost its provisional start checkpoint"
+                    .to_string(),
+            });
+        }
+        let trigger_uid = row
+            .try_get::<Uuid, _>("trigger_uid")
+            .map_err(super::row_error)?;
+        let request = ExecutionExternalJobStartRecoveryRequest {
+            tenant_id: job.tenant_id,
+            run_uid: job.run_uid,
+            owner: ExecutionExternalJobStartRecoveryOwner::Task {
+                task_id: fence.task_id.as_uuid(),
+                attempt_generation: fence.attempt_generation,
+            },
+            external_job_uid: job.external_job_uid,
+            job_generation: job.job_generation,
+            provider: job.declared_provider,
+            idempotency_key: job.idempotency_key,
+            trigger_uid,
+        };
+        let recovery_payload = row
+            .try_get::<Value, _>("recovery_payload")
+            .map_err(super::row_error)?;
+        if recovery_payload
+            != json!({
+                "external_job_uid": request.external_job_uid,
+                "job_generation": request.job_generation,
+                "declared_provider": request.provider,
+                "idempotency_key": request.idempotency_key,
+            })
+        {
+            return Err(Error::InvalidRepositoryData {
+                message: "unbound task external job recovery trigger payload is inconsistent"
+                    .to_string(),
+            });
+        }
+        conn.commit().await.map_err(storage_error)?;
+        Ok(Some(request))
     }
 
     /// Reserves one exact unbound external-job intent before provider dispatch.

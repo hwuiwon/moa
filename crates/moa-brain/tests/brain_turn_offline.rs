@@ -19,6 +19,28 @@ use wiremock::MockServer;
 use offline_session_store::{MockSessionStore, session_meta};
 use openai_wiremock::{captured_json_bodies, mount_openai_text};
 
+struct BudgetDeniedPlannerProvider;
+
+#[async_trait::async_trait]
+impl moa_core::traits::LLMProvider for BudgetDeniedPlannerProvider {
+    fn name(&self) -> &'static str {
+        "budget-denied-planner"
+    }
+
+    fn capabilities(&self) -> moa_core::types::model::ModelCapabilities {
+        MockLlmProvider.capabilities()
+    }
+
+    async fn complete(
+        &self,
+        _request: moa_core::types::completion::SharedCompletionRequest,
+    ) -> moa_core::error::Result<moa_core::types::completion::CompletionStream> {
+        Err(moa_core::error::MoaError::BudgetExhausted(
+            "automatic amendment planning exhausted the approved run budget".to_string(),
+        ))
+    }
+}
+
 fn fixture_worker_workspace_scope(
     session: &SessionMeta,
 ) -> moa_core::types::sandbox_workspace::SandboxWorkspaceScope {
@@ -513,6 +535,67 @@ async fn execution_planning_amendment_schema_rejection_regenerates_once_without_
 }
 
 #[tokio::test]
+async fn execution_planning_amendment_audits_attribute_each_repair_call_usage_and_cost() {
+    // Pins: malformed amendment output and its one repair are two paid provider calls. Each audit
+    // must retain its own normalized token counters and exact model-priced cost rather than
+    // collapsing repair spend into an unattributed planner total.
+    let first_usage = moa_core::types::completion::TokenUsage {
+        input_tokens_uncached: 1_000,
+        input_tokens_cache_write: 200,
+        input_tokens_cache_read: 300,
+        output_tokens: 0,
+    };
+    let repair_usage = moa_core::types::completion::TokenUsage {
+        input_tokens_uncached: 2_000,
+        input_tokens_cache_write: 400,
+        input_tokens_cache_read: 600,
+        output_tokens: 0,
+    };
+    let provider = ScriptedProvider::new(MockLlmProvider.capabilities())
+        .push_response(ScriptedResponse::text("INVALID_AMENDMENT").with_usage(first_usage))
+        .push_response(
+            ScriptedResponse::text(execution_amendment_candidate(7, true)).with_usage(repair_usage),
+        );
+
+    let result = moa_brain::execution_planning::plan_amendment(
+        &provider,
+        execution_amendment_planning_request(),
+    )
+    .await
+    .expect("one metered amendment repair should succeed");
+
+    let calls = result
+        .audits
+        .iter()
+        .filter_map(|audit| match &audit.payload {
+            moa_core::types::execution_planning::ExecutionPlanningAuditPayload::PlannerCall {
+                call_ordinal,
+                usage,
+                cost_microusd,
+                ..
+            } => Some((*call_ordinal, *usage, *cost_microusd)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].0, 0);
+    assert_eq!(calls[0].1.input_tokens_uncached, 1_000);
+    assert_eq!(calls[0].1.input_tokens_cache_write, 200);
+    assert_eq!(calls[0].1.input_tokens_cache_read, 300);
+    assert!(calls[0].1.output_tokens > 0);
+    assert!(calls[0].2 > 0, "the initial call must retain priced spend");
+    assert_eq!(calls[1].0, 1);
+    assert_eq!(calls[1].1.input_tokens_uncached, 2_000);
+    assert_eq!(calls[1].1.input_tokens_cache_write, 400);
+    assert_eq!(calls[1].1.input_tokens_cache_read, 600);
+    assert!(calls[1].1.output_tokens > calls[0].1.output_tokens);
+    assert!(
+        calls[1].2 > calls[0].2,
+        "repair spend must be attributed separately"
+    );
+}
+
+#[tokio::test]
 async fn execution_planning_second_amendment_schema_rejection_stops_without_third_call() {
     // Pins: a malformed amendment schema-regeneration response is terminal and cannot recurse.
     let provider = ScriptedProvider::new(MockLlmProvider.capabilities())
@@ -621,6 +704,27 @@ async fn execution_planning_amendment_provider_failure_is_distinct_from_unsuppor
         vec![moa_core::types::execution_planning::ExecutionPlannerOutcome::ProviderError]
     );
     assert_eq!(provider.recorded_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn execution_planning_amendment_budget_denial_is_not_a_provider_call_audit() {
+    // Pins: durable reserve-before-dispatch denial is a typed budget stop, not a provider failure
+    // and not an invented paid-call audit; the provider implementation has made no gateway call.
+    let result = moa_brain::execution_planning::plan_amendment(
+        &BudgetDeniedPlannerProvider,
+        execution_amendment_planning_request(),
+    )
+    .await
+    .expect("budget denial should remain a typed amendment result");
+
+    assert!(matches!(
+        result.kind,
+        moa_brain::execution_planning::ExecutionAmendmentPlanningResultKind::BudgetExhausted { .. }
+    ));
+    assert!(
+        result.audits.is_empty(),
+        "a call denied before provider I/O must not persist a planner-call audit"
+    );
 }
 
 #[tokio::test]
@@ -768,7 +872,9 @@ fn execution_planning_request(
                 max_tasks: Some(100),
                 max_tool_calls: Some(100),
                 max_retrieved_bytes: Some(1_000_000),
-                deadline_at: None,
+                deadline_at: Some(
+                    moa_test_support::fixtures::pg_now() + chrono::TimeDelta::hours(2),
+                ),
             },
         },
         execution_template: None,
@@ -800,6 +906,10 @@ fn execution_planning_candidate(objective: &str, max_attempts: u32) -> String {
         },
         "plan": {
             "cancel_policy": "retain_effects",
+            "input_wait_policy": {
+                "expiry": {"kind": "after", "delay_seconds": 3600},
+                "on_expiry": {"kind": "fail_task"}
+            },
             "input_schema": { "type": "object" },
             "output_schema": { "type": "object" },
             "nodes": [{

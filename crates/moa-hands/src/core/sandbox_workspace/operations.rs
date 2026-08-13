@@ -304,33 +304,74 @@ impl PostgresWorkspaceOperationRepository {
     /// Fences an exact provider attempt as potentially sent without abandoning its commit CAS.
     ///
     /// This is the last durable write before provider I/O. It changes only a
-    /// provably unsent, unclaimed operation to `unknown`; the workspace remains
-    /// `committing` so a synchronous confirmed result can still atomically
-    /// publish its checkpoint and head. A subsequent error must call
-    /// [`Self::mark_unknown`] to move the workspace and reservations into
-    /// reconciliation.
+    /// provably unsent, unclaimed operation to `unknown`. Create and hydration
+    /// operations atomically move the exact workspace fence to `reconciling`;
+    /// commit keeps `committing` so its synchronous result can still atomically
+    /// publish the checkpoint and head. A subsequent error must call
+    /// [`Self::mark_unknown`] to move reservations into reconciliation too.
     pub async fn begin_provider_attempt(
         &self,
         tenant_id: TenantId,
         operation_id: WorkspaceOperationId,
     ) -> Result<bool> {
         let mut conn = self.begin(tenant_id).await?;
-        let affected = sqlx::query(
+        let row = sqlx::query(
             r#"
             UPDATE moa.sandbox_workspace_operations
             SET outcome_class = 'unknown', confirmed_disposition = NULL, updated_at = now()
             WHERE tenant_id = $1 AND operation_id = $2
               AND outcome_class = 'not_sent' AND claim_token IS NULL
+            RETURNING workspace_id, operation_kind, expected_writer_epoch,
+                      expected_instance_generation
             "#,
         )
         .bind(tenant_id)
         .bind(operation_id)
-        .execute(conn.as_mut())
+        .fetch_optional(conn.as_mut())
         .await
-        .map_err(map_sqlx_error)?
-        .rows_affected();
+        .map_err(map_sqlx_error)?;
+        if let Some(row) = &row {
+            let kind: String = row.try_get("operation_kind").map_err(map_sqlx_error)?;
+            if matches!(kind.as_str(), "create" | "attach" | "restore") {
+                let workspace_transitioned = sqlx::query(
+                    r#"
+                    UPDATE moa.sandbox_workspaces
+                    SET lifecycle_state = 'reconciling', updated_at = now()
+                    WHERE tenant_id = $1 AND workspace_id = $2
+                      AND writer_epoch = $3 AND instance_generation = $4
+                      AND lifecycle_state = CASE
+                            WHEN $5 = 'create' THEN 'creating'
+                            ELSE 'restoring'
+                          END
+                    "#,
+                )
+                .bind(tenant_id)
+                .bind(
+                    row.try_get::<SandboxWorkspaceId, _>("workspace_id")
+                        .map_err(map_sqlx_error)?,
+                )
+                .bind(
+                    row.try_get::<i64, _>("expected_writer_epoch")
+                        .map_err(map_sqlx_error)?,
+                )
+                .bind(
+                    row.try_get::<i64, _>("expected_instance_generation")
+                        .map_err(map_sqlx_error)?,
+                )
+                .bind(&kind)
+                .execute(conn.as_mut())
+                .await
+                .map_err(map_sqlx_error)?
+                .rows_affected()
+                    == 1;
+                if !workspace_transitioned {
+                    conn.rollback().await?;
+                    return Ok(false);
+                }
+            }
+        }
         conn.commit().await?;
-        Ok(affected == 1)
+        Ok(row.is_some())
     }
 
     /// Records that a provider request may have been sent and retains reservations.
@@ -411,11 +452,10 @@ impl PostgresWorkspaceOperationRepository {
 
     /// Confirms one synchronous provider result under the exact operation fence.
     ///
-    /// A synchronous absent result is accepted only while the operation remains
-    /// `not_sent`; once an outcome is ambiguous, absence must go through the
-    /// claimed two-observation reconciliation path. Present results may resolve
-    /// either a freshly completed request or an ambiguous request whose exact
-    /// resource was subsequently verified.
+    /// The caller invokes this only for the direct result of the provider request
+    /// whose `not_sent -> unknown` CAS it just won. Delayed recovery never calls
+    /// this method: it uses the claimed reconciliation methods, where absence
+    /// requires two separated observations.
     pub async fn confirm_disposition(
         &self,
         tenant_id: TenantId,
@@ -430,10 +470,7 @@ impl PostgresWorkspaceOperationRepository {
                 claim_token = NULL, claim_expires_at = NULL, retry_not_before = NULL,
                 updated_at = now()
             WHERE tenant_id = $1 AND operation_id = $2
-              AND (
-                    outcome_class = 'not_sent'
-                 OR ($3 = 'resource_present' AND outcome_class = 'unknown')
-              )
+              AND outcome_class = 'unknown'
               AND claim_token IS NULL
             "#,
         )
@@ -471,29 +508,17 @@ impl PostgresWorkspaceOperationRepository {
             .execute(conn.as_mut())
             .await
             .map_err(map_sqlx_error)?;
-        }
-        let replay = if affected == 1 {
-            true
-        } else {
-            sqlx::query_scalar::<_, bool>(
-                r#"
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM moa.sandbox_workspace_operations
-                    WHERE tenant_id = $1 AND operation_id = $2
-                      AND outcome_class = 'confirmed' AND confirmed_disposition = $3
-                )
-                "#,
+            settle_workspace_lifecycle_after_confirmation(
+                conn.as_mut(),
+                tenant_id,
+                operation_id,
+                disposition,
+                false,
             )
-            .bind(tenant_id)
-            .bind(operation_id)
-            .bind(disposition.as_str())
-            .fetch_one(conn.as_mut())
-            .await
-            .map_err(map_sqlx_error)?
-        };
+            .await?;
+        }
         conn.commit().await?;
-        Ok(replay)
+        Ok(affected == 1)
     }
 
     /// Confirms a present resource only while the exact reaper claim is live.
@@ -550,6 +575,14 @@ impl PostgresWorkspaceOperationRepository {
             .execute(conn.as_mut())
             .await
             .map_err(map_sqlx_error)?;
+            settle_workspace_lifecycle_after_confirmation(
+                conn.as_mut(),
+                claimed.operation.tenant_id,
+                claimed.operation.operation_id,
+                WorkspaceConfirmedDisposition::ResourcePresent,
+                true,
+            )
+            .await?;
         }
         conn.commit().await?;
         Ok(affected == 1)
@@ -700,6 +733,14 @@ impl PostgresWorkspaceOperationRepository {
             .execute(conn.as_mut())
             .await
             .map_err(map_sqlx_error)?;
+            settle_workspace_lifecycle_after_confirmation(
+                conn.as_mut(),
+                claimed.operation.tenant_id,
+                claimed.operation.operation_id,
+                WorkspaceConfirmedDisposition::ResourceAbsent,
+                true,
+            )
+            .await?;
         }
         conn.commit().await?;
         Ok(affected == 1)
@@ -858,6 +899,50 @@ impl PostgresWorkspaceOperationRepository {
         conn.commit().await?;
         Ok(affected == 1)
     }
+}
+
+async fn settle_workspace_lifecycle_after_confirmation(
+    conn: &mut sqlx::PgConnection,
+    tenant_id: TenantId,
+    operation_id: WorkspaceOperationId,
+    disposition: WorkspaceConfirmedDisposition,
+    reconciled: bool,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE moa.sandbox_workspaces AS workspace
+        SET lifecycle_state = CASE
+                WHEN operation.operation_kind = 'create' AND $3 = 'resource_present'
+                    THEN CASE WHEN $4 THEN 'ready' ELSE 'creating' END
+                WHEN operation.operation_kind IN ('attach', 'restore')
+                     AND $3 = 'resource_present'
+                    THEN CASE WHEN $4 THEN 'ready' ELSE 'restoring' END
+                WHEN operation.operation_kind IN ('create', 'attach', 'restore')
+                     AND $3 = 'resource_absent' THEN 'failed'
+                ELSE workspace.lifecycle_state
+            END,
+            updated_at = now()
+        FROM moa.sandbox_workspace_operations AS operation
+        WHERE operation.tenant_id = $1 AND operation.operation_id = $2
+          AND operation.outcome_class = 'confirmed'
+          AND operation.confirmed_disposition = $3
+          AND workspace.tenant_id = operation.tenant_id
+          AND workspace.workspace_id = operation.workspace_id
+          AND workspace.provider_account_id = operation.provider_account_id
+          AND workspace.provider_account_generation = operation.provider_account_generation
+          AND workspace.writer_epoch = operation.expected_writer_epoch
+          AND workspace.instance_generation = operation.expected_instance_generation
+          AND workspace.lifecycle_state NOT IN ('deleting', 'deleted')
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(operation_id)
+    .bind(disposition.as_str())
+    .bind(reconciled)
+    .execute(conn)
+    .await
+    .map_err(map_sqlx_error)?;
+    Ok(())
 }
 
 const OPERATION_COLUMNS: &str = "operation_id, tenant_id, workspace_id, provider_account_id, \

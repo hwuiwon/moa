@@ -483,120 +483,6 @@ impl PostgresWorkspaceCapacityRepository {
         Ok(committed)
     }
 
-    /// Releases active-hand capacity for a hand suspended at a continuation boundary.
-    ///
-    /// The lease deliberately stays `active` and keeps its handle: the suspended
-    /// sandbox still owns its filesystem so the next slice can reattach. Only the
-    /// compute charge goes back to the fleet, and
-    /// [`Self::reacquire_suspended_active_hand`] must win it again before the
-    /// sandbox resumes. Returns `false` when the exact lease or workspace fence
-    /// no longer holds, in which case the caller must not treat the compute as
-    /// released.
-    pub async fn release_suspended_active_hand(
-        &self,
-        request: &ActiveHandCapacityRequest,
-    ) -> Result<bool> {
-        validate_active_hand_request(request)?;
-        let mut conn = self.begin().await?;
-        if !active_hand_lease_is_live(conn.as_mut(), request).await? {
-            conn.rollback().await?;
-            return Ok(false);
-        }
-        let changed = release_active_hand_row(conn.as_mut(), request).await?;
-        conn.commit().await?;
-        Ok(changed)
-    }
-
-    /// Re-admits a suspended hand's active-compute charge before it resumes.
-    ///
-    /// Returns `false` when the fleet or tenant has no room. That is an ordinary
-    /// saturation outcome rather than an error: the caller drops the warm sandbox
-    /// and lets a later slice restore the published checkpoint into fresh
-    /// compute. A reservation that is still charged (a replay, or a suspend whose
-    /// capacity release never committed) is reported as `true` without
-    /// double-charging.
-    pub async fn reacquire_suspended_active_hand(
-        &self,
-        request: &ActiveHandCapacityRequest,
-    ) -> Result<bool> {
-        validate_active_hand_request(request)?;
-        let mut conn = self.begin().await?;
-        lock_capacity_scope_values(
-            conn.as_mut(),
-            request.tenant_id,
-            request.provider_account_id,
-        )
-        .await?;
-        if !active_hand_lease_is_live(conn.as_mut(), request).await? {
-            conn.rollback().await?;
-            return Err(MoaError::StorageError(
-                "suspended-hand re-admission lost its exact lease or workspace generation fence"
-                    .to_string(),
-            ));
-        }
-        let state = active_hand_reservation_state(conn.as_mut(), request).await?;
-        match state.as_deref() {
-            Some("pending" | "committed" | "reconciling") => {
-                conn.commit().await?;
-                return Ok(true);
-            }
-            Some("released") => {}
-            _ => {
-                conn.rollback().await?;
-                return Err(MoaError::StorageError(
-                    "suspended hand has no active-hands capacity reservation to re-admit"
-                        .to_string(),
-                ));
-            }
-        }
-        let quantities = BTreeMap::from([(WorkspaceCapacityDimension::ActiveHands, 1_i64)]);
-        if let Some(shortfall) = capacity_shortfall(
-            conn.as_mut(),
-            request.tenant_id,
-            request.provider_account_id,
-            request.provider_account_generation,
-            &quantities,
-        )
-        .await?
-        {
-            conn.rollback().await?;
-            tracing::info!(
-                shortfall,
-                "suspended sandbox lost its active-hands slot to a saturated fleet"
-            );
-            return Ok(false);
-        }
-        let readmitted = sqlx::query(
-            r#"
-            UPDATE moa.sandbox_capacity_reservations
-            SET reservation_state = 'committed', expires_at = NULL, updated_at = now()
-            WHERE tenant_id = $1 AND workspace_id = $2
-              AND provider_account_id = $3 AND provider_account_generation = $4
-              AND hand_provisioning_operation_id = $5
-              AND hand_lease_generation = $6
-              AND expected_writer_epoch = $7
-              AND expected_instance_generation = $8
-              AND resource_dimension = 'active_hands'
-              AND reservation_state = 'released'
-            "#,
-        )
-        .bind(request.tenant_id)
-        .bind(request.workspace_id)
-        .bind(request.provider_account_id)
-        .bind(request.provider_account_generation)
-        .bind(request.provisioning_operation_id)
-        .bind(request.hand_lease_generation)
-        .bind(request.expected_writer_epoch)
-        .bind(request.expected_instance_generation)
-        .execute(conn.as_mut())
-        .await
-        .map_err(map_sqlx_error)?
-        .rows_affected()
-            == 1;
-        conn.commit().await?;
-        Ok(readmitted)
-    }
-
     /// Releases active-hand capacity after exact durable reaper ownership is established.
     pub async fn release_active_hand_to_reaper(
         &self,
@@ -945,7 +831,7 @@ pub(crate) async fn release_workspace_in_transaction(
     .bind(tenant_id)
     .bind(workspace_id)
     .bind(delete_generation)
-    .execute(conn)
+    .execute(&mut *conn)
     .await
     .map_err(map_sqlx_error)?
     .rows_affected()
@@ -1284,7 +1170,7 @@ pub async fn commit_active_hand_in_transaction(
     .bind(request.hand_lease_generation)
     .bind(request.expected_writer_epoch)
     .bind(request.expected_instance_generation)
-    .execute(conn)
+    .execute(&mut *conn)
     .await
     .map_err(map_sqlx_error)?
     .rows_affected()
@@ -1293,18 +1179,28 @@ pub async fn commit_active_hand_in_transaction(
 
 /// Releases the active-compute owner held by one exact live durable reaper claim.
 ///
-/// `released` is accepted as an input state and re-asserted as a no-op update:
-/// a hand suspended at a continuation boundary already gave its compute charge
-/// back while keeping its lease, so requiring a still-charged reservation here
-/// would make every suspended hand's eventual destroy roll back forever.
+/// The tri-state result distinguishes the recoverable crash window before the
+/// reservation insert from a row whose identity matches but generation fences do
+/// not. Reapers may accept `Missing` only when provider absence has already been
+/// proven and the claimed lease never persisted a handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActiveHandReaperRelease {
+    /// The exact reservation was present and is now released.
+    Released,
+    /// No reservation exists for this provisioning identity.
+    Missing,
+    /// A reservation exists for the identity but carries different fences.
+    Mismatched,
+}
+
 pub(crate) async fn release_active_hand_for_reaper_in_transaction(
     conn: &mut sqlx::PgConnection,
     tenant_id: TenantId,
     provisioning_operation_id: HandProvisioningOperationId,
     hand_lease_generation: i64,
     claim_token: Uuid,
-) -> Result<bool> {
-    Ok(sqlx::query(
+) -> Result<ActiveHandReaperRelease> {
+    let released = sqlx::query(
         r#"
         UPDATE moa.sandbox_capacity_reservations AS reservation
         SET reservation_state = 'released', updated_at = now()
@@ -1334,53 +1230,35 @@ pub(crate) async fn release_active_hand_for_reaper_in_transaction(
     .bind(provisioning_operation_id)
     .bind(hand_lease_generation)
     .bind(claim_token)
-    .execute(conn)
+    .execute(&mut *conn)
     .await
     .map_err(map_sqlx_error)?
     .rows_affected()
-        == 1)
-}
-
-/// Locks and verifies that one exact active lease still owns live attached compute.
-///
-/// Used by the suspend/reattach pair, which — unlike provisioning and reaping —
-/// moves capacity while the lease stays `active` and keeps its handle.
-async fn active_hand_lease_is_live(
-    conn: &mut sqlx::PgConnection,
-    request: &ActiveHandCapacityRequest,
-) -> Result<bool> {
-    Ok(sqlx::query_scalar::<_, bool>(
+        == 1;
+    if released {
+        return Ok(ActiveHandReaperRelease::Released);
+    }
+    let exists = sqlx::query_scalar::<_, bool>(
         r#"
-        SELECT TRUE
-        FROM moa.hand_leases AS lease
-        JOIN moa.sandbox_workspaces AS workspace
-          ON workspace.tenant_id = lease.tenant_id
-         AND workspace.workspace_id = lease.workspace_id
-        WHERE lease.tenant_id = $1
-          AND lease.provisioning_operation_id = $2
-          AND lease.generation = $3
-          AND lease.status = 'active'
-          AND lease.handle IS NOT NULL
-          AND lease.workspace_id = $4
-          AND lease.workspace_writer_epoch = $5
-          AND lease.workspace_instance_generation = $6
-          AND workspace.provider_account_id = $7
-          AND workspace.provider_account_generation = $8
-        FOR UPDATE OF lease
+        SELECT EXISTS (
+            SELECT 1
+            FROM moa.sandbox_capacity_reservations
+            WHERE tenant_id = $1
+              AND hand_provisioning_operation_id = $2
+              AND resource_dimension = 'active_hands'
+        )
         "#,
     )
-    .bind(request.tenant_id)
-    .bind(request.provisioning_operation_id)
-    .bind(request.hand_lease_generation)
-    .bind(request.workspace_id)
-    .bind(request.expected_writer_epoch)
-    .bind(request.expected_instance_generation)
-    .bind(request.provider_account_id)
-    .bind(request.provider_account_generation)
-    .fetch_optional(conn)
+    .bind(tenant_id)
+    .bind(provisioning_operation_id)
+    .fetch_one(&mut *conn)
     .await
-    .map_err(map_sqlx_error)?
-    .unwrap_or(false))
+    .map_err(map_sqlx_error)?;
+    Ok(if exists {
+        ActiveHandReaperRelease::Mismatched
+    } else {
+        ActiveHandReaperRelease::Missing
+    })
 }
 
 async fn release_active_hand_row(
@@ -1409,7 +1287,7 @@ async fn release_active_hand_row(
     .bind(request.hand_lease_generation)
     .bind(request.expected_writer_epoch)
     .bind(request.expected_instance_generation)
-    .execute(conn)
+    .execute(&mut *conn)
     .await
     .map_err(map_sqlx_error)?
     .rows_affected()

@@ -17,12 +17,7 @@ const RESTATE_KEY_BATCH_SIZE: usize = 250;
 async fn deployed_long_horizon_invariants_hold_for_24_hours_live() -> Result<()> {
     // Pins: an explicitly selected external deployment is sampled for a full
     // 24 hours; an instantaneous healthy sample cannot satisfy this canary.
-    if !canary_selected("24h")? {
-        eprintln!(
-            "SKIPPED long-horizon canary 24h: MOA_LONG_HORIZON_CANARY_WINDOW selects the other window"
-        );
-        return Ok(());
-    }
+    require_canary_selection("24h")?;
     run_canary(Duration::from_secs(24 * 60 * 60)).await
 }
 
@@ -31,33 +26,39 @@ async fn deployed_long_horizon_invariants_hold_for_24_hours_live() -> Result<()>
 async fn deployed_long_horizon_invariants_hold_for_seven_days_live() -> Result<()> {
     // Pins: the seven-day deployment soak continuously rejects overdue runs,
     // parked compute ownership, and still-live attempt invocations.
-    if !canary_selected("7d")? {
-        eprintln!(
-            "SKIPPED long-horizon canary 7d: MOA_LONG_HORIZON_CANARY_WINDOW selects the other window"
-        );
-        return Ok(());
-    }
+    require_canary_selection("7d")?;
     run_canary(Duration::from_secs(7 * 24 * 60 * 60)).await
 }
 
-fn canary_selected(expected: &str) -> Result<bool> {
-    if std::env::var("MOA_RUN_LONG_HORIZON_CANARY").as_deref() != Ok("1") {
-        // Both cases are `#[ignore]`d, so reaching this point means the binary was
-        // explicitly selected with `--run-ignored`. Returning `Ok(false)` here used to
-        // report a green 24h/7d soak that sampled nothing, making an unauthorized sweep
-        // indistinguishable from a real deployment canary in CI logs.
+fn require_canary_selection(expected: &str) -> Result<()> {
+    let enabled = std::env::var("MOA_RUN_LONG_HORIZON_CANARY").as_deref() == Ok("1");
+    let selected = std::env::var("MOA_LONG_HORIZON_CANARY_WINDOW").ok();
+    validate_canary_selection(enabled, selected.as_deref(), expected)
+}
+
+fn validate_canary_selection(enabled: bool, selected: Option<&str>, expected: &str) -> Result<()> {
+    if !enabled {
+        // Both canaries are ignored, so reaching this point means this exact case
+        // was explicitly selected. A successful skip would make a run that sampled
+        // nothing indistinguishable from a completed deployment soak.
         bail!(
             "long-horizon canary was explicitly selected without MOA_RUN_LONG_HORIZON_CANARY=1; \
              refusing to report a passing soak that sampled nothing"
         );
     }
-    let selected = std::env::var("MOA_LONG_HORIZON_CANARY_WINDOW").context(
+    let selected = selected.context(
         "MOA_RUN_LONG_HORIZON_CANARY=1 requires MOA_LONG_HORIZON_CANARY_WINDOW=24h or 7d",
     )?;
     if selected != "24h" && selected != "7d" {
         bail!("MOA_LONG_HORIZON_CANARY_WINDOW must be exactly 24h or 7d");
     }
-    Ok(selected == expected)
+    if selected != expected {
+        bail!(
+            "selected long-horizon canary window {selected}, but invoked the {expected} canary; \
+             select exactly one matching canary test"
+        );
+    }
+    Ok(())
 }
 
 async fn run_canary(window: Duration) -> Result<()> {
@@ -277,4 +278,49 @@ async fn assert_no_live_restate_invocations(
         bail!("{owner_kind} retained a nonterminal Restate invocation: {rows:?}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::validate_canary_selection;
+
+    #[test]
+    fn canary_selection_accepts_only_the_matching_opted_in_window_offline() {
+        // Pins: selecting the exact opted-in canary is the only successful
+        // preflight; the other named canary cannot false-pass as a skip.
+        validate_canary_selection(true, Some("24h"), "24h")
+            .expect("the matching opted-in canary window should be accepted");
+        let error = validate_canary_selection(true, Some("7d"), "24h")
+            .expect_err("a mismatched named canary must fail closed");
+        assert_eq!(
+            error.to_string(),
+            "selected long-horizon canary window 7d, but invoked the 24h canary; select exactly one matching canary test"
+        );
+    }
+
+    #[test]
+    fn canary_selection_rejects_missing_gate_or_invalid_window_offline() {
+        // Pins: directly running an ignored canary without the explicit gate or
+        // with a mistyped window cannot report a successful soak.
+        let missing_gate = validate_canary_selection(false, Some("24h"), "24h")
+            .expect_err("the explicit canary gate is required");
+        assert_eq!(
+            missing_gate.to_string(),
+            "long-horizon canary was explicitly selected without MOA_RUN_LONG_HORIZON_CANARY=1; refusing to report a passing soak that sampled nothing"
+        );
+
+        let invalid_window = validate_canary_selection(true, Some("week"), "7d")
+            .expect_err("only the documented canary windows are valid");
+        assert_eq!(
+            invalid_window.to_string(),
+            "MOA_LONG_HORIZON_CANARY_WINDOW must be exactly 24h or 7d"
+        );
+
+        let missing_window = validate_canary_selection(true, None, "7d")
+            .expect_err("the selected canary window is required");
+        assert_eq!(
+            missing_window.to_string(),
+            "MOA_RUN_LONG_HORIZON_CANARY=1 requires MOA_LONG_HORIZON_CANARY_WINDOW=24h or 7d"
+        );
+    }
 }

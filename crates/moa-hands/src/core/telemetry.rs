@@ -96,7 +96,7 @@ pub fn record_workspace_quota_decision(
     record_sandbox_workspace_quota_decision(dimension, decision);
 }
 
-/// Sets a fleet-wide capacity utilization ratio.
+/// Sets the highest enforced tenant or provider-account utilization ratio.
 pub fn record_workspace_quota_utilization(dimension: WorkspaceCapacityDimension, ratio: f64) {
     record_sandbox_workspace_quota_utilization(dimension, ratio);
 }

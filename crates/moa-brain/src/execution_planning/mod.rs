@@ -15,8 +15,9 @@ use moa_core::{
     types::execution_planning::{
         ExecutionAuditReport, ExecutionAuditViolation, ExecutionCompileOutcome,
         ExecutionCompileSource, ExecutionPlannerCallKind, ExecutionPlannerOutcome,
-        ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload, ExecutionSourceProvenance,
-        GeneratedPlanPlannerProvenance, bounded_audit_report, execution_planning_hash,
+        ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload, ExecutionRouteUsage,
+        ExecutionSourceProvenance, GeneratedPlanPlannerProvenance, bounded_audit_report,
+        execution_planning_hash,
     },
 };
 use moa_execution::{
@@ -55,6 +56,24 @@ enum ClassifiedCompileOutcome {
     NeedsInput,
     Unsupported,
     Rejected,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PlannerCallMetering {
+    usage: ExecutionRouteUsage,
+    cost_microusd: u64,
+}
+
+fn planner_call_metering(
+    response: &moa_core::types::completion::CompletionResponse,
+) -> Result<PlannerCallMetering> {
+    let usage = response.token_usage();
+    Ok(PlannerCallMetering {
+        usage: routing::route_usage(usage)?,
+        cost_microusd: moa_providers::pricing_for_model(response.model.as_str())
+            .map(|pricing| pricing.cost_micros(&usage))
+            .unwrap_or_default(),
+    })
 }
 
 /// Plans or instantiates one initial execution candidate over frozen session authority.
@@ -403,6 +422,7 @@ async fn call_initial_provider(
             ));
         }
     };
+    let metering = planner_call_metering(&response)?;
     let raw = response.text;
     let duration = duration_micros(started);
     if raw.len() > EXECUTION_PLANNER_CANDIDATE_MAX_BYTES {
@@ -431,6 +451,7 @@ async fn call_initial_provider(
                 Some(raw_hash),
                 None,
                 Some(report_json),
+                metering,
                 duration,
             ),
         });
@@ -465,6 +486,7 @@ async fn call_initial_provider(
                     Some(raw_hash),
                     None,
                     Some(canonical_string(&report)?),
+                    metering,
                     duration,
                 ),
             });
@@ -494,6 +516,7 @@ async fn call_initial_provider(
             Some(candidate_hash),
             Some(candidate_json),
             None,
+            metering,
             duration,
         ),
     })
@@ -518,6 +541,7 @@ fn provider_error_call(
             None,
             None,
             None,
+            PlannerCallMetering::default(),
             duration,
         ),
     }
@@ -738,6 +762,7 @@ fn planner_audit(
     candidate_hash: Option<String>,
     candidate_json: Option<String>,
     compiler_report: Option<String>,
+    metering: PlannerCallMetering,
     duration_micros: u64,
 ) -> ExecutionPlanningAuditEnvelope {
     ExecutionPlanningAuditEnvelope {
@@ -754,6 +779,8 @@ fn planner_audit(
             outcome,
             provider_model,
             prompt_version: EXECUTION_PLANNER_PROMPT_VERSION.to_string(),
+            usage: metering.usage,
+            cost_microusd: metering.cost_microusd,
             candidate_hash,
             candidate_json,
             compiler_report,
@@ -951,8 +978,12 @@ pub async fn plan_amendment(
         0,
     )
     .await?;
-    let mut audits = vec![first_call.audit.clone()];
-    let (parsed, repair_attempts) = match first_call.parsed {
+    let mut audits = Vec::new();
+    let first_parsed = match record_amendment_provider_call(first_call, &mut audits) {
+        Ok(parsed) => parsed,
+        Err(message) => return Ok(amendment_budget_exhausted(message, audits)),
+    };
+    let (parsed, repair_attempts) = match first_parsed {
         ParsedAmendmentCall::SchemaRejected(_) if request.config.planner_repair_attempts > 0 => {
             let completion = request::amendment_schema_repair_completion_request(&request)
                 .map_err(|error| MoaError::SerializationError(error.to_string()))?;
@@ -964,8 +995,11 @@ pub async fn plan_amendment(
                 1,
             )
             .await?;
-            audits.push(repair_call.audit.clone());
-            (repair_call.parsed, 1)
+            let parsed = match record_amendment_provider_call(repair_call, &mut audits) {
+                Ok(parsed) => parsed,
+                Err(message) => return Ok(amendment_budget_exhausted(message, audits)),
+            };
+            (parsed, 1)
         }
         parsed => (parsed, 0),
     };
@@ -1006,14 +1040,17 @@ pub async fn plan_amendment(
         1,
     )
     .await?;
-    audits.push(repair_call.audit.clone());
+    let repair_parsed = match record_amendment_provider_call(repair_call, &mut audits) {
+        Ok(parsed) => parsed,
+        Err(message) => return Ok(amendment_budget_exhausted(message, audits)),
+    };
     let ParsedAmendmentCall::Candidate {
         candidate: repaired,
         candidate_json: repaired_json,
         candidate_hash: repaired_hash,
-    } = repair_call.parsed
+    } = repair_parsed
     else {
-        return Ok(amendment_terminal_provider(repair_call.parsed, audits));
+        return Ok(amendment_terminal_provider(repair_parsed, audits));
     };
     let second = compile_amendment_candidate(&request, &repaired)?;
     let repair_audit = audits.last_mut().ok_or_else(|| {
@@ -1028,9 +1065,12 @@ pub async fn plan_amendment(
     }
 }
 
-struct AmendmentProviderCall {
-    parsed: ParsedAmendmentCall,
-    audit: ExecutionPlanningAuditEnvelope,
+enum AmendmentProviderCall {
+    Audited {
+        parsed: ParsedAmendmentCall,
+        audit: Box<ExecutionPlanningAuditEnvelope>,
+    },
+    BudgetExhausted(String),
 }
 
 enum ParsedAmendmentCall {
@@ -1045,6 +1085,19 @@ enum ParsedAmendmentCall {
     Unsupported(String),
     /// Provider/transport failure whose raw message must not reach a user.
     ProviderFailure(String),
+}
+
+fn record_amendment_provider_call(
+    call: AmendmentProviderCall,
+    audits: &mut Vec<ExecutionPlanningAuditEnvelope>,
+) -> std::result::Result<ParsedAmendmentCall, String> {
+    match call {
+        AmendmentProviderCall::Audited { parsed, audit } => {
+            audits.push(*audit);
+            Ok(parsed)
+        }
+        AmendmentProviderCall::BudgetExhausted(message) => Err(message),
+    }
 }
 
 async fn call_amendment_provider(
@@ -1071,6 +1124,9 @@ async fn call_amendment_provider(
             }
         },
         Err(MoaError::Cancelled) => return Err(MoaError::Cancelled),
+        Err(MoaError::BudgetExhausted(message)) => {
+            return Ok(AmendmentProviderCall::BudgetExhausted(message));
+        }
         Err(error) => {
             return Ok(amendment_provider_error(
                 request,
@@ -1082,6 +1138,7 @@ async fn call_amendment_provider(
             ));
         }
     };
+    let metering = planner_call_metering(&response)?;
     let raw = response.text;
     let duration = duration_micros(started);
     if raw.len() > EXECUTION_PLANNER_CANDIDATE_MAX_BYTES {
@@ -1097,11 +1154,11 @@ async fn call_amendment_provider(
                 raw.as_bytes(),
             ),
         };
-        return Ok(AmendmentProviderCall {
+        return Ok(AmendmentProviderCall::Audited {
             parsed: ParsedAmendmentCall::Unsupported(
                 "amendment response exceeded its byte cap".to_string(),
             ),
-            audit: amendment_planner_audit(
+            audit: Box::new(amendment_planner_audit(
                 request,
                 call_kind,
                 ordinal,
@@ -1110,8 +1167,9 @@ async fn call_amendment_provider(
                 Some(raw_hash),
                 None,
                 Some(canonical_string(&report)?),
+                metering,
                 duration,
-            ),
+            )),
         });
     }
     let candidate = match serde_json::from_str::<GeneratedAmendmentCandidate>(&raw) {
@@ -1129,11 +1187,11 @@ async fn call_amendment_provider(
                 }],
             )
             .map_err(contract_error)?;
-            return Ok(AmendmentProviderCall {
+            return Ok(AmendmentProviderCall::Audited {
                 parsed: ParsedAmendmentCall::SchemaRejected(
                     "amendment response failed the strict response schema".to_string(),
                 ),
-                audit: amendment_planner_audit(
+                audit: Box::new(amendment_planner_audit(
                     request,
                     call_kind,
                     ordinal,
@@ -1145,21 +1203,22 @@ async fn call_amendment_provider(
                     )),
                     None,
                     Some(canonical_string(&report)?),
+                    metering,
                     duration,
-                ),
+                )),
             });
         }
     };
     let candidate_json = canonical_string(&candidate)?;
     let candidate_hash =
         execution_planning_hash("moa.execution.planner-candidate", candidate_json.as_bytes());
-    Ok(AmendmentProviderCall {
+    Ok(AmendmentProviderCall::Audited {
         parsed: ParsedAmendmentCall::Candidate {
             candidate,
             candidate_json: candidate_json.clone(),
             candidate_hash: candidate_hash.clone(),
         },
-        audit: amendment_planner_audit(
+        audit: Box::new(amendment_planner_audit(
             request,
             call_kind,
             ordinal,
@@ -1168,8 +1227,9 @@ async fn call_amendment_provider(
             Some(candidate_hash),
             Some(candidate_json),
             None,
+            metering,
             duration,
-        ),
+        )),
     })
 }
 
@@ -1181,9 +1241,9 @@ fn amendment_provider_error(
     duration: u64,
     message: String,
 ) -> AmendmentProviderCall {
-    AmendmentProviderCall {
+    AmendmentProviderCall::Audited {
         parsed: ParsedAmendmentCall::ProviderFailure(message),
-        audit: amendment_planner_audit(
+        audit: Box::new(amendment_planner_audit(
             request,
             call_kind,
             ordinal,
@@ -1192,8 +1252,9 @@ fn amendment_provider_error(
             None,
             None,
             None,
+            PlannerCallMetering::default(),
             duration,
-        ),
+        )),
     }
 }
 
@@ -1266,6 +1327,7 @@ fn amendment_planner_audit(
     candidate_hash: Option<String>,
     candidate_json: Option<String>,
     compiler_report: Option<String>,
+    metering: PlannerCallMetering,
     duration_micros: u64,
 ) -> ExecutionPlanningAuditEnvelope {
     ExecutionPlanningAuditEnvelope {
@@ -1282,6 +1344,8 @@ fn amendment_planner_audit(
             outcome,
             provider_model,
             prompt_version: EXECUTION_PLANNER_PROMPT_VERSION.to_string(),
+            usage: metering.usage,
+            cost_microusd: metering.cost_microusd,
             candidate_hash,
             candidate_json,
             compiler_report,
@@ -1388,6 +1452,16 @@ fn amendment_terminal_provider(
         ParsedAmendmentCall::Candidate { .. } => {
             amendment_unsupported("invalid amendment planner state", audits)
         }
+    }
+}
+
+fn amendment_budget_exhausted(
+    message: String,
+    audits: Vec<ExecutionPlanningAuditEnvelope>,
+) -> ExecutionAmendmentPlanningResult {
+    ExecutionAmendmentPlanningResult {
+        kind: ExecutionAmendmentPlanningResultKind::BudgetExhausted { message },
+        audits,
     }
 }
 

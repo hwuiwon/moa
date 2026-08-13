@@ -3,9 +3,7 @@
 use chrono::{Duration, Utc};
 use moa_artifacts::execution_plan::{ExecutionTaskOutcome, ExecutionTaskResult};
 use moa_core::types::action_policy::{ActionReviewOwner, ExecutionTaskOrigin};
-use moa_core::types::sandbox_workspace::{
-    ExecutionHandContinuationDisposition, ExecutionHandReleaseReceipt,
-};
+use moa_core::types::sandbox_workspace::ExecutionHandReleaseReceipt;
 use moa_execution::{
     repository::{
         ExecutionAttemptState, ExecutionScope,
@@ -30,10 +28,7 @@ use crate::{
     services::{
         action_reviews::{AcknowledgeExecutionActionReviewRequest, ActionReviewsClient},
         llm_gateway::{LLMCompletionOwner, cancel_completion_owner},
-        tool_executor::{
-            CheckpointAndReleaseExecutionHandsRequest,
-            CheckpointExecutionHandsRetainingComputeRequest, ToolExecutorClient,
-        },
+        tool_executor::{CheckpointAndReleaseExecutionHandsRequest, ToolExecutorClient},
     },
     workflows::{
         attempt_slice::durable_utc_now_shared,
@@ -171,24 +166,10 @@ pub(super) async fn yield_continuation(
     else {
         return Ok(());
     };
-    // A continuation is not a wait: the yield below marks the task ready and enqueues
-    // its run activation immediately, so the next slice is admitted in seconds. The
-    // durable checkpoint head still advances here, and the sandbox is kept — suspended
-    // where the provider can genuinely release compute, briefly hot where it cannot —
-    // instead of destroyed and re-provisioned across a zero-length yield. Every genuine
-    // park — review, input, external job, cancel, pause — still releases unconditionally.
-    let disposition = continue_task_hands_workflow(ctx, request, &started).await?;
-    // A failed suspension leaves the hand running with no owner willing to bet on it,
-    // so it finishes the ordinary checkpoint-and-destroy path and fences the resulting
-    // receipt into this checkpoint exactly as a genuine park would.
-    let workspace_release_receipt = match disposition {
-        ExecutionHandContinuationDisposition::SuspendFailed => {
-            checkpoint_task_hands_workflow(ctx, request, &started).await?
-        }
-        ExecutionHandContinuationDisposition::NoComputeOwned
-        | ExecutionHandContinuationDisposition::Suspended
-        | ExecutionHandContinuationDisposition::RetainedHot => None,
-    };
+    // Every bounded activation yield is storage-only. Publish the portable checkpoint,
+    // destroy provider compute, and release the exact hand lease before redispatching the
+    // continuation; the next slice restores into freshly admitted compute.
+    let workspace_release_receipt = checkpoint_task_hands_workflow(ctx, request, &started).await?;
     let payload = continuation.to_bounded_json().map_err(TerminalError::new)?;
     let repository = workflow.repository.clone();
     let checkpoint = NewTaskAttemptCheckpoint {
@@ -525,44 +506,6 @@ fn release_claim(outcome: TaskAttemptReleaseClaimOutcome) -> Option<TaskAttemptR
     }
 }
 
-/// Publishes the attempt's checkpoint and keeps its sandbox for the next slice.
-///
-/// The published checkpoint is what makes keeping the sandbox safe at all: whether
-/// it is suspended or held hot, losing it before the next slice arrives costs a
-/// restore from this exact head and nothing else. Which of the two happens is a
-/// provider capability question, so it is decided in the hands layer and reported
-/// back rather than guessed here.
-pub(super) async fn continue_task_hands_workflow(
-    ctx: &WorkflowContext<'_>,
-    request: &ExecutionTaskAttemptRequest,
-    started: &TaskAttemptRecord,
-) -> Result<ExecutionHandContinuationDisposition, HandlerError> {
-    let publish_started_at = durable_utc_now(ctx, "task_hand_continuation_started_at").await?;
-    Ok(crate::restate_identity::replay_safe_request(
-        ctx.service_client::<ToolExecutorClient>()
-            .checkpoint_execution_hands_retaining_compute(Json::from(
-                CheckpointExecutionHandsRetainingComputeRequest {
-                    tenant_id: request.tenant_id,
-                    session_id: started.run.session_id,
-                    run_uid: request.run_uid,
-                    task_id: moa_core::types::identifiers::ExecutionTaskScopeId(
-                        request.task_id.as_uuid(),
-                    ),
-                    logical_generation: started.task.generation,
-                    attempt_generation: request.attempt_generation,
-                    publish_deadline_at: task_hand_release_deadline(publish_started_at),
-                    retention_deadline_at: task_hand_retention_deadline(
-                        publish_started_at,
-                        request.attempt_deadline_at,
-                    ),
-                },
-            )),
-    )
-    .call()
-    .await?
-    .into_inner())
-}
-
 /// Obtains provider-verified checkpoint and release proof for the attempt's hands.
 pub(super) async fn checkpoint_task_hands_workflow(
     ctx: &WorkflowContext<'_>,
@@ -627,44 +570,12 @@ fn task_hand_release_deadline(release_started_at: chrono::DateTime<Utc>) -> chro
     release_started_at + Duration::minutes(5)
 }
 
-/// How long a continuation boundary may keep an unsuspendable sandbox hot.
-///
-/// This bound only applies to providers that cannot actually release compute, where
-/// the sandbox stays fully billed and keeps its `ActiveHands` admission slot for the
-/// whole window. That is a bet that the next slice arrives before the window closes,
-/// and it only pays off when it arrives *fast*: a longer window does not raise the
-/// odds, it just extends the loss when the bet fails — hot idle compute plus a slot
-/// withheld from runnable work plus, in the end, the full restore anyway.
-///
-/// One reaper interval is therefore the whole budget. It matches
-/// `HandLeaseReaperConfig::interval` (30s by default,
-/// `crates/moa-hands/src/core/reaper.rs`), which is also the granularity at which the
-/// deadline can actually be enforced — a shorter value would not be observed sooner,
-/// and a longer one buys nothing the fast path needs. Providers with real suspension
-/// never reach this constant: they release compute in the yield path instead.
-const TASK_CONTINUATION_HAND_RETENTION: Duration = Duration::seconds(30);
-
-/// Bounds retention by both the retention window and the attempt's own deadline.
-///
-/// The sandbox was admitted under this attempt's compute deadline, so retention never
-/// carries it past that instant even when the window would allow it.
-fn task_hand_retention_deadline(
-    published_at: chrono::DateTime<Utc>,
-    attempt_deadline_at: chrono::DateTime<Utc>,
-) -> chrono::DateTime<Utc> {
-    (published_at + TASK_CONTINUATION_HAND_RETENTION).min(attempt_deadline_at)
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use moa_execution::wire::ExecutionAttemptCancelReason;
-    use moa_hands::core::reaper::HandLeaseReaperConfig;
 
-    use super::{
-        TASK_CONTINUATION_HAND_RETENTION, TaskCancelSettlement, task_cancel_settlement,
-        task_hand_release_deadline, task_hand_retention_deadline,
-    };
+    use super::{TaskCancelSettlement, task_cancel_settlement, task_hand_release_deadline};
 
     #[test]
     fn pause_cancel_uses_nonterminal_release_finalizer() {
@@ -689,44 +600,6 @@ mod tests {
                 TaskCancelSettlement::Terminal,
             );
         }
-    }
-
-    #[test]
-    fn continuation_retention_never_outlives_the_attempt_that_was_admitted_for_it() {
-        // Pins: a retained continuation hand is bounded by the retention window and, when
-        // the attempt ends sooner, by the attempt deadline it was admitted under. Losing
-        // either bound would let one task hold a fleet active-hands slot indefinitely.
-        let published_at = Utc
-            .with_ymd_and_hms(2026, 8, 12, 9, 0, 0)
-            .single()
-            .expect("fixture timestamp is valid");
-
-        let roomy_attempt_deadline = published_at + Duration::hours(1);
-        assert_eq!(
-            task_hand_retention_deadline(published_at, roomy_attempt_deadline),
-            published_at + TASK_CONTINUATION_HAND_RETENTION,
-        );
-
-        let expiring_attempt_deadline = published_at + Duration::seconds(10);
-        assert_eq!(
-            task_hand_retention_deadline(published_at, expiring_attempt_deadline),
-            expiring_attempt_deadline,
-        );
-        assert!(TASK_CONTINUATION_HAND_RETENTION < Duration::minutes(10));
-    }
-
-    #[test]
-    fn hot_retention_never_outlives_one_reaper_sweep() {
-        // Pins: hot retention on an unsuspendable provider is one reaper interval and no
-        // more. The window is fully billed compute that also withholds an admission slot
-        // from runnable work, so a longer bet does not improve the odds of the next slice
-        // arriving — it only enlarges the loss when the bet fails. The bound is the
-        // 30s `HandLeaseReaperConfig::interval` default that actually enforces it.
-        assert_eq!(
-            TASK_CONTINUATION_HAND_RETENTION,
-            Duration::from_std(HandLeaseReaperConfig::default().interval)
-                .expect("the reaper interval fits a chrono duration"),
-        );
     }
 
     #[test]

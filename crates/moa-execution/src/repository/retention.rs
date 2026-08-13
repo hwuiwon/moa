@@ -171,6 +171,14 @@ const ARCHIVE_SOURCES: &[ArchiveSource] = &[
         select_page_sql: "SELECT to_jsonb(source) AS record, to_jsonb(base_plan_revision) AS cursor FROM moa.execution_amendment_receipt AS source WHERE tenant_id = $1 AND run_uid = $2 AND ($4::JSONB IS NULL OR base_plan_revision > (($4 #>> '{}')::BIGINT)) ORDER BY base_plan_revision LIMIT $3",
     },
     ArchiveSource {
+        kind: "execution_amendment_planning_settlement",
+        select_page_sql: "SELECT to_jsonb(source) AS record, to_jsonb(settlement_uid::TEXT) AS cursor FROM moa.execution_amendment_planning_settlement AS source WHERE tenant_id = $1 AND run_uid = $2 AND ($4::JSONB IS NULL OR settlement_uid > (($4 #>> '{}')::UUID)) ORDER BY settlement_uid LIMIT $3",
+    },
+    ArchiveSource {
+        kind: "execution_amendment_planning_reservation",
+        select_page_sql: "SELECT to_jsonb(source) AS record, to_jsonb(reservation_uid::TEXT) AS cursor FROM moa.execution_amendment_planning_reservation AS source WHERE tenant_id = $1 AND run_uid = $2 AND ($4::JSONB IS NULL OR reservation_uid > (($4 #>> '{}')::UUID)) ORDER BY reservation_uid LIMIT $3",
+    },
+    ArchiveSource {
         kind: "execution_node_materialization",
         select_page_sql: "SELECT to_jsonb(source) AS record, jsonb_build_array(plan_revision, node_id) AS cursor FROM moa.execution_node_materialization AS source WHERE tenant_id = $1 AND run_uid = $2 AND ($4::JSONB IS NULL OR (plan_revision, node_id) > (($4->>0)::BIGINT, $4->>1)) ORDER BY plan_revision, node_id LIMIT $3",
     },
@@ -1163,6 +1171,14 @@ async fn advance_deletion(
             "DELETE FROM moa.execution_amendment_receipt WHERE ctid IN (SELECT ctid FROM moa.execution_amendment_receipt WHERE tenant_id = $1 AND run_uid = $2 ORDER BY base_plan_revision LIMIT $3)",
         ),
         (
+            "execution_amendment_planning_settlement",
+            "DELETE FROM moa.execution_amendment_planning_settlement WHERE settlement_uid IN (SELECT settlement_uid FROM moa.execution_amendment_planning_settlement WHERE tenant_id = $1 AND run_uid = $2 ORDER BY settlement_uid LIMIT $3)",
+        ),
+        (
+            "execution_amendment_planning_reservation",
+            "DELETE FROM moa.execution_amendment_planning_reservation WHERE reservation_uid IN (SELECT reservation_uid FROM moa.execution_amendment_planning_reservation WHERE tenant_id = $1 AND run_uid = $2 ORDER BY reservation_uid LIMIT $3)",
+        ),
+        (
             "execution_compensation",
             "DELETE FROM moa.execution_compensation WHERE compensation_id IN (SELECT compensation_id FROM moa.execution_compensation WHERE tenant_id = $1 AND run_uid = $2 ORDER BY compensation_id LIMIT $3)",
         ),
@@ -1316,7 +1332,7 @@ mod tests {
     fn archive_sources_use_persisted_keyset_cursors_without_offsets() {
         // Pins: every archive source resumes strictly after its last committed key; restoring
         // OFFSET paging would make later pages increasingly expensive and replay-fragile.
-        assert_eq!(ARCHIVE_SOURCES.len(), 18);
+        assert_eq!(ARCHIVE_SOURCES.len(), 20);
         for source in ARCHIVE_SOURCES {
             assert!(source.select_page_sql.contains("$4"), "{}", source.kind);
             assert!(

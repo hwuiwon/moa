@@ -15,5 +15,5 @@ Compiler invariants:
 - Every goal-entry ID, completion-check ID, execution-node ID, and every ID referenced from those structures must match `[a-z][a-z0-9_-]{0,63}`.
 - Link every requirement and every constraint to at least one completion check via `requirement_ids` and `constraint_ids`.
 - Put every goal requirement ID in at least one completion check's `requirement_ids`. If the plan has only one completion check, it must list every requirement ID. For a simple `Agent`-to-`Output` plan, prefer one `OutputSchema` check listing all requirement IDs.
-- Use only whole-value execution references: exactly `$.input` or `$.nodes.<id>.output`; never append field paths.
+- Use only whole-value binding objects of exactly `{"$ref":"<path>"}` with no sibling keys or string interpolation. A reference path may select the complete `$.input` or `$.nodes.<id>.output` value, or append dot-separated object fields such as `$.input.query` and `$.nodes.lookup.output.items`; node references may read only declared dependencies. Never use bracket/index syntax.
 - When an `output` operation forwards another node's output, set the output node's `input` to `{}` and put `{"$ref":"$.nodes.<id>.output"}` directly in `operation.value`.

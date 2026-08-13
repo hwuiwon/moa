@@ -1,6 +1,204 @@
 //! Planning-context, normalized-audit, confirmation, and amendment persistence contracts.
 
 use super::support::*;
+use moa_execution::repository::planning_budget::{
+    AmendmentPlanningCallReconcileOutcome, AmendmentPlanningCallReconcileRequest,
+    AmendmentPlanningCallReservation, AmendmentPlanningCallReservationOutcome,
+    AmendmentPlanningCallReservationRequest, PlanningUsage,
+};
+
+#[tokio::test]
+async fn amendment_planner_call_budget_is_reserved_and_reconciled_exactly_once_db() -> TestResult {
+    // Pins: one automatic amendment provider call has durable cost/token attribution, consumes
+    // no logical-task budget, and exact reserve/reconcile replays cannot double charge the run.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let repository = ExecutionRepository::new(pool.clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let run = create_run(
+        &repository,
+        scope,
+        new_run(
+            tenant_id,
+            None,
+            "amendment-planning-budget",
+            ExecutionRunStatus::Queued,
+            budget(10),
+        ),
+    )
+    .await?;
+    sqlx::query("UPDATE moa.execution_run SET status='running' WHERE run_uid=$1")
+        .bind(run.run_uid)
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE moa.execution_run SET status='waiting_replan' WHERE run_uid=$1")
+        .bind(run.run_uid)
+        .execute(&pool)
+        .await?;
+
+    let denied = AmendmentPlanningCallReservationRequest {
+        run_uid: run.run_uid,
+        base_plan_revision: 1,
+        call_ordinal: 9,
+        reservation: AmendmentPlanningCallReservation {
+            cost_microusd: 10_000,
+            tokens: 10_000,
+        },
+        now: moa_test_support::fixtures::pg_now(),
+    };
+    assert!(matches!(
+        repository
+            .reserve_amendment_planning_call(scope, denied)
+            .await?,
+        AmendmentPlanningCallReservationOutcome::Denied(_)
+    ));
+    let after_denial = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("denied run remains visible");
+    assert_eq!(after_denial.reserved, Default::default());
+    assert_eq!(after_denial.consumed, Default::default());
+    assert_eq!(
+        repository
+            .load_amendment_planning_call(scope, run.run_uid, 1, 9)
+            .await?,
+        None,
+        "denial must leave no attribution row for work that cannot run"
+    );
+
+    let request = AmendmentPlanningCallReservationRequest {
+        run_uid: run.run_uid,
+        base_plan_revision: 1,
+        call_ordinal: 2,
+        reservation: AmendmentPlanningCallReservation {
+            cost_microusd: 100,
+            tokens: 80,
+        },
+        now: moa_test_support::fixtures::pg_now(),
+    };
+    let AmendmentPlanningCallReservationOutcome::Granted(open) = repository
+        .reserve_amendment_planning_call(scope, request)
+        .await?
+    else {
+        panic!("the exact live amendment revision must authorize one provider call");
+    };
+    assert_eq!(open.reserved, request.reservation);
+    assert_eq!(open.actual, None);
+    assert_eq!(
+        repository
+            .reserve_amendment_planning_call(scope, request)
+            .await?,
+        AmendmentPlanningCallReservationOutcome::ReplayedOpen(open.clone())
+    );
+    let reserved_run = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("run remains visible");
+    assert_eq!(reserved_run.reserved.cost_microusd, 100);
+    assert_eq!(reserved_run.reserved.tokens, 80);
+    assert_eq!(reserved_run.reserved.tasks, 0);
+
+    let reconcile = AmendmentPlanningCallReconcileRequest {
+        run_uid: run.run_uid,
+        base_plan_revision: 1,
+        call_ordinal: 2,
+        actual: PlanningUsage {
+            cost_microusd: 70,
+            tokens: 50,
+        },
+        settled_at: moa_test_support::fixtures::pg_now(),
+    };
+    let AmendmentPlanningCallReconcileOutcome::Applied(settled) = repository
+        .reconcile_amendment_planning_call(scope, reconcile.clone())
+        .await?
+    else {
+        panic!("the first exact reconciliation must apply");
+    };
+    assert_eq!(settled.actual.as_ref(), Some(&reconcile.actual));
+    assert_eq!(
+        repository
+            .reconcile_amendment_planning_call(scope, reconcile.clone())
+            .await?,
+        AmendmentPlanningCallReconcileOutcome::Replayed(settled.clone())
+    );
+    assert_eq!(
+        repository
+            .reserve_amendment_planning_call(scope, request)
+            .await?,
+        AmendmentPlanningCallReservationOutcome::AlreadySettled(settled.clone()),
+        "post-reconcile Restate replay must recover the immutable settled authorization"
+    );
+    let settled_run = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("run remains visible");
+    assert_eq!(settled_run.reserved.cost_microusd, 0);
+    assert_eq!(settled_run.reserved.tokens, 0);
+    assert_eq!(settled_run.consumed.cost_microusd, 70);
+    assert_eq!(settled_run.consumed.tokens, 50);
+    assert_eq!(settled_run.consumed.tasks, 0);
+    assert_eq!(
+        repository
+            .load_amendment_planning_call(scope, run.run_uid, 1, 2)
+            .await?,
+        Some(settled)
+    );
+
+    let mut conflicting = reconcile.clone();
+    conflicting.actual.cost_microusd += 1;
+    assert_eq!(
+        repository
+            .reconcile_amendment_planning_call(scope, conflicting)
+            .await?,
+        AmendmentPlanningCallReconcileOutcome::Conflict
+    );
+
+    let repair = AmendmentPlanningCallReservationRequest {
+        call_ordinal: 3,
+        reservation: AmendmentPlanningCallReservation {
+            cost_microusd: 40,
+            tokens: 30,
+        },
+        ..request
+    };
+    assert!(matches!(
+        repository
+            .reserve_amendment_planning_call(scope, repair)
+            .await?,
+        AmendmentPlanningCallReservationOutcome::Granted(_)
+    ));
+    let repair_reconcile = AmendmentPlanningCallReconcileRequest {
+        call_ordinal: repair.call_ordinal,
+        actual: PlanningUsage {
+            cost_microusd: 20,
+            tokens: 10,
+        },
+        ..reconcile
+    };
+    let AmendmentPlanningCallReconcileOutcome::Applied(repair_settled) = repository
+        .reconcile_amendment_planning_call(scope, repair_reconcile.clone())
+        .await?
+    else {
+        panic!("the repair call must reconcile independently");
+    };
+    assert_eq!(repair_settled.actual, Some(repair_reconcile.actual));
+    assert_eq!(
+        repository
+            .reconcile_amendment_planning_call(scope, repair_reconcile)
+            .await?,
+        AmendmentPlanningCallReconcileOutcome::Replayed(repair_settled)
+    );
+    let after_repair = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("run remains visible");
+    assert_eq!(after_repair.reserved, Default::default());
+    assert_eq!(after_repair.consumed.cost_microusd, 90);
+    assert_eq!(after_repair.consumed.tokens, 60);
+    assert_eq!(after_repair.consumed.tasks, 0);
+    Ok(())
+}
 
 #[tokio::test]
 async fn planning_context_snapshot_is_immutable_and_exactly_replayed_db() -> TestResult {
@@ -246,6 +444,11 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
         RouteAuditWriteOutcome::Replayed(contact_evidence)
     );
 
+    let planner_report = String::from_utf8(canonical_json_bytes(&ExecutionAuditReport::Schema {
+        violations: Vec::new(),
+        omitted_violations: 0,
+        full_report_hash: "d".repeat(64),
+    })?)?;
     let planner = ExecutionPlanningAuditEnvelope {
         schema_version: 1,
         tenant_id,
@@ -257,12 +460,19 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
             call_ordinal: 0,
             run_uid: None,
             plan_revision: None,
-            outcome: ExecutionPlannerOutcome::ProviderError,
+            outcome: ExecutionPlannerOutcome::SchemaRejected,
             provider_model: "planner-test".to_string(),
             prompt_version: "execution-planner".to_string(),
-            candidate_hash: None,
+            usage: ExecutionRouteUsage {
+                input_tokens_uncached: 21,
+                input_tokens_cache_write: 3,
+                input_tokens_cache_read: 5,
+                output_tokens: 8,
+            },
+            cost_microusd: 29,
+            candidate_hash: Some("e".repeat(64)),
             candidate_json: None,
-            compiler_report: None,
+            compiler_report: Some(planner_report),
             duration_micros: 17,
             created_at: first_at,
         },
@@ -272,6 +482,11 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
     else {
         panic!("first planner audit must apply");
     };
+    assert_eq!(planner_evidence.usage.input_tokens_uncached, 21);
+    assert_eq!(planner_evidence.usage.input_tokens_cache_write, 3);
+    assert_eq!(planner_evidence.usage.input_tokens_cache_read, 5);
+    assert_eq!(planner_evidence.usage.output_tokens, 8);
+    assert_eq!(planner_evidence.cost_microusd, 29);
     let mut planner_retry = planner.clone();
     let ExecutionPlanningAuditPayload::PlannerCall {
         duration_micros,

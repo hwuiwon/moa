@@ -49,7 +49,7 @@ use crate::adapters::local::LocalHandProvider;
 
 pub use dispatch::{
     AuthorizedToolCall, DeferredWorkspaceToolOutput, ExecutionHandReleaseRequest,
-    ExecutionHandRetentionRequest, JournaledWorkspaceCommit, PendingConnectorToolOutput,
+    JournaledWorkspaceCommit, PendingConnectorToolOutput,
 };
 use leases::{HAND_LEASE_SESSION_PAGE_SIZE, HandLeaseStore};
 pub use maintenance_provider_inventory::SandboxProviderInventory;
@@ -79,7 +79,7 @@ use sandbox_workspace::repository::PostgresWorkspaceRepository;
 pub use telemetry::truncate_tool_span_text;
 
 const DEFAULT_PROVIDER_NAME: &str = "local";
-const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_TOOL_TIMEOUT: Duration = crate::tools::bash::DEFAULT_BASH_TIMEOUT;
 
 /// Everything one tool dispatch needs to know about the scope that asked for it.
 ///

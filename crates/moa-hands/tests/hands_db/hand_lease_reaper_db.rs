@@ -343,6 +343,10 @@ async fn cleanup_session_fixture(
     workspace_id: SandboxWorkspaceId,
     provider_account_id: ProviderAccountId,
 ) {
+    let _ = sqlx::query("DELETE FROM moa.sandbox_capacity_reservations WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(pool)
+        .await;
     let _ = sqlx::query("DELETE FROM moa.hand_leases WHERE session_id = $1")
         .bind(session_id)
         .execute(pool)
@@ -430,6 +434,29 @@ async fn seed_expired_active_lease(
         .await
         .expect("claim provisioning")
         .expect("claim is owned");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.sandbox_capacity_reservations (
+            reservation_id, tenant_id, provider_account_id,
+            provider_account_generation, workspace_id, operation_id,
+            expected_writer_epoch, expected_instance_generation,
+            resource_dimension, quantity, hand_provisioning_operation_id,
+            hand_lease_generation, reservation_state
+        ) VALUES (
+            $1, $2, $3, 1, $4, NULL, 1, 1,
+            'active_hands', 1, $5, $6, 'committed'
+        )
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(tenant_id)
+    .bind(provider_account_id)
+    .bind(attachment.workspace_id)
+    .bind(claim.provisioning_operation_id)
+    .bind(claim.generation)
+    .execute(pool)
+    .await
+    .expect("seed exact active-hand capacity owner");
     store
         .activate(HandLeaseActivateRequest {
             tenant_id,
@@ -582,6 +609,110 @@ async fn competing_replicas_claim_disjoint_generations_without_new_traffic_db() 
 
     for (session_id, (workspace_id, provider_account_id)) in sessions.into_iter().zip(fixtures) {
         cleanup_session_fixture(&pool, session_id, workspace_id, provider_account_id).await;
+    }
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires the local compose Postgres via MOA_DATABASE_URL"]
+async fn abandoned_pre_capacity_claim_finalizes_only_without_a_mismatched_reservation_db() {
+    // Pins: a crash after the durable provisioning claim but before active-hand
+    // capacity reservation is recoverable after provider absence. The same
+    // recovery must fail closed when that operation identity has a reservation
+    // carrying different workspace fences.
+    let pool = pool().await;
+    let claims = PostgresExpiredHandLeaseClaims::new(pool.clone());
+
+    for mismatched_reservation in [false, true] {
+        let tenant_id = TenantId::new();
+        let session_id = SessionId::new();
+        seed_session(&pool, session_id, tenant_id).await;
+        let (attachment, provider_account_id) = seed_workspace(&pool, tenant_id, session_id).await;
+        sqlx::query(
+            "UPDATE moa.sandbox_workspaces SET lifecycle_state = 'restoring' \
+             WHERE tenant_id = $1 AND workspace_id = $2",
+        )
+        .bind(tenant_id)
+        .bind(attachment.workspace_id)
+        .execute(&pool)
+        .await
+        .expect("seed workspace between writer claim and provider creation");
+        let store = PostgresHandLeaseStore::new(pool.clone());
+        let policy = lease_policy(seconds(60), seconds(120));
+        let provisioning = store
+            .claim_for_provisioning(HandLeaseProvisionRequest {
+                session_id,
+                worker_id: "worker",
+                tenant_id,
+                provider: "local",
+                tier: SandboxTier::Local,
+                attachment: attachment.clone(),
+                policy: &policy,
+                caller_deadline: Some(chrono::Utc::now() - chrono::Duration::minutes(2)),
+            })
+            .await
+            .expect("persist provisioning claim")
+            .expect("claim is owned");
+        if mismatched_reservation {
+            sqlx::query(
+                r#"
+                INSERT INTO moa.sandbox_capacity_reservations (
+                    reservation_id, tenant_id, provider_account_id,
+                    provider_account_generation, workspace_id, operation_id,
+                    expected_writer_epoch, expected_instance_generation,
+                    resource_dimension, quantity, hand_provisioning_operation_id,
+                    hand_lease_generation, reservation_state
+                ) VALUES (
+                    $1, $2, $3, 1, $4, NULL, $5, $6,
+                    'active_hands', 1, $7, $8, 'pending'
+                )
+                "#,
+            )
+            .bind(Uuid::now_v7())
+            .bind(tenant_id)
+            .bind(provider_account_id)
+            .bind(attachment.workspace_id)
+            .bind(attachment.workspace_writer_epoch)
+            .bind(attachment.workspace_instance_generation + 1)
+            .bind(provisioning.provisioning_operation_id)
+            .bind(provisioning.generation)
+            .execute(&pool)
+            .await
+            .expect("seed same operation with mismatched instance fence");
+        }
+        let claimed = claims
+            .claim_expired(64, Duration::from_secs(300))
+            .await
+            .expect("claim abandoned provisioning generations")
+            .into_iter()
+            .find(|claim| claim.session_id == session_id)
+            .expect("this abandoned generation is claimable");
+        assert!(claimed.handle.is_none());
+
+        let finalized = claims
+            .finalize_destroyed(&claimed)
+            .await
+            .expect("finalization remains generation fenced");
+        assert_eq!(
+            finalized, !mismatched_reservation,
+            "absence of a reservation is recoverable, but a mismatched reservation is not"
+        );
+        assert_eq!(
+            lease_status(&pool, session_id).await,
+            if mismatched_reservation {
+                "reaping"
+            } else {
+                "destroyed"
+            }
+        );
+
+        cleanup_session_fixture(
+            &pool,
+            session_id,
+            attachment.workspace_id,
+            provider_account_id,
+        )
+        .await;
     }
     pool.close().await;
 }

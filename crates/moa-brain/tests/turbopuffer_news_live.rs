@@ -1,4 +1,4 @@
-// Live counterpart: see turbopuffer_news_offline.rs for the wiremock version that runs in PR CI.
+// Live counterpart: see brain_offline/turbopuffer_news_offline.rs in the brain_offline harness for the wiremock PR-CI coverage.
 
 //! Live end-to-end Turbopuffer promotion and retrieval test.
 

@@ -65,6 +65,7 @@ async fn seed_create_operation(
 ) -> SeededOperation {
     let workspace_id = SandboxWorkspaceId::new();
     let operation_id = WorkspaceOperationId::new();
+    let operations = PostgresWorkspaceOperationRepository::new(pool.clone());
     PostgresWorkspaceRepository::new(pool.clone())
         .create(&CreateWorkspaceRequest {
             workspace_id,
@@ -82,7 +83,7 @@ async fn seed_create_operation(
         .await
         .expect("persist logical workspace before provider storage I/O");
     let now = Utc::now();
-    PostgresWorkspaceOperationRepository::new(pool.clone())
+    operations
         .persist_intent(&WorkspaceOperationIntent {
             operation_id,
             tenant_id,
@@ -99,6 +100,12 @@ async fn seed_create_operation(
         })
         .await
         .expect("persist exact create operation before provider storage I/O");
+    assert!(
+        operations
+            .begin_provider_attempt(tenant_id, operation_id)
+            .await
+            .expect("fence the exact create provider attempt")
+    );
     SeededOperation {
         tenant_id,
         account_id,

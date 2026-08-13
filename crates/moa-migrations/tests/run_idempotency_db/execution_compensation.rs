@@ -58,10 +58,7 @@ async fn execution_compensation_schema_and_transitions_are_strict_db() {
         .await?;
         let version_neutral_shapes: (bool, bool, bool) = sqlx::query_as(
             "SELECT moa.execution_plan_definition_is_valid(initial_plan -> 'definition'), \
-                    moa.execution_plan_definition_is_valid( \
-                        (initial_plan -> 'definition') \
-                            || '{\"schema_version\":2}'::JSONB \
-                    ), \
+                    moa.execution_plan_definition_is_current(initial_plan -> 'definition'), \
                     NOT capability_catalog ? 'schema_version' \
              FROM moa.execution_run WHERE run_uid = $1",
         )
@@ -125,7 +122,7 @@ async fn execution_compensation_schema_and_transitions_are_strict_db() {
     );
     assert!(compensation_schema);
     assert!(action_review_owner_schema);
-    assert_eq!(version_neutral_shapes, (true, false, true));
+    assert_eq!(version_neutral_shapes, (false, true, true));
     assert_eq!(compensation_reason.as_deref(), Some("compensation_failed"));
 }
 

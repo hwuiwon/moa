@@ -14,7 +14,16 @@ async fn unbound_external_start_recovers_provider_job_without_replaying_attempt_
     let fixture = external_job_execution_fixture(vec![
         (
             "MOA_EXECUTION_ACTIVE_ATTEMPT_TIMEOUT_SECONDS".to_string(),
-            "5".to_string(),
+            "15".to_string(),
+        ),
+        // Two constraints bracket this value. It must stay strictly below the attempt
+        // timeout or the orchestrator refuses to boot, and it must outlast the provider
+        // start this scenario performs: the start declares no bound of its own, so the
+        // floor is its whole window, and a floor under it kills the attempt before the
+        // start commits and leaves no provider job to recover.
+        (
+            "MOA_EXECUTION_ATTEMPT_HEARTBEAT_STALENESS_SECONDS".to_string(),
+            "10".to_string(),
         ),
         (
             "MOA_EXECUTION_TRIGGER_RECONCILIATION_CADENCE_SECONDS".to_string(),
@@ -272,7 +281,14 @@ async fn running_ambiguous_attempt_is_not_redriven_after_total_restate_loss_serv
         vec![
             (
                 "MOA_EXECUTION_ACTIVE_ATTEMPT_TIMEOUT_SECONDS".to_string(),
-                "5".to_string(),
+                "15".to_string(),
+            ),
+            // Staleness must stay strictly below the attempt timeout, so a scenario that
+            // shortens the timeout has to shorten this with it or the orchestrator refuses
+            // to boot.
+            (
+                "MOA_EXECUTION_ATTEMPT_HEARTBEAT_STALENESS_SECONDS".to_string(),
+                "10".to_string(),
             ),
             (
                 "MOA_EXECUTION_TRIGGER_RECONCILIATION_CADENCE_SECONDS".to_string(),

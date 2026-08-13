@@ -673,7 +673,7 @@ async fn commit_completion_page(
     };
     let acknowledged = sqlx::query(
         "UPDATE moa.execution_run SET processed_wake_epoch=$3, \
-             activation_state='idle',updated_at=NOW() \
+             activation_state='idle',activation_failure_count=0,updated_at=NOW() \
          WHERE run_uid=$1 AND controller_generation=$2 AND wake_epoch=$3 \
            AND processed_wake_epoch<$3 AND activation_state='advancing' \
          RETURNING tenant_id",

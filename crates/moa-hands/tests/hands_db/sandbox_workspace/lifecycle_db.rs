@@ -1,46 +1,27 @@
 //! Durable workspace lifecycle, fencing, and reconciliation against Postgres.
 
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{path::PathBuf, time::Duration};
 
-use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
-use moa_core::error::{MoaError, Result as MoaResult};
-use moa_core::traits::{HandProvider, SandboxStorageProvider};
+use moa_core::error::MoaError;
 use moa_core::types::{
-    action_policy::{ActionClass, ActionPolicyEffect, CallOrigin, RiskLevel},
+    action_policy::CallOrigin,
     hands::{
-        BuiltinPolicyRevision, CpuLimit, DeadlineEnforcement, DiskLimit, EgressMode, EgressPolicy,
-        HandHandle, HandProviderCapabilities, HandSpec, HandStatus, LifetimeLimit, MemoryLimit,
-        ResourceSupport, SandboxPolicySnapshot, SandboxProfile, SandboxTier,
-        SandboxTierCapabilities,
+        BuiltinPolicyRevision, CpuLimit, DiskLimit, EgressPolicy, HandHandle, LifetimeLimit,
+        MemoryLimit, SandboxPolicySnapshot, SandboxProfile, SandboxTier,
     },
     identifiers::{
         ExecutionCompensationScopeId, ExecutionRunScopeId, ExecutionTaskScopeId,
-        HandProvisioningOperationId, ModelId, ProviderAccountId, SandboxWorkspaceId, SessionId,
-        TenantId, WorkspaceCheckpointId, WorkspaceOperationId,
+        HandProvisioningOperationId, ProviderAccountId, SandboxWorkspaceId, SessionId, TenantId,
+        WorkspaceCheckpointId, WorkspaceOperationId,
     },
-    resource::ResourceBudget,
     sandbox_workspace::{
-        DurabilityClass, ExecutionHandContinuationDisposition, ExecutionHandReleaseOwner,
-        ExecutionHandReleaseReceipt, ProviderAccountStorageInventory, ProviderStorageKind,
-        ProviderStorageRef, SandboxWorkspaceScope, SandboxWorkspaceState,
-        TenantStoragePurgeRequest, WorkspaceAttachRequest, WorkspaceBinding,
-        WorkspaceCheckpointPublication, WorkspaceCheckpointPublishRequest,
-        WorkspaceConfirmedDisposition, WorkspaceOperationKind, WorkspaceOperationOutcome,
-        WorkspacePostCommitState, WorkspaceReconcileRequest, WorkspaceRestoreRequest,
-        WorkspaceRevisionRef, WorkspaceStorageDeleteRequest, WorkspaceStorageOperation,
-        WorkspaceStorageOperationResult, WorkspaceStoragePrepareRequest,
+        DurabilityClass, ExecutionHandReleaseOwner, ExecutionHandReleaseReceipt,
+        ProviderStorageKind, ProviderStorageRef, SandboxWorkspaceScope, SandboxWorkspaceState,
+        WorkspaceBinding, WorkspaceCheckpointPublication, WorkspaceConfirmedDisposition,
+        WorkspaceOperationKind, WorkspaceOperationOutcome, WorkspacePostCommitState,
+        WorkspaceRevisionRef, WorkspaceStorageOperation,
     },
-    session::SessionMeta,
-    tools::{IdempotencyClass, ToolDiffStrategy, ToolInputShape, ToolOutput, ToolPolicySpec},
 };
 use moa_hands::core::{
     leases::{
@@ -61,11 +42,7 @@ use moa_hands::core::{
         repository::PostgresWorkspaceRepository,
     },
 };
-use moa_hands::{
-    ExecutionHandReleaseRequest, ExecutionHandRetentionRequest, HandRoute, ToolCallScope,
-    ToolRegistry, ToolRouter, local_development_sandbox_policy,
-};
-use sqlx::{Row, postgres::PgPoolOptions};
+use sqlx::postgres::PgPoolOptions;
 
 use super::{database_url, seed_session};
 
@@ -381,872 +358,6 @@ fn create_request(
         durability_class: DurabilityClass::PortableFilesystem,
         retention_deadline_at: None,
     }
-}
-
-const CONTINUATION_PROVIDER: &str = "continuation-retention";
-
-/// Provider double that honours `release_compute` and counts real teardown.
-///
-/// It mirrors the shipped adapters on the three behaviours these scenarios depend
-/// on: the checkpoint capacity charge is reserved before publication, compute is
-/// destroyed inside publication only when the caller asked for a release, and
-/// suspension is a declared capability rather than something inferred from a call.
-struct ContinuationProvider {
-    capacity: PostgresWorkspaceCapacityRepository,
-    destroy_calls: AtomicUsize,
-    reconcile_calls: AtomicUsize,
-    suspend_calls: AtomicUsize,
-    resume_calls: AtomicUsize,
-    /// Mirrors Daytona (`true`) or local/E2B (`false`) compute-release ability.
-    suspends: bool,
-    /// Makes a declared suspension fail the way an unreachable provider would.
-    suspend_fails: bool,
-    /// Reports a suspended sandbox as stopped so reattach exercises resume.
-    suspended: AtomicBool,
-}
-
-const CONTINUATION_CHECKPOINT_BYTES: u64 = 11;
-
-impl ContinuationProvider {
-    fn new(pool: &sqlx::PgPool) -> Self {
-        Self::with_suspension(pool, false, false)
-    }
-
-    fn with_suspension(pool: &sqlx::PgPool, suspends: bool, suspend_fails: bool) -> Self {
-        Self {
-            capacity: PostgresWorkspaceCapacityRepository::new(pool.clone()),
-            destroy_calls: AtomicUsize::new(0),
-            reconcile_calls: AtomicUsize::new(0),
-            suspend_calls: AtomicUsize::new(0),
-            resume_calls: AtomicUsize::new(0),
-            suspends,
-            suspend_fails,
-            suspended: AtomicBool::new(false),
-        }
-    }
-
-    fn confirmed(storage: Option<ProviderStorageRef>) -> WorkspaceStorageOperationResult {
-        WorkspaceStorageOperationResult {
-            outcome: WorkspaceOperationOutcome::Confirmed,
-            confirmed_disposition: Some(WorkspaceConfirmedDisposition::ResourcePresent),
-            storage,
-            checkpoint_publication: None,
-            post_commit_state: None,
-        }
-    }
-
-    fn mutable_storage(binding: &WorkspaceBinding) -> ProviderStorageRef {
-        ProviderStorageRef {
-            provider_account_id: binding.provider_account_id,
-            provider_account_generation: binding.provider_account_generation,
-            kind: ProviderStorageKind::MutableFilesystem,
-            resource_id: format!("mutable/{}", binding.workspace_id),
-            workspace_locator: None,
-        }
-    }
-
-    fn published(
-        operation: &WorkspaceStorageOperation,
-        post_commit_state: WorkspacePostCommitState,
-    ) -> WorkspaceStorageOperationResult {
-        let generation = operation
-            .binding
-            .current_revision
-            .as_ref()
-            .map_or(1, |parent| parent.generation + 1);
-        let checkpoint_id = WorkspaceCheckpointId(operation.operation_id.0);
-        let storage = ProviderStorageRef {
-            provider_account_id: operation.binding.provider_account_id,
-            provider_account_generation: operation.binding.provider_account_generation,
-            kind: ProviderStorageKind::PortableCheckpoint,
-            resource_id: format!("checkpoint/{checkpoint_id}"),
-            workspace_locator: None,
-        };
-        WorkspaceStorageOperationResult {
-            outcome: WorkspaceOperationOutcome::Confirmed,
-            confirmed_disposition: Some(WorkspaceConfirmedDisposition::ResourcePresent),
-            storage: Some(storage.clone()),
-            checkpoint_publication: Some(WorkspaceCheckpointPublication {
-                revision: WorkspaceRevisionRef {
-                    checkpoint_id,
-                    generation,
-                    format_version: 1,
-                },
-                storage,
-                manifest_digest: format!("sha256:manifest-{checkpoint_id}"),
-                logical_bytes: CONTINUATION_CHECKPOINT_BYTES,
-            }),
-            post_commit_state: Some(post_commit_state),
-        }
-    }
-}
-
-#[async_trait]
-impl HandProvider for ContinuationProvider {
-    fn provider_name(&self) -> &str {
-        CONTINUATION_PROVIDER
-    }
-
-    fn capabilities(&self) -> HandProviderCapabilities {
-        HandProviderCapabilities {
-            revision: "continuation-retention-hands-v1".to_string(),
-            tiers: vec![SandboxTierCapabilities {
-                tier: SandboxTier::Container,
-                cpu: ResourceSupport::unbounded_only(),
-                memory: ResourceSupport::unbounded_only(),
-                ephemeral_disk: ResourceSupport::unbounded_only(),
-                egress_modes: vec![
-                    EgressMode::DenyAll,
-                    EgressMode::AllowList,
-                    EgressMode::Unrestricted,
-                ],
-                idle_enforcement: DeadlineEnforcement::DurableReaper,
-                max_lifetime_enforcement: DeadlineEnforcement::DurableReaper,
-            }],
-        }
-    }
-
-    async fn provision(&self, spec: HandSpec) -> MoaResult<HandHandle> {
-        Ok(HandHandle::docker(format!(
-            "continuation-retention-{}",
-            spec.provisioning_operation_id
-        )))
-    }
-
-    async fn provisioned_hands(
-        &self,
-        _provider_account_id: ProviderAccountId,
-        _provider_account_generation: u64,
-        _operation_id: HandProvisioningOperationId,
-    ) -> MoaResult<Vec<HandHandle>> {
-        Ok(Vec::new())
-    }
-
-    async fn execute(
-        &self,
-        _handle: &HandHandle,
-        _tool: &str,
-        _input: &str,
-    ) -> MoaResult<ToolOutput> {
-        Err(MoaError::Unsupported(
-            "tool execution is outside the continuation-retention scenario".to_string(),
-        ))
-    }
-
-    async fn status(&self, _handle: &HandHandle) -> MoaResult<HandStatus> {
-        Ok(if self.suspended.load(Ordering::SeqCst) {
-            HandStatus::Stopped
-        } else {
-            HandStatus::Running
-        })
-    }
-
-    fn supports_suspend(&self) -> bool {
-        self.suspends
-    }
-
-    async fn suspend(&self, _handle: &HandHandle) -> MoaResult<()> {
-        self.suspend_calls.fetch_add(1, Ordering::SeqCst);
-        if !self.suspends {
-            return Err(MoaError::Unsupported(
-                "this continuation provider cannot release compute".to_string(),
-            ));
-        }
-        if self.suspend_fails {
-            return Err(MoaError::ProviderError(
-                "continuation provider suspend is unreachable".to_string(),
-            ));
-        }
-        self.suspended.store(true, Ordering::SeqCst);
-        Ok(())
-    }
-
-    async fn resume(&self, _handle: &HandHandle) -> MoaResult<()> {
-        self.resume_calls.fetch_add(1, Ordering::SeqCst);
-        self.suspended.store(false, Ordering::SeqCst);
-        Ok(())
-    }
-
-    async fn destroy(&self, _handle: &HandHandle) -> MoaResult<()> {
-        self.destroy_calls.fetch_add(1, Ordering::SeqCst);
-        self.suspended.store(false, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl SandboxStorageProvider for ContinuationProvider {
-    fn storage_provider_name(&self) -> &str {
-        CONTINUATION_PROVIDER
-    }
-
-    async fn enumerate_account_storage(
-        &self,
-        provider_account_id: ProviderAccountId,
-        provider_account_generation: u64,
-    ) -> MoaResult<ProviderAccountStorageInventory> {
-        Ok(ProviderAccountStorageInventory {
-            provider_account_id,
-            provider_account_generation,
-            observed_at: Utc::now(),
-            resources: Vec::new(),
-        })
-    }
-
-    async fn prepare_workspace_storage(
-        &self,
-        request: WorkspaceStoragePrepareRequest,
-    ) -> MoaResult<WorkspaceStorageOperationResult> {
-        Ok(Self::confirmed(Some(Self::mutable_storage(
-            &request.operation.binding,
-        ))))
-    }
-
-    async fn attach_workspace(
-        &self,
-        request: WorkspaceAttachRequest,
-    ) -> MoaResult<WorkspaceStorageOperationResult> {
-        Ok(Self::confirmed(Some(Self::mutable_storage(
-            &request.operation.binding,
-        ))))
-    }
-
-    async fn publish_workspace_checkpoint(
-        &self,
-        request: WorkspaceCheckpointPublishRequest,
-    ) -> MoaResult<WorkspaceStorageOperationResult> {
-        self.capacity
-            .reserve_checkpoint_publication(&request.operation, CONTINUATION_CHECKPOINT_BYTES)
-            .await?;
-        let post_commit_state = if request.release_compute {
-            <Self as HandProvider>::destroy(self, &request.hand).await?;
-            WorkspacePostCommitState::ComputeDestroyed
-        } else {
-            WorkspacePostCommitState::AttachmentRetained
-        };
-        Ok(Self::published(&request.operation, post_commit_state))
-    }
-
-    async fn restore_workspace(
-        &self,
-        _request: WorkspaceRestoreRequest,
-    ) -> MoaResult<WorkspaceStorageOperationResult> {
-        Ok(Self::confirmed(None))
-    }
-
-    async fn delete_workspace_storage(
-        &self,
-        _request: WorkspaceStorageDeleteRequest,
-    ) -> MoaResult<WorkspaceStorageOperationResult> {
-        Err(MoaError::Unsupported(
-            "delete is outside the continuation-retention scenario".to_string(),
-        ))
-    }
-
-    async fn delete_tenant_storage_resource(
-        &self,
-        _request: TenantStoragePurgeRequest,
-    ) -> MoaResult<WorkspaceStorageOperationResult> {
-        Err(MoaError::Unsupported(
-            "tenant purge is outside the continuation-retention scenario".to_string(),
-        ))
-    }
-
-    async fn reconcile_workspace_operation(
-        &self,
-        request: WorkspaceReconcileRequest,
-    ) -> MoaResult<WorkspaceStorageOperationResult> {
-        self.reconcile_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Self::published(
-            request.operation(),
-            WorkspacePostCommitState::AttachmentRetained,
-        ))
-    }
-
-    async fn verify_workspace_storage(&self, _storage: &ProviderStorageRef) -> MoaResult<bool> {
-        Ok(true)
-    }
-}
-
-fn continuation_router(pool: &sqlx::PgPool, provider: Arc<ContinuationProvider>) -> ToolRouter {
-    let mut registry = ToolRegistry::new();
-    registry.register_hand(
-        "continuation_route_anchor",
-        "exposes the configured continuation provider route",
-        serde_json::json!({ "type": "object", "additionalProperties": false }),
-        ToolPolicySpec {
-            risk_level: RiskLevel::Low,
-            default_effect: ActionPolicyEffect::Allow,
-            action_class: ActionClass::Read,
-            input_shape: ToolInputShape::Json,
-            diff_strategy: ToolDiffStrategy::None,
-        },
-        IdempotencyClass::Idempotent,
-    );
-    registry.retarget_hand_tools(vec![HandRoute {
-        provider: CONTINUATION_PROVIDER.to_string(),
-        tier: SandboxTier::Container,
-        policy: SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::RouteUnset),
-    }]);
-    let mut hand_providers: HashMap<String, Arc<dyn HandProvider>> = HashMap::new();
-    hand_providers.insert(
-        CONTINUATION_PROVIDER.to_string(),
-        Arc::clone(&provider) as Arc<dyn HandProvider>,
-    );
-    ToolRouter::new(registry, hand_providers, local_development_sandbox_policy())
-        .with_sandbox_storage_provider(Arc::clone(&provider) as Arc<dyn SandboxStorageProvider>)
-        .expect("register continuation storage provider")
-        .with_workspace_repositories(pool.clone())
-        .with_hand_lease_store(Arc::new(PostgresHandLeaseStore::new(pool.clone())))
-}
-
-async fn committed_active_hand_reservations(
-    pool: &sqlx::PgPool,
-    tenant_id: TenantId,
-    workspace_id: SandboxWorkspaceId,
-) -> i64 {
-    sqlx::query(
-        "SELECT count(*)::BIGINT AS live FROM moa.sandbox_capacity_reservations \
-         WHERE tenant_id = $1 AND workspace_id = $2 \
-           AND resource_dimension = 'active_hands' \
-           AND reservation_state IN ('pending', 'committed')",
-    )
-    .bind(tenant_id)
-    .bind(workspace_id)
-    .fetch_one(pool)
-    .await
-    .expect("count live active-hand reservations")
-    .try_get::<i64, _>("live")
-    .expect("decode live active-hand reservations")
-}
-
-/// One attached execution-task sandbox ready for a continuation-boundary scenario.
-struct ContinuationFixture {
-    _test_db: moa_test_support::postgres::TestDb,
-    pool: sqlx::PgPool,
-    tenant_id: TenantId,
-    session_id: SessionId,
-    account_id: ProviderAccountId,
-    workspace_id: SandboxWorkspaceId,
-    workspace_scope: SandboxWorkspaceScope,
-    session: SessionMeta,
-    lease_scope: String,
-    provider: Arc<ContinuationProvider>,
-    router: ToolRouter,
-    workspaces: PostgresWorkspaceRepository,
-    leases: PostgresHandLeaseStore,
-}
-
-/// Attaches one execution-task workspace onto a provider with the given suspend ability.
-async fn continuation_fixture(suspends: bool, suspend_fails: bool) -> ContinuationFixture {
-    let test_db = moa_test_support::postgres::bootstrap_test_db()
-        .await
-        .expect("bootstrap isolated current-schema Postgres");
-    let pool = test_db.store().pool().clone();
-    let tenant_id = TenantId::new();
-    let session_id = SessionId::new();
-    let account_id = ProviderAccountId::new();
-    let workspace_id = SandboxWorkspaceId::new();
-    seed_session(&pool, session_id, tenant_id).await;
-    sqlx::query(
-        r#"
-        INSERT INTO moa.sandbox_provider_accounts (
-            provider_account_id, generation, provider, isolation_cell,
-            organization_fingerprint, configured_limits
-        ) VALUES ($1, 1, $2, $3, $4, '{}'::jsonb)
-        "#,
-    )
-    .bind(account_id)
-    .bind(CONTINUATION_PROVIDER)
-    .bind(format!("continuation-{account_id}"))
-    .bind(format!("continuation-org-{account_id}"))
-    .execute(&pool)
-    .await
-    .expect("seed continuation provider account");
-    let (run_id, _, _) = seed_cancelling_compensation(&pool, tenant_id, session_id).await;
-    let task_id = seed_cancelling_task(&pool, tenant_id, run_id, "continuation-suspend").await;
-    let workspace_scope = SandboxWorkspaceScope::ExecutionTask { run_id, task_id };
-    let workspaces = PostgresWorkspaceRepository::new(pool.clone());
-    workspaces
-        .create(&CreateWorkspaceRequest {
-            workspace_id,
-            tenant_id,
-            scope: workspace_scope.clone(),
-            provider: CONTINUATION_PROVIDER.to_string(),
-            provider_account_id: account_id,
-            provider_account_generation: 1,
-            durability_class: DurabilityClass::PortableFilesystem,
-            retention_deadline_at: None,
-        })
-        .await
-        .expect("create continuation task workspace");
-
-    let provider = Arc::new(ContinuationProvider::with_suspension(
-        &pool,
-        suspends,
-        suspend_fails,
-    ));
-    let router = continuation_router(&pool, Arc::clone(&provider));
-    let session = SessionMeta {
-        id: session_id,
-        tenant_id,
-        model: ModelId::new("continuation-suspend-model"),
-        ..SessionMeta::default()
-    };
-    router
-        .attach_managed_workspace(&session, &workspace_scope, workspace_id)
-        .await
-        .expect("attach must materialize provider compute and storage");
-    let leases = PostgresHandLeaseStore::new(pool.clone());
-    ContinuationFixture {
-        _test_db: test_db,
-        pool,
-        tenant_id,
-        session_id,
-        account_id,
-        workspace_id,
-        workspace_scope,
-        session,
-        lease_scope: format!("execution:{run_id}:{task_id}"),
-        provider,
-        router,
-        workspaces,
-        leases,
-    }
-}
-
-fn continuation_retention_request<'a>(
-    fixture: &'a ContinuationFixture,
-    retention_deadline_at: chrono::DateTime<Utc>,
-) -> ExecutionHandRetentionRequest<'a> {
-    let SandboxWorkspaceScope::ExecutionTask { run_id, task_id } = fixture.workspace_scope else {
-        panic!("continuation fixture always owns an execution-task workspace");
-    };
-    ExecutionHandRetentionRequest {
-        session: &fixture.session,
-        run_id,
-        task_id,
-        logical_generation: 1,
-        attempt_generation: 1,
-        retention_deadline_at,
-        scope: ToolCallScope::unbounded().with_budget(ResourceBudget::until(
-            Utc::now() + ChronoDuration::minutes(5),
-        )),
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres for an isolated current-schema test database"]
-async fn continuation_suspends_compute_and_returns_its_admission_slot_db() {
-    // Pins: on a provider that can genuinely release compute, a continuation boundary
-    // stops the sandbox inside the yield rather than leaving it hot for the reaper,
-    // keeps the lease and handle so the next slice reattaches, and hands the
-    // `ActiveHands` slot back so a runnable task can be admitted into it.
-    let fixture = continuation_fixture(true, false).await;
-    assert_eq!(
-        committed_active_hand_reservations(&fixture.pool, fixture.tenant_id, fixture.workspace_id)
-            .await,
-        1
-    );
-
-    let disposition = fixture
-        .router
-        .checkpoint_execution_hand_retaining_compute(continuation_retention_request(
-            &fixture,
-            Utc::now() + ChronoDuration::minutes(2),
-        ))
-        .await
-        .expect("a continuation boundary must publish its checkpoint");
-
-    assert_eq!(
-        disposition,
-        ExecutionHandContinuationDisposition::Suspended,
-        "a suspend-capable provider must take the suspend path"
-    );
-    assert_eq!(fixture.provider.suspend_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        fixture.provider.destroy_calls.load(Ordering::SeqCst),
-        0,
-        "suspension must not destroy the sandbox the next slice will reattach to"
-    );
-    let retained = fixture
-        .workspaces
-        .get(fixture.tenant_id, fixture.workspace_id)
-        .await
-        .expect("load suspended workspace")
-        .expect("suspended workspace exists");
-    assert_eq!(
-        retained.checkpoint_generation, 1,
-        "suspension must still advance the portable recovery head"
-    );
-    let lease = fixture
-        .leases
-        .get(
-            fixture.tenant_id,
-            fixture.session_id,
-            &fixture.lease_scope,
-            CONTINUATION_PROVIDER,
-        )
-        .await
-        .expect("load suspended continuation lease")
-        .expect("suspended continuation lease exists");
-    assert_eq!(
-        lease.status,
-        HandLeaseStatus::Active,
-        "the lease must survive so the next slice can reattach the same filesystem"
-    );
-    assert!(lease.handle.is_some());
-    assert_eq!(
-        committed_active_hand_reservations(&fixture.pool, fixture.tenant_id, fixture.workspace_id)
-            .await,
-        0,
-        "a suspended hand must not keep holding fleet admission capacity"
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres for an isolated current-schema test database"]
-async fn suspended_continuation_hand_reattaches_by_rewinning_capacity_db() {
-    // Pins: reattaching a suspended sandbox is a fresh admission decision — the charge
-    // released at the boundary is re-won and the provider is actually resumed, rather
-    // than the hand being handed back warm while the fleet gauge under-counts it.
-    let fixture = continuation_fixture(true, false).await;
-    fixture
-        .router
-        .checkpoint_execution_hand_retaining_compute(continuation_retention_request(
-            &fixture,
-            Utc::now() + ChronoDuration::minutes(2),
-        ))
-        .await
-        .expect("suspend the continuation sandbox");
-    assert_eq!(
-        committed_active_hand_reservations(&fixture.pool, fixture.tenant_id, fixture.workspace_id)
-            .await,
-        0
-    );
-
-    fixture
-        .router
-        .attach_managed_workspace(
-            &fixture.session,
-            &fixture.workspace_scope,
-            fixture.workspace_id,
-        )
-        .await
-        .expect("the next slice must reattach the suspended sandbox");
-
-    assert_eq!(
-        fixture.provider.resume_calls.load(Ordering::SeqCst),
-        1,
-        "a stopped sandbox must be resumed, not dispatched into while stopped"
-    );
-    assert_eq!(
-        fixture.provider.destroy_calls.load(Ordering::SeqCst),
-        0,
-        "an admitted reattach must reuse the warm sandbox"
-    );
-    assert_eq!(
-        committed_active_hand_reservations(&fixture.pool, fixture.tenant_id, fixture.workspace_id)
-            .await,
-        1,
-        "resuming compute must charge the fleet for it again"
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres for an isolated current-schema test database"]
-async fn saturated_reattach_drops_the_suspended_hand_instead_of_resuming_db() {
-    // Pins: a suspended sandbox has no reserved claim on its old slot. When the fleet
-    // filled up while it was stopped, reattach refuses to resume it — which is safe
-    // only because the boundary published its checkpoint before suspending, making the
-    // eviction a cache miss rather than lost work.
-    let fixture = continuation_fixture(true, false).await;
-    fixture
-        .router
-        .checkpoint_execution_hand_retaining_compute(continuation_retention_request(
-            &fixture,
-            Utc::now() + ChronoDuration::minutes(2),
-        ))
-        .await
-        .expect("suspend the continuation sandbox");
-
-    // Every active-hands slot in the provider account is now spoken for.
-    sqlx::query(
-        "UPDATE moa.sandbox_provider_accounts \
-         SET configured_limits = '{\"active_hands\": 0}'::jsonb \
-         WHERE provider_account_id = $1 AND generation = 1",
-    )
-    .bind(fixture.account_id)
-    .execute(&fixture.pool)
-    .await
-    .expect("saturate the provider account");
-
-    let error = fixture
-        .router
-        .attach_managed_workspace(
-            &fixture.session,
-            &fixture.workspace_scope,
-            fixture.workspace_id,
-        )
-        .await
-        .expect_err("a saturated fleet must not hand back the warm slot for free");
-
-    assert!(
-        error.to_string().contains("capacity"),
-        "reattach must fail on admission, not on some unrelated fault: {error}"
-    );
-    assert_eq!(
-        fixture.provider.resume_calls.load(Ordering::SeqCst),
-        0,
-        "compute must never restart before its admission slot is re-won"
-    );
-    assert_eq!(
-        committed_active_hand_reservations(&fixture.pool, fixture.tenant_id, fixture.workspace_id)
-            .await,
-        0,
-        "a refused reattach must leave the fleet charge released"
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres for an isolated current-schema test database"]
-async fn failed_suspension_falls_back_to_release_instead_of_staying_hot_db() {
-    // Pins: a declared-but-failing suspension never leaves a hand hot on a bet that
-    // already lost. It reports the fallback so the caller finishes the ordinary
-    // checkpoint-and-destroy path, which returns the capacity.
-    let fixture = continuation_fixture(true, true).await;
-
-    let disposition = fixture
-        .router
-        .checkpoint_execution_hand_retaining_compute(continuation_retention_request(
-            &fixture,
-            Utc::now() + ChronoDuration::minutes(2),
-        ))
-        .await
-        .expect("a failed suspension is non-fatal; the checkpoint still publishes");
-
-    assert_eq!(
-        disposition,
-        ExecutionHandContinuationDisposition::SuspendFailed
-    );
-    assert_eq!(fixture.provider.suspend_calls.load(Ordering::SeqCst), 1);
-
-    let SandboxWorkspaceScope::ExecutionTask { run_id, task_id } = fixture.workspace_scope else {
-        panic!("continuation fixture always owns an execution-task workspace");
-    };
-    fixture
-        .router
-        .checkpoint_and_release_execution_hand(ExecutionHandReleaseRequest {
-            session: &fixture.session,
-            run_id,
-            owner: ExecutionHandReleaseOwner::Task {
-                task_id,
-                logical_generation: 1,
-            },
-            attempt_generation: 1,
-            scope: ToolCallScope::unbounded().with_budget(ResourceBudget::until(
-                Utc::now() + ChronoDuration::minutes(5),
-            )),
-        })
-        .await
-        .expect("the fallback release must complete");
-
-    assert_eq!(fixture.provider.destroy_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        committed_active_hand_reservations(&fixture.pool, fixture.tenant_id, fixture.workspace_id)
-            .await,
-        0,
-        "the fallback release must return the active-hands slot"
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres for an isolated current-schema test database"]
-async fn continuation_retains_the_hand_while_a_park_releases_it_db() {
-    // Pins: on a provider that cannot release compute, a plain model/tool boundary
-    // publishes its checkpoint and keeps the exact sandbox, its lease, and its admitted
-    // `ActiveHands` slot — bounded by a shortened idle deadline the reaper owns — while
-    // the very next genuine park on the same sandbox destroys compute and gives the
-    // capacity back.
-    let test_db = moa_test_support::postgres::bootstrap_test_db()
-        .await
-        .expect("bootstrap isolated current-schema Postgres");
-    let pool = test_db.store().pool().clone();
-    let tenant_id = TenantId::new();
-    let session_id = SessionId::new();
-    let account_id = ProviderAccountId::new();
-    let workspace_id = SandboxWorkspaceId::new();
-    seed_session(&pool, session_id, tenant_id).await;
-    sqlx::query(
-        r#"
-        INSERT INTO moa.sandbox_provider_accounts (
-            provider_account_id, generation, provider, isolation_cell,
-            organization_fingerprint, configured_limits
-        ) VALUES ($1, 1, $2, $3, $4, '{}'::jsonb)
-        "#,
-    )
-    .bind(account_id)
-    .bind(CONTINUATION_PROVIDER)
-    .bind(format!("continuation-{account_id}"))
-    .bind(format!("continuation-org-{account_id}"))
-    .execute(&pool)
-    .await
-    .expect("seed continuation provider account");
-    let (run_id, _, _) = seed_cancelling_compensation(&pool, tenant_id, session_id).await;
-    let task_id = seed_cancelling_task(&pool, tenant_id, run_id, "continuation-retention").await;
-    let workspace_scope = SandboxWorkspaceScope::ExecutionTask { run_id, task_id };
-    let workspaces = PostgresWorkspaceRepository::new(pool.clone());
-    workspaces
-        .create(&CreateWorkspaceRequest {
-            workspace_id,
-            tenant_id,
-            scope: workspace_scope.clone(),
-            provider: CONTINUATION_PROVIDER.to_string(),
-            provider_account_id: account_id,
-            provider_account_generation: 1,
-            durability_class: DurabilityClass::PortableFilesystem,
-            retention_deadline_at: None,
-        })
-        .await
-        .expect("create continuation task workspace");
-
-    let provider = Arc::new(ContinuationProvider::new(&pool));
-    let router = continuation_router(&pool, Arc::clone(&provider));
-    let session = SessionMeta {
-        id: session_id,
-        tenant_id,
-        model: ModelId::new("continuation-retention-model"),
-        ..SessionMeta::default()
-    };
-    router
-        .attach_managed_workspace(&session, &workspace_scope, workspace_id)
-        .await
-        .expect("attach must materialize provider compute and storage");
-    let leases = PostgresHandLeaseStore::new(pool.clone());
-    let lease_scope = format!("execution:{run_id}:{task_id}");
-    let provisioned = leases
-        .get(tenant_id, session_id, &lease_scope, CONTINUATION_PROVIDER)
-        .await
-        .expect("load provisioned continuation lease")
-        .expect("continuation lease exists");
-    assert_eq!(provisioned.status, HandLeaseStatus::Active);
-    assert_eq!(
-        committed_active_hand_reservations(&pool, tenant_id, workspace_id).await,
-        1
-    );
-
-    let retention_deadline_at = Utc::now() + ChronoDuration::minutes(2);
-    let disposition = router
-        .checkpoint_execution_hand_retaining_compute(ExecutionHandRetentionRequest {
-            session: &session,
-            run_id,
-            task_id,
-            logical_generation: 1,
-            attempt_generation: 1,
-            retention_deadline_at,
-            scope: ToolCallScope::unbounded().with_budget(ResourceBudget::until(
-                Utc::now() + ChronoDuration::minutes(5),
-            )),
-        })
-        .await
-        .expect("a continuation boundary must publish its checkpoint");
-
-    assert_eq!(
-        disposition,
-        ExecutionHandContinuationDisposition::RetainedHot,
-        "a provider that cannot release compute must fall back to bounded hot retention"
-    );
-    assert_eq!(
-        provider.suspend_calls.load(Ordering::SeqCst),
-        0,
-        "a provider that declares no suspension must never be asked to suspend"
-    );
-    assert_eq!(
-        provider.destroy_calls.load(Ordering::SeqCst),
-        0,
-        "a continuation boundary must not destroy the sandbox it is about to resume in"
-    );
-    let retained_workspace = workspaces
-        .get(tenant_id, workspace_id)
-        .await
-        .expect("load retained workspace")
-        .expect("retained workspace exists");
-    assert_eq!(retained_workspace.state, SandboxWorkspaceState::Active);
-    assert_eq!(
-        retained_workspace.checkpoint_generation, 1,
-        "retention must still advance the portable recovery head"
-    );
-    let retained_lease = leases
-        .get(tenant_id, session_id, &lease_scope, CONTINUATION_PROVIDER)
-        .await
-        .expect("load retained continuation lease")
-        .expect("retained continuation lease exists");
-    assert_eq!(retained_lease.status, HandLeaseStatus::Active);
-    assert!(retained_lease.handle.is_some());
-    assert_eq!(retained_lease.generation, provisioned.generation);
-    let bounded_idle = retained_lease
-        .idle_expires_at
-        .expect("a retained hand must carry a reaper-owned retention deadline");
-    assert!(
-        bounded_idle <= retention_deadline_at,
-        "retention must bound the retained hand at or before its requested deadline"
-    );
-    assert!(
-        bounded_idle > Utc::now(),
-        "retention must leave the next slice a window to reattach"
-    );
-    assert_eq!(
-        committed_active_hand_reservations(&pool, tenant_id, workspace_id).await,
-        1,
-        "a retained hand keeps its admitted active-hands slot"
-    );
-
-    // The park path now runs against the exact sandbox the continuation kept alive.
-    let receipt = router
-        .checkpoint_and_release_execution_hand(ExecutionHandReleaseRequest {
-            session: &session,
-            run_id,
-            owner: ExecutionHandReleaseOwner::Task {
-                task_id,
-                logical_generation: 1,
-            },
-            attempt_generation: 1,
-            scope: ToolCallScope::unbounded().with_budget(ResourceBudget::until(
-                Utc::now() + ChronoDuration::minutes(5),
-            )),
-        })
-        .await
-        .expect("a genuine park must release the retained sandbox");
-
-    assert_eq!(
-        provider.destroy_calls.load(Ordering::SeqCst),
-        1,
-        "a park must destroy exactly the hand the continuation retained"
-    );
-    assert_eq!(
-        receipt.checkpoint_generation,
-        Some(2),
-        "the park publishes the next head on top of the retained continuation checkpoint"
-    );
-    let released_workspace = workspaces
-        .get(tenant_id, workspace_id)
-        .await
-        .expect("load released workspace")
-        .expect("released workspace exists");
-    assert_eq!(released_workspace.state, SandboxWorkspaceState::Ready);
-    let released_lease = leases
-        .get(tenant_id, session_id, &lease_scope, CONTINUATION_PROVIDER)
-        .await
-        .expect("load released continuation lease")
-        .expect("released continuation lease exists");
-    assert_eq!(released_lease.status, HandLeaseStatus::Destroyed);
-    assert!(released_lease.handle.is_none());
-    assert_eq!(
-        committed_active_hand_reservations(&pool, tenant_id, workspace_id).await,
-        0,
-        "a park must return the active-hands slot to the fleet"
-    );
-    assert_eq!(provider.reconcile_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -1979,6 +1090,145 @@ async fn workspace_writer_and_reconciliation_callbacks_are_generation_fenced_db(
         .execute(&pool)
         .await
         .expect("clean session");
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh V60 compose Postgres via MOA_DATABASE_URL"]
+async fn create_operation_replay_never_resends_and_reconciliation_settles_lifecycle_db() {
+    // Pins: create provider I/O is authorized by one exact not-sent CAS. A crash
+    // after that CAS leaves the workspace reconciling, replay cannot win the CAS
+    // again, and only claimed provider evidence returns it to ready or failed.
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url())
+        .await
+        .expect("test Postgres should be reachable");
+    let tenant_id = TenantId::new();
+    let account_id = ProviderAccountId::new();
+    let workspace_id = SandboxWorkspaceId::new();
+    seed_account(&pool, account_id).await;
+    let workspaces = PostgresWorkspaceRepository::new(pool.clone());
+    workspaces
+        .create(&create_request(tenant_id, workspace_id, account_id))
+        .await
+        .expect("create workspace metadata and lifetime capacity");
+    let operations = PostgresWorkspaceOperationRepository::new(pool.clone());
+    let operation_id = WorkspaceOperationId::new();
+    let now = Utc::now();
+    let intent = WorkspaceOperationIntent {
+        operation_id,
+        tenant_id,
+        workspace_id,
+        provider_account_id: account_id,
+        provider_account_generation: 1,
+        kind: WorkspaceOperationKind::Create,
+        request_hash: format!("sha256:create-replay-{operation_id}"),
+        expected_writer_epoch: 0,
+        expected_instance_generation: 0,
+        expected_checkpoint_generation: 0,
+        deadline_at: now - ChronoDuration::seconds(2),
+        reconcile_not_before: now - ChronoDuration::seconds(1),
+    };
+    let persisted = operations
+        .persist_intent(&intent)
+        .await
+        .expect("persist create intent before provider I/O");
+    assert_eq!(persisted.outcome, WorkspaceOperationOutcome::NotSent);
+    assert!(
+        !operations
+            .confirm_disposition(
+                tenant_id,
+                operation_id,
+                WorkspaceConfirmedDisposition::ResourcePresent,
+            )
+            .await
+            .expect("not-sent intent cannot accept a provider disposition")
+    );
+    assert!(
+        operations
+            .begin_provider_attempt(tenant_id, operation_id)
+            .await
+            .expect("first exact provider-attempt CAS succeeds")
+    );
+    assert!(
+        !operations
+            .begin_provider_attempt(tenant_id, operation_id)
+            .await
+            .expect("crash replay cannot resend the provider request")
+    );
+    let reconciling = workspaces
+        .get(tenant_id, workspace_id)
+        .await
+        .expect("load workspace after provider-attempt CAS")
+        .expect("workspace exists");
+    assert_eq!(reconciling.state, SandboxWorkspaceState::Reconciling);
+
+    let claimed = operations
+        .claim_reconciliation(1, Duration::from_secs(30))
+        .await
+        .expect("claim ambiguous create")
+        .into_iter()
+        .find(|claim| claim.operation.operation_id == operation_id)
+        .expect("this create is claimable");
+    assert!(
+        operations
+            .confirm_present_claimed(&claimed)
+            .await
+            .expect("exact live claim confirms provider presence")
+    );
+    let recovered = workspaces
+        .get(tenant_id, workspace_id)
+        .await
+        .expect("load reconciled workspace")
+        .expect("workspace exists");
+    assert_eq!(recovered.state, SandboxWorkspaceState::Ready);
+    let confirmed = operations
+        .persist_intent(&intent)
+        .await
+        .expect("identical replay loads the durable operation");
+    assert_eq!(confirmed.outcome, WorkspaceOperationOutcome::Confirmed);
+    assert_eq!(
+        confirmed.confirmed_disposition,
+        Some(WorkspaceConfirmedDisposition::ResourcePresent)
+    );
+    assert!(
+        !operations
+            .confirm_disposition(
+                tenant_id,
+                operation_id,
+                WorkspaceConfirmedDisposition::ResourcePresent,
+            )
+            .await
+            .expect("confirmed replay cannot re-enter synchronous settlement")
+    );
+    assert!(
+        !operations
+            .begin_provider_attempt(tenant_id, operation_id)
+            .await
+            .expect("confirmed replay cannot authorize provider I/O")
+    );
+
+    sqlx::query("DELETE FROM moa.sandbox_capacity_reservations WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(&pool)
+        .await
+        .expect("clean capacity");
+    sqlx::query("DELETE FROM moa.sandbox_workspace_operations WHERE operation_id = $1")
+        .bind(operation_id)
+        .execute(&pool)
+        .await
+        .expect("clean operation");
+    sqlx::query("DELETE FROM moa.sandbox_workspaces WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(&pool)
+        .await
+        .expect("clean workspace");
+    sqlx::query("DELETE FROM moa.sandbox_provider_accounts WHERE provider_account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("clean provider account");
     pool.close().await;
 }
 

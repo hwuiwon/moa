@@ -173,10 +173,6 @@ fn wait_expiry_actions_round_trip_with_canonical_tagged_shapes() {
             json!({ "kind": "fail_task" }),
         ),
         (
-            ExecutionWaitExpiryAction::FailTask,
-            json!({ "kind": "fail_task" }),
-        ),
-        (
             ExecutionWaitExpiryAction::ContinueWith {
                 output: json!({ "timed_out": true }),
             },
@@ -210,6 +206,13 @@ fn wait_expiry_actions_round_trip_with_canonical_tagged_shapes() {
     assert!(
         unknown_action.is_err(),
         "undeclared wait expiry actions must reject"
+    );
+    let removed_fail_run = serde_json::from_value::<ExecutionWaitExpiryAction>(json!({
+        "kind": "fail_run"
+    }));
+    assert!(
+        removed_fail_run.is_err(),
+        "the removed fail_run wire spelling must reject rather than alias fail_task"
     );
 }
 

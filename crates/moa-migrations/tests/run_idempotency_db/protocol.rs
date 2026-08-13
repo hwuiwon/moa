@@ -115,7 +115,7 @@ async fn final_schema_omits_retired_relations_columns_and_indexes_db() {
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
 async fn migration_protocol_pristine_apply_is_exact_and_idempotent_db() {
-    // Pins: a pristine database applies the exact contiguous V1..V58 epoch,
+    // Pins: a pristine database applies the exact contiguous current epoch,
     // validates as complete, and reports no work on a second public-runner call.
     let admin_url = test_database_url();
     let db_name = unique_db_name();
@@ -166,10 +166,12 @@ async fn migration_protocol_pristine_apply_is_exact_and_idempotent_db() {
     let (first, second, history, removed_token_vault_tables_absent) =
         outcome.expect("central migration runs should complete on a fresh database");
     let expected_labels = expected_migration_labels();
+    let current_version = current_migration_version();
+    assert_eq!(current_version, 60, "the current epoch must end at V000060");
     assert_eq!(
-        expected_labels.len(),
-        58,
-        "the epoch must contain exactly 58 migrations"
+        i32::try_from(expected_labels.len()).expect("migration count must fit i32"),
+        current_version,
+        "the epoch must contain exactly one migration for every version"
     );
     assert_eq!(
         first, expected_labels,
@@ -180,8 +182,8 @@ async fn migration_protocol_pristine_apply_is_exact_and_idempotent_db() {
             .iter()
             .map(|(version, _)| *version)
             .collect::<Vec<_>>(),
-        (1..=58).collect::<Vec<_>>(),
-        "refinery history must be exactly contiguous from V1 through V58"
+        (1..=current_version).collect::<Vec<_>>(),
+        "refinery history must be exactly contiguous through the current maximum"
     );
     assert!(
         second.is_empty(),
@@ -416,7 +418,7 @@ async fn migration_protocol_parallel_fresh_databases_retry_shared_role_catalog_r
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
 async fn migration_protocol_exact_prefix_resumes_db() {
     // Pins: a database with an exact new-epoch prefix resumes at the next
-    // semantic migration and becomes a complete V1..V58 history.
+    // semantic migration and becomes a complete current history.
     let admin_url = test_database_url();
     let db_name = unique_db_name();
     let admin = PgPoolOptions::new()
@@ -472,6 +474,7 @@ async fn migration_protocol_exact_prefix_resumes_db() {
     let (prefix, resumed, second, partial_error, versions) =
         outcome.expect("exact contiguous prefix should resume successfully");
     let expected = expected_migration_labels();
+    let current_version = current_migration_version();
     let prefix_len = usize::try_from(
         migration_version("execution_analytics").expect("execution analytics must be embedded"),
     )
@@ -483,10 +486,12 @@ async fn migration_protocol_exact_prefix_resumes_db() {
         "completed history must not reapply: {second:?}"
     );
     assert!(
-        partial_error.contains("incomplete: found 28 of 57 expected rows"),
+        partial_error.contains(&format!(
+            "incomplete: found {prefix_len} of {current_version} expected rows"
+        )),
         "complete-history validation must distinguish a valid prefix: {partial_error}"
     );
-    assert_eq!(versions, (1..=58).collect::<Vec<_>>());
+    assert_eq!(versions, (1..=current_version).collect::<Vec<_>>());
 }
 
 #[tokio::test]

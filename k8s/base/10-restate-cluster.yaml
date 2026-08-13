@@ -69,6 +69,14 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: moa-restate-bootstrap
+        # The singleton maintenance owner invokes durable reconciliation
+        # handlers through ingress but does not expose a Restate handler port.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: moa-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: moa-maintenance
       node:
         # Alloy discovers and scrapes each Restate pod directly on the node
         # port. Keep this path inside the cluster without exposing it through a
@@ -86,6 +94,14 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: moa-restate-bootstrap
+        # The singleton maintenance owner performs read-only deployment-drain
+        # queries. Serving replicas remain excluded from the Admin surface.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: moa-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: moa-maintenance
   config: |
     auto-provision = false
     shutdown-timeout = "10m"

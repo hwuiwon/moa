@@ -14,9 +14,11 @@ definition:
       path: SKILL.md
     inputs:
       type: object
+      required: [priority, retry]
       properties:
         priority:
           type: string
+          enum: [high, standard]
         retry:
           type: boolean
     execution_plan:
@@ -44,10 +46,11 @@ definition:
             kind: fail_task
         input_schema:
           type: object
-          required: [priority]
+          required: [priority, retry]
           properties:
             priority:
               type: string
+              enum: [high, standard]
             retry:
               type: boolean
         output_schema:

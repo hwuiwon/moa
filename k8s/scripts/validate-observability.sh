@@ -486,6 +486,47 @@ import yaml
 
 root = pathlib.Path(sys.argv[1])
 
+restate_cluster_path = root / "k8s/base/10-restate-cluster.yaml"
+restate_cluster = yaml.safe_load(restate_cluster_path.read_text(encoding="utf-8"))
+network_peers = (
+    restate_cluster.get("spec", {})
+    .get("security", {})
+    .get("networkPeers", {})
+)
+def moa_system_peer(name):
+    return {
+        "namespaceSelector": {
+            "matchLabels": {"kubernetes.io/metadata.name": "moa-system"}
+        },
+        "podSelector": {
+            "matchLabels": {"app.kubernetes.io/name": name}
+        },
+    }
+
+ingress_peers = network_peers.get("ingress", [])
+expected_ingress_peers = [
+    moa_system_peer("moa-edge"),
+    moa_system_peer("moa-orchestrator"),
+    moa_system_peer("moa-restate-bootstrap"),
+    moa_system_peer("moa-maintenance"),
+]
+if ingress_peers != expected_ingress_peers:
+    raise SystemExit(
+        "Restate ingress peers must be exactly edge, serving orchestrator, "
+        "bootstrap, and the singleton maintenance reconciliation owner"
+    )
+
+admin_peers = network_peers.get("admin", [])
+expected_admin_peers = [
+    moa_system_peer("moa-restate-bootstrap"),
+    moa_system_peer("moa-maintenance"),
+]
+if admin_peers != expected_admin_peers:
+    raise SystemExit(
+        "Restate Admin peers must be exactly bootstrap plus the singleton "
+        "maintenance drain observer; serving replicas must remain excluded"
+    )
+
 restate_deployment = yaml.safe_load(
     (root / "k8s/base/20-orchestrator-deployment.yaml").read_text(encoding="utf-8")
 )

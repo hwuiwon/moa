@@ -326,7 +326,7 @@ FROM moa.tenant_purge_catalog AS checkpoint_stage
 WHERE checkpoint_stage.stage_name = 'moa.sandbox_workspace_checkpoints';
 
 COMMENT ON TABLE moa.tenant_purge_catalog IS
-    'Closed 158-table tenant-offboarding residue surface. Fleet capacity-bucket rows, sandbox provider accounts, sandbox provider inventory claims, and inventory findings are global maintenance authority; the two nullable-scope simulator certification authority tables are also intentionally global and absent.';
+    'Closed 160-table tenant-offboarding residue surface. Fleet capacity-bucket rows, sandbox provider accounts, sandbox provider inventory claims, and inventory findings are global maintenance authority; the two nullable-scope simulator certification authority tables are also intentionally global and absent.';
 
 DO $sandbox_hand_release_receipt_purge_function$
 DECLARE
@@ -335,13 +335,13 @@ DECLARE
 BEGIN
     SELECT pg_get_functiondef('moa.run_tenant_purge_batch(uuid,text)'::REGPROCEDURE)
     INTO predecessor;
-    IF predecessor NOT LIKE '%catalog_count <> 157%'
-       OR predecessor NOT LIKE '%exactly 157 tables%' THEN
+    IF predecessor NOT LIKE '%catalog_count <> 159%'
+       OR predecessor NOT LIKE '%exactly 159 tables%' THEN
         RAISE EXCEPTION 'unexpected V59 tenant purge function definition'
             USING ERRCODE = '55000';
     END IF;
-    replacement := replace(predecessor, 'catalog_count <> 157', 'catalog_count <> 158');
-    replacement := replace(replacement, 'exactly 157 tables', 'exactly 158 tables');
+    replacement := replace(predecessor, 'catalog_count <> 159', 'catalog_count <> 160');
+    replacement := replace(replacement, 'exactly 159 tables', 'exactly 160 tables');
     EXECUTE replacement;
 END
 $sandbox_hand_release_receipt_purge_function$;

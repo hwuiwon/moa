@@ -1483,11 +1483,9 @@ async fn task_external_start_recovery_adopts_started_not_started_and_replay_atom
     );
     candidate.plan.definition.nodes = vec![watchdog_output_node()];
     let run = create_run(&repository, scope, candidate).await?;
-    assert!(
-        repository
-            .initialize_scheduler_state(scope, run.run_uid)
-            .await?
-    );
+    repository
+        .initialize_scheduler_state(scope, run.run_uid)
+        .await?;
     assert!(matches!(
         repository
             .materialize_ready_page(
@@ -1600,17 +1598,38 @@ async fn task_external_start_recovery_adopts_started_not_started_and_replay_atom
     repository
         .reserve_external_job_intent(scope, &config, not_started_intent)
         .await?;
+    let Some(not_started_authority) = repository
+        .load_current_task_external_start_recovery(started[0].0)
+        .await?
+    else {
+        panic!("the exact current unbound external start must outrank watchdog teardown");
+    };
+    assert_eq!(
+        not_started_authority.external_job_uid,
+        not_started_recovery.external_job_uid
+    );
+    assert_eq!(
+        not_started_authority.idempotency_key,
+        not_started_recovery.idempotency_key
+    );
     assert!(matches!(
         repository
-            .recover_external_job_start_not_started(&not_started_recovery, Utc::now())
+            .recover_external_job_start_not_started(&not_started_authority, Utc::now())
             .await?,
         ExecutionExternalJobStartRecoveryAdoptionOutcome::Applied {
             compensation_release: None
         }
     ));
+    assert_eq!(
+        repository
+            .load_current_task_external_start_recovery(started[0].0)
+            .await?,
+        None,
+        "a settled external-start recovery must no longer defer the watchdog"
+    );
     assert!(matches!(
         repository
-            .recover_external_job_start_not_started(&not_started_recovery, Utc::now())
+            .recover_external_job_start_not_started(&not_started_authority, Utc::now())
             .await?,
         ExecutionExternalJobStartRecoveryAdoptionOutcome::Replayed {
             compensation_release: None
@@ -1640,6 +1659,16 @@ async fn task_external_start_recovery_adopts_started_not_started_and_replay_atom
     repository
         .reserve_external_job_intent(scope, &config, started_intent.clone())
         .await?;
+    let Some(started_authority) = repository
+        .load_current_task_external_start_recovery(started[1].0)
+        .await?
+    else {
+        panic!("started fixture must expose its exact durable recovery authority");
+    };
+    assert_eq!(
+        started_authority.external_job_uid,
+        started_recovery.external_job_uid
+    );
     sqlx::query(
         "UPDATE moa.execution_capacity_reservation \
          SET expires_at=NOW() - INTERVAL '1 second' \
@@ -1668,7 +1697,7 @@ async fn task_external_start_recovery_adopts_started_not_started_and_replay_atom
         repository
             .recover_external_job_start_started(
                 &config,
-                &started_recovery,
+                &started_authority,
                 binding.clone(),
                 Utc::now(),
             )
@@ -1677,9 +1706,15 @@ async fn task_external_start_recovery_adopts_started_not_started_and_replay_atom
             compensation_release: None
         }
     ));
+    assert_eq!(
+        repository
+            .load_current_task_external_start_recovery(started[1].0)
+            .await?,
+        None
+    );
     assert!(matches!(
         repository
-            .recover_external_job_start_started(&config, &started_recovery, binding, Utc::now(),)
+            .recover_external_job_start_started(&config, &started_authority, binding, Utc::now(),)
             .await?,
         ExecutionExternalJobStartRecoveryAdoptionOutcome::Replayed {
             compensation_release: None

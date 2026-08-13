@@ -6,12 +6,11 @@ use moa_artifacts::execution_plan::{
 };
 use moa_core::types::tools::IdempotencyClass;
 use moa_execution::{
-    capability::CapabilitySource,
     repository::{
         ExecutionAttemptState, ExecutionScope,
         task::{
-            ActiveAttemptLiveness, TaskAttemptFence, TaskAttemptRecord,
-            TaskAttemptSettlementOutcome, UnstartedTaskAttemptDisposition,
+            ActiveAttemptLiveness, TaskAttemptCheckpointRecord, TaskAttemptFence,
+            TaskAttemptRecord, TaskAttemptSettlementOutcome, UnstartedTaskAttemptDisposition,
             classify_active_attempt_liveness,
         },
     },
@@ -30,7 +29,9 @@ use crate::{
         attempt_slice::durable_utc_now_shared,
         errors::execution_error_to_handler_error,
         execution_task_attempt::{
-            ExecutionTaskAttemptImpl, task_attempt_fence,
+            ExecutionTaskAttemptImpl,
+            active::{TaskAttemptContinuation, TaskAttemptContinuationState},
+            task_attempt_fence,
             yielding::{begin_release_shared, checkpoint_task_hands_shared},
         },
     },
@@ -109,18 +110,19 @@ pub(super) async fn handle_task_attempt_watchdog(
         ));
     }
     let now = durable_utc_now_shared(ctx, "task_watchdog_observed_at").await?;
-    let liveness =
-        classify_active_attempt_liveness(&workflow.config, deadline, task.last_progress_at, now);
+    let liveness = classify_active_attempt_liveness(
+        &workflow.config,
+        deadline,
+        task.last_progress_at,
+        task.progress_step_bound_seconds
+            .and_then(|seconds| chrono::TimeDelta::try_seconds(i64::from(seconds))),
+        now,
+    );
     if !liveness.is_expired() {
         return Ok(watchdog_result(
             ExecutionAttemptWatchdogResponseOutcome::RetryDelivery,
         ));
     }
-    cancel_completion_owner(
-        ctx,
-        LLMCompletionOwner::execution_task_attempt(request.dispatch_uid),
-    )
-    .await?;
     if task.status == ExecutionTaskStatus::Dispatching
         && task.attempt_state == ExecutionAttemptState::Dispatching
     {
@@ -180,7 +182,48 @@ pub(super) async fn handle_task_attempt_watchdog(
         attempt_deadline_at: deadline,
         tenant_id: request.tenant_id,
     };
+    let repository = workflow.repository.clone();
+    let fence = task_attempt_fence(&attempt_request);
+    let external_start_recovery_owns_attempt = ctx
+        .run(|| async move {
+            repository
+                .load_current_task_external_start_recovery(fence)
+                .await
+                .map(|recovery| Json::from(recovery.is_some()))
+                .map_err(execution_error_to_handler_error)
+        })
+        .name("load_task_external_start_recovery_for_watchdog")
+        .await?
+        .into_inner();
+    if external_start_recovery_owns_attempt {
+        // The provider start may already have committed. Its exact recovery trigger is the
+        // only authority allowed to bind or prove-not-sent; watchdog teardown would supersede
+        // that trigger and could orphan provider work.
+        return Ok(watchdog_result(
+            ExecutionAttemptWatchdogResponseOutcome::RetryDelivery,
+        ));
+    }
+    let repository = workflow.repository.clone();
+    let checkpoint = ctx
+        .run(|| async move {
+            repository
+                .load_task_attempt_checkpoint(scope, request.run_uid, request.task_id)
+                .await
+                .map(Json::from)
+                .map_err(execution_error_to_handler_error)
+        })
+        .name("load_task_attempt_checkpoint_for_watchdog")
+        .await?
+        .into_inner();
     let started = TaskAttemptRecord { run, task };
+    let disposition = classify_stale_attempt(
+        task_effect_idempotency(&started, checkpoint.as_ref()).map_err(TerminalError::new)?,
+    );
+    cancel_completion_owner(
+        ctx,
+        LLMCompletionOwner::execution_task_attempt(request.dispatch_uid),
+    )
+    .await?;
     let Some(started) = begin_release_shared(
         workflow,
         ctx,
@@ -195,7 +238,6 @@ pub(super) async fn handle_task_attempt_watchdog(
         ));
     };
     let receipt = checkpoint_task_hands_shared(ctx, &attempt_request, &started).await?;
-    let disposition = classify_stale_attempt(task_effect_idempotency(&started));
     let outcome = expired_attempt_outcome(disposition, liveness, started.task.actual.clone());
     let outcome = exhaust_retry_outcome(started.task.attempt, &started.task.retry, outcome);
     let retry_at = matches!(
@@ -277,33 +319,97 @@ fn watchdog_result(outcome: ExecutionAttemptWatchdogResponseOutcome) -> TaskAtte
     TaskAttemptWatchdogResult { outcome }
 }
 
-fn task_effect_idempotency(started: &TaskAttemptRecord) -> IdempotencyClass {
-    let references: Vec<_> = match &started.task.kind {
-        LogicalTaskKind::Capability { reference } => vec![reference],
-        LogicalTaskKind::Agent {
-            capability_refs, ..
-        } => capability_refs.iter().collect(),
-        LogicalTaskKind::Output { .. }
-        | LogicalTaskKind::Review { .. }
-        | LogicalTaskKind::WaitSignal { .. }
-        | LogicalTaskKind::WaitUntil { .. }
-        | LogicalTaskKind::CompletionVerifier { .. } => Vec::new(),
-    };
-    if references.into_iter().any(|reference| {
+fn task_effect_idempotency(
+    started: &TaskAttemptRecord,
+    checkpoint: Option<&TaskAttemptCheckpointRecord>,
+) -> Result<IdempotencyClass, String> {
+    let direct_capability = |reference: &moa_artifacts::execution_plan::CapabilityReference| {
         started
             .run
             .catalog
             .capabilities
             .iter()
             .find(|capability| capability.reference == *reference)
-            .is_none_or(|capability| {
-                capability.idempotency_class == IdempotencyClass::NonIdempotent
-                    || matches!(capability.source, CapabilitySource::Model)
+            .map(|capability| capability.idempotency_class)
+            .ok_or_else(|| {
+                "active attempt capability is absent from its pinned catalog".to_string()
             })
-    }) {
-        IdempotencyClass::NonIdempotent
-    } else {
-        IdempotencyClass::Idempotent
+    };
+    match &started.task.kind {
+        LogicalTaskKind::Capability { reference } => direct_capability(reference),
+        LogicalTaskKind::Agent { .. } | LogicalTaskKind::CompletionVerifier { .. } => {
+            let Some(checkpoint) = checkpoint else {
+                // No model response has crossed a durable boundary yet. The in-flight gateway
+                // completion is cancellation-fenced and idempotency-keyed.
+                return Ok(IdempotencyClass::Idempotent);
+            };
+            let continuation =
+                serde_json::from_value::<TaskAttemptContinuation>(checkpoint.payload.clone())
+                    .map_err(|error| format!("decode watchdog task continuation: {error}"))?;
+            match persisted_in_flight_effect(continuation) {
+                PersistedInFlightEffect::Model => Ok(IdempotencyClass::Idempotent),
+                PersistedInFlightEffect::Classified(idempotency) => Ok(idempotency),
+                PersistedInFlightEffect::Capability(tool_name) => started
+                    .run
+                    .catalog
+                    .capabilities
+                    .iter()
+                    .find(|capability| {
+                        capability.source.model_visible_tool_name() == Some(tool_name.as_str())
+                    })
+                    .map(|capability| capability.idempotency_class)
+                    .ok_or_else(|| {
+                        format!(
+                            "pending watchdog capability `{}` is absent from the pinned catalog",
+                            tool_name
+                        )
+                    }),
+                PersistedInFlightEffect::UnboundExternalStart => {
+                    Err("external-start checkpoint has no matching recovery authority".to_string())
+                }
+            }
+        }
+        LogicalTaskKind::Output { .. }
+        | LogicalTaskKind::Review { .. }
+        | LogicalTaskKind::WaitSignal { .. }
+        | LogicalTaskKind::WaitUntil { .. } => Ok(IdempotencyClass::Idempotent),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PersistedInFlightEffect {
+    Model,
+    Capability(String),
+    Classified(IdempotencyClass),
+    UnboundExternalStart,
+}
+
+fn persisted_in_flight_effect(continuation: TaskAttemptContinuation) -> PersistedInFlightEffect {
+    match continuation.state {
+        TaskAttemptContinuationState::Agent {
+            pending_review,
+            pending_tool_calls,
+            pending_external,
+            ..
+        } => {
+            if let Some(pending) = pending_external {
+                return PersistedInFlightEffect::Classified(pending.effect_idempotency);
+            }
+            if let Some(pending) = pending_review {
+                return PersistedInFlightEffect::Classified(pending.effect_idempotency);
+            }
+            pending_tool_calls
+                .first()
+                .map_or(PersistedInFlightEffect::Model, |invocation| {
+                    PersistedInFlightEffect::Capability(invocation.name.clone())
+                })
+        }
+        TaskAttemptContinuationState::CapabilityReview { pending_review, .. } => {
+            PersistedInFlightEffect::Classified(pending_review.effect_idempotency)
+        }
+        TaskAttemptContinuationState::CapabilityExternalStart { .. } => {
+            PersistedInFlightEffect::UnboundExternalStart
+        }
     }
 }
 
@@ -327,7 +433,58 @@ fn task_watchdog_settlement_response(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use moa_artifacts::execution_plan::ExecutionUsage;
+    use moa_core::types::{
+        completion::ToolInvocation, context::ContextMessage, security::SecurityCircuitState,
+    };
+
     use super::*;
+
+    // Pins: after a model boundary the watchdog classifies only the first exact pending
+    // invocation. An unrelated non-idempotent capability elsewhere in the agent catalog must
+    // not turn an idempotent in-flight effect into UnknownOutcome.
+    #[test]
+    fn watchdog_classifies_the_exact_persisted_agent_phase_offline() {
+        let continuation = TaskAttemptContinuation {
+            schema_version: 1,
+            state: TaskAttemptContinuationState::Agent {
+                messages: vec![ContextMessage::user("run the exact queued tools")],
+                next_turn: 1,
+                usage: ExecutionUsage {
+                    cost_microusd: 0,
+                    tokens: 0,
+                    tool_calls: 0,
+                    retrieved_bytes: 0,
+                },
+                security_circuit: SecurityCircuitState::default(),
+                disabled_capabilities: BTreeMap::new(),
+                pending_review: None,
+                pending_tool_calls: vec![
+                    ToolInvocation {
+                        id: Some("safe-first".to_string()),
+                        name: "read_exact".to_string(),
+                        input: serde_json::json!({}),
+                    },
+                    ToolInvocation {
+                        id: Some("ambiguous-later".to_string()),
+                        name: "write_later".to_string(),
+                        input: serde_json::json!({}),
+                    },
+                ],
+                pending_external: None,
+            },
+            review_resolution: None,
+            external_job_resolution: None,
+            workspace_release_receipt_id: None,
+        };
+
+        assert_eq!(
+            persisted_in_flight_effect(continuation),
+            PersistedInFlightEffect::Capability("read_exact".to_string())
+        );
+    }
 
     // Pins: a watchdog must never automatically resend an ambiguous
     // non-idempotent effect, while an idempotent effect remains recoverable.

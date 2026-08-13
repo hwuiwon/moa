@@ -59,8 +59,8 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: Sandbox workspace fleet capacity is nearly exhausted
-            description: "Fleet utilization for {{ $labels.dimension }} is {{ $value | humanizePercentage }} (threshold 90%). Inspect provider inventory and durable reservations before increasing limits."
+            summary: A sandbox workspace capacity scope is nearly exhausted
+            description: "The highest enforced tenant or provider-account utilization for {{ $labels.dimension }} is {{ $value | humanizePercentage }} (threshold 90%). Inspect provider inventory and durable reservations before increasing limits."
             runbook_url: https://github.com/hwuiwon/moa/blob/main/docs/19-data-operations.md#workspace-capacity-pressure
 
         - alert: MOASandboxWorkspaceCheckpointFailures

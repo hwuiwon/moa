@@ -296,10 +296,11 @@ mod tests {
     // so a `continue_with` output has nothing to validate against. Before this check
     // it compiled cleanly and the schema violation surfaced at run materialization as
     // a non-retryable infrastructure error against whichever task happened to ask for
-    // input. Both directions are asserted so the rejection is provably about
-    // `continue_with` and not about the surrounding fixture.
+    // input. The accepted direction proves the rejection is about `continue_with`
+    // and not the surrounding fixture; the removed `fail_run` wire spelling is
+    // rejected explicitly instead of pretending it remains a second valid action.
     #[test]
-    fn input_wait_policy_rejects_continue_with_but_accepts_a_failing_action() {
+    fn input_wait_policy_accepts_fail_task_and_rejects_other_settlements() {
         let continued = plan(ExecutionWaitExpiryAction::ContinueWith {
             output: json!({ "approved": true }),
         });
@@ -314,16 +315,19 @@ mod tests {
             "continue_with must be refused for the plan-level input wait policy: {report:?}"
         );
 
-        for action in [
-            ExecutionWaitExpiryAction::FailTask,
-            ExecutionWaitExpiryAction::FailTask,
-        ] {
-            let report = validate_execution_plan_definition(&plan(action));
-            assert!(
-                report.errors.is_empty(),
-                "a failing input wait expiry must still validate: {report:?}"
-            );
-        }
+        let report = validate_execution_plan_definition(&plan(ExecutionWaitExpiryAction::FailTask));
+        assert!(
+            report.errors.is_empty(),
+            "fail_task must remain the valid input-wait expiry: {report:?}"
+        );
+
+        assert!(
+            serde_json::from_value::<ExecutionWaitExpiryAction>(json!({
+                "kind": "fail_run"
+            }))
+            .is_err(),
+            "the removed fail_run wire spelling must fail closed"
+        );
     }
 
     fn plan(on_expiry: ExecutionWaitExpiryAction) -> ExecutionPlanDefinition {

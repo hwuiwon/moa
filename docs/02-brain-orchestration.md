@@ -515,6 +515,10 @@ instruction-only skills and capabilities with bounded turns and budgets. They
 cannot mutate the graph. Unexpected conditions return typed `NeedsInput` or
 `NeedsReplan`; every amendment is compiled, authorization-narrowing, budgeted,
 persisted in `plan_history`, and applied only to pending or downstream work.
+Each automatic amendment generation or repair call first reserves cost and
+tokens from the run ledger; unavailable capacity stops before gateway dispatch,
+while completed calls reconcile exact provider usage and retain per-call audit
+attribution under replay.
 Repeated hashes, recurring failure fingerprints, no progress, deadline, or
 resource exhaustion terminate with exact partial/blocked coverage instead of an
 infinite loop.

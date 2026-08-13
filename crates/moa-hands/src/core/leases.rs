@@ -23,7 +23,9 @@ use sqlx::{PgPool, Row, types::Json};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use super::sandbox_workspace::capacity::release_active_hand_for_reaper_in_transaction;
+use super::sandbox_workspace::capacity::{
+    ActiveHandReaperRelease, release_active_hand_for_reaper_in_transaction,
+};
 
 /// Maximum wall-clock time the platform allows one provider create dispatch.
 pub(super) const PROVISIONING_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -1200,7 +1202,7 @@ impl HandLeaseStore for PostgresHandLeaseStore {
             attachment_columns(expected.attachment.as_ref());
         let mut conn = self.begin(tenant_id).await?;
         if expected.attachment.is_some()
-            && !release_active_hand_for_reaper_in_transaction(
+            && release_active_hand_for_reaper_in_transaction(
                 conn.as_mut(),
                 tenant_id,
                 expected.provisioning_operation_id,
@@ -1208,6 +1210,7 @@ impl HandLeaseStore for PostgresHandLeaseStore {
                 claim_token,
             )
             .await?
+                != ActiveHandReaperRelease::Released
         {
             conn.rollback().await?;
             return Ok(false);

@@ -35,6 +35,8 @@ async fn session_status_idle_rewrites_live_and_archived_state_idempotently_db() 
         let live_session_id = uuid::Uuid::new_v4();
         let archived_session_id = uuid::Uuid::new_v4();
         for (session_id, archived) in [(live_session_id, false), (archived_session_id, true)] {
+            let label = format!("session-status-{session_id}");
+            let mut tx = target.begin().await?;
             sqlx::query(
                 "INSERT INTO sessions \
                     (id, tenant_id, storage_partition_id, user_id, status, model, \
@@ -45,8 +47,23 @@ async fn session_status_idle_rewrites_live_and_archived_state_idempotently_db() 
             .bind(session_id)
             .bind(tenant_id)
             .bind(archived)
-            .execute(&target)
+            .execute(&mut *tx)
             .await?;
+            sqlx::query(
+                "INSERT INTO session_agent_context \
+                    (session_id, tenant_id, storage_partition_id, user_id, \
+                     agent_definition_ref, agent_revision_uid, policy_hash, display_name, \
+                     policy_snapshot) \
+                 VALUES ($1, $2, $2::TEXT, $3, 'agent://system-default', \
+                         '00000000-0000-4000-8000-000000000a02', \
+                         'session-status-test-policy', 'Session Status Test Agent', '{}'::JSONB)",
+            )
+            .bind(session_id)
+            .bind(tenant_id)
+            .bind(&label)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
         }
 
         for (sequence_num, from, to) in [(0_i64, "running", "paused"), (1, "paused", "running")] {
@@ -210,15 +227,7 @@ async fn session_status_idle_rewrites_live_and_archived_state_idempotently_db() 
         old_live_values,
         cutover_receipts,
     ) = outcome.expect("session status migration should complete");
-    assert_eq!(
-        first,
-        vec![
-            expected_migration_labels()
-                .last()
-                .expect("V54 label must exist")
-                .clone()
-        ]
-    );
+    assert_eq!(first, expected_migration_labels_from("session_status_idle"));
     assert!(second.is_empty(), "second migration run must apply no SQL");
     assert_eq!(second_archive, (first_bytes, first_digest));
     assert_eq!(old_live_values, 0);

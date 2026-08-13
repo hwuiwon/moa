@@ -161,7 +161,7 @@ require_value --new-deployment-uri "${NEW_DEPLOYMENT_URI}"
 require_value --archive-dir "${ARCHIVE_DIR}"
 require_value --session-events-schema "${SESSION_EVENTS_SCHEMA}"
 
-for command in cargo curl find grep jq pg_dump psql restate seq tee tr wc; do
+for command in cargo curl find grep head jq pg_dump psql restate seq tee tr wc; do
   require_cmd "${command}"
 done
 
@@ -205,13 +205,22 @@ restate_cli() {
 }
 
 # The exact central-migration identities this cutover applies. Comparing names
-# as well as versions is what lets a resumed invocation treat V000060 as "the
-# migration stage already ran" instead of "some other chain reached 60".
+# as well as versions is what lets a resumed invocation treat the current
+# migration stage as complete instead of accepting some other chain at the same
+# version. The V59 prefix remains resumable if V60 was not recorded.
 readonly APPLIED_MIGRATIONS_EXPECTED=$'59|long_horizon_execution\n60|sandbox_active_compute_capacity'
+readonly CUTOVER_MIGRATION_MAX=60
 
 applied_migration_identities() {
   psql -X "${DATABASE_ADMIN_URL}" --set=ON_ERROR_STOP=1 --tuples-only --no-align \
-    --command "SELECT version, name FROM public.refinery_schema_history WHERE version IN (59, 60) ORDER BY version;"
+    --command "SELECT version, name FROM public.refinery_schema_history WHERE version BETWEEN 59 AND ${CUTOVER_MIGRATION_MAX} ORDER BY version;"
+}
+
+expected_migration_prefix() {
+  local migration_position="$1"
+  local prefix_length=$((migration_position - 58))
+  [[ "${prefix_length}" -gt 0 ]] || return 0
+  head -n "${prefix_length}" <<<"${APPLIED_MIGRATIONS_EXPECTED}"
 }
 
 restate_query() {
@@ -317,7 +326,9 @@ MIGRATION_POSITION="$(
 printf 'latest central migration: V%06d\n' "${MIGRATION_POSITION}"
 
 case "${MIGRATION_POSITION}" in
-  58)
+  58|59)
+    [[ "$(applied_migration_identities)" == "$(expected_migration_prefix "${MIGRATION_POSITION}")" ]] \
+      || die "the database's applied V59-V${MIGRATION_POSITION} identities do not match this cutover"
     MIGRATION_STAGE="pending"
     ;;
   60)
@@ -326,7 +337,7 @@ case "${MIGRATION_POSITION}" in
     MIGRATION_STAGE="complete"
     ;;
   *)
-    die "the database must be at exactly V000058 before, or exactly V000060 after, the V59/V60 hard cut"
+    die "the database must be at an exact V000058-V000060 prefix of the V59/V60 hard cut"
     ;;
 esac
 

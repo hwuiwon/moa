@@ -1690,7 +1690,7 @@ mod tests {
     #[test]
     fn execution_blocker_audience_uses_exact_scalar_priority_not_reason_samples_offline() {
         // Pins: truncated display samples cannot hide a higher-priority exact blocker; scalar
-        // audience counters always order User > TenantReviewer > External > Agent > System.
+        // audience counters always order User > TenantReviewer > External > System.
         assert_eq!(
             execution_blocker_audience_from_flags(true, true, true, true),
             Some(ExecutionBlockerAudience::User)

@@ -67,6 +67,8 @@ pub enum ExecutionAmendmentPlanningResultKind {
     ///
     /// The `message` is planner-authored and safe to surface to the caller.
     Unsupported { message: String },
+    /// The durable run budget denied the next automatic planner call before provider I/O.
+    BudgetExhausted { message: String },
     /// The amendment planner provider or transport failed, so no verdict exists.
     ///
     /// The `message` carries raw provider detail for durable diagnostics only and must

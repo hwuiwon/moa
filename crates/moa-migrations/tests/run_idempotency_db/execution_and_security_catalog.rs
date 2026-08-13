@@ -1706,7 +1706,7 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
         let catalog_shape: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
             r#"
             SELECT
-                (SELECT count(*) = 143
+                (SELECT count(*) = 169
                  FROM information_schema.columns
                  WHERE table_schema = 'moa'
                    AND (
@@ -1727,9 +1727,27 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
                         'terminal_archive_hash', 'terminal_details_archived_at'
                      ))
                      OR
+                     (table_name = 'execution_planner_call_audit' AND column_name IN (
+                        'input_tokens_uncached', 'input_tokens_cache_write',
+                        'input_tokens_cache_read', 'output_tokens', 'cost_microusd'
+                     ))
+                     OR
+                     (table_name = 'execution_amendment_planning_reservation' AND column_name IN (
+                        'reservation_uid', 'tenant_id', 'contact_id', 'contact_scope_id',
+                        'run_uid', 'base_plan_revision', 'call_ordinal',
+                        'reserved_cost_microusd', 'reserved_tokens', 'created_at'
+                     ))
+                     OR
+                     (table_name = 'execution_amendment_planning_settlement' AND column_name IN (
+                        'settlement_uid', 'reservation_uid', 'tenant_id', 'contact_id',
+                        'contact_scope_id', 'run_uid', 'actual_cost_microusd',
+                        'actual_tokens', 'budget_overrun', 'settled_at'
+                     ))
+                     OR
                      (table_name = 'execution_task' AND column_name IN (
                         'attempt_generation', 'attempt_state', 'attempt_started_at',
-                        'last_progress_at', 'attempt_deadline_at', 'waiting_since',
+                        'last_progress_at', 'progress_step_bound_seconds',
+                        'attempt_deadline_at', 'waiting_since',
                         'ready_at', 'active_dispatch_uid', 'dispatch_sequence',
                         'external_job_uid', 'failure_fingerprint'
                      ))
@@ -1811,8 +1829,28 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
                         'next_run_at', 'scheduled_generation', 'claim_owner',
                         'claimed_generation', 'claim_expires_at'
                      ))
+                   )
+                   AND EXISTS (
+                     SELECT 1
+                     FROM pg_constraint
+                     WHERE conrelid = 'moa.execution_task'::REGCLASS
+                       AND contype = 'c'
+                       AND pg_get_constraintdef(oid)
+                           LIKE '%progress_step_bound_seconds IS NULL%progress_step_bound_seconds > 0%'
+                   )
+                   AND EXISTS (
+                     SELECT 1
+                     FROM pg_constraint
+                     WHERE conrelid = 'moa.execution_run'::REGCLASS
+                       AND conname = 'execution_run_pending_terminal_check'
+                       AND convalidated
+                       AND pg_get_constraintdef(oid) LIKE '%waiting_signal%'
+                       AND pg_get_constraintdef(oid) LIKE '%waiting_timer%'
+                       AND pg_get_constraintdef(oid) LIKE '%waiting_external%'
+                       AND pg_get_constraintdef(oid) LIKE '%pause_requested%'
+                       AND pg_get_constraintdef(oid) LIKE '%compensating%'
                    )),
-                (SELECT count(*) = 15
+                (SELECT count(*) = 17
                  FROM pg_class relation
                  JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
                  WHERE namespace.nspname = 'moa'
@@ -1825,11 +1863,13 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
                      'execution_external_job_callback_receipt',
                      'execution_completion_scan',
                      'execution_amendment_receipt',
+                     'execution_amendment_planning_reservation',
+                     'execution_amendment_planning_settlement',
                      'execution_replan_stop_intent',
                      'execution_task_checkpoint', 'execution_terminal_archive',
                      'execution_terminal_archive_segment'
                    )),
-                (SELECT count(*) = 15 AND bool_and(relrowsecurity AND relforcerowsecurity)
+                (SELECT count(*) = 17 AND bool_and(relrowsecurity AND relforcerowsecurity)
                  FROM pg_class relation
                  JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
                  WHERE namespace.nspname = 'moa'
@@ -1841,11 +1881,13 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
                      'execution_external_job_callback_receipt',
                      'execution_completion_scan',
                      'execution_amendment_receipt',
+                     'execution_amendment_planning_reservation',
+                     'execution_amendment_planning_settlement',
                      'execution_replan_stop_intent',
                      'execution_task_checkpoint', 'execution_terminal_archive',
                      'execution_terminal_archive_segment'
                    )),
-                (SELECT count(*) = 44
+                (SELECT count(*) = 49
                  FROM pg_indexes
                  WHERE schemaname = 'moa'
                    AND indexname IN (
@@ -1893,6 +1935,11 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
                      ,'execution_run_overdue_deadline_idx'
                      ,'execution_task_active_attempt_started_idx'
                      ,'execution_compensation_active_attempt_started_idx'
+                     ,'execution_amendment_planning_reservation_pkey'
+                     ,'execution_amendment_planning_reservation_logical_key'
+                     ,'execution_amendment_planning_reservation_scope_key'
+                     ,'execution_amendment_planning_settlement_pkey'
+                     ,'execution_amendment_planning_settlement_reservation_uid_key'
                    )),
                 moa.execution_admitted_identity_is_valid(admitted_identity, tenant_id)
                     AND activation_state = 'terminal'

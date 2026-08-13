@@ -309,6 +309,11 @@ pub(super) fn task_from_row(row: &PgRow) -> Result<ExecutionTaskRecord> {
         )?,
         attempt_started_at: row.try_get("attempt_started_at").map_err(row_error)?,
         last_progress_at: row.try_get("last_progress_at").map_err(row_error)?,
+        progress_step_bound_seconds: row
+            .try_get::<Option<i32>, _>("progress_step_bound_seconds")
+            .map_err(row_error)?
+            .map(|seconds| to_positive_u32(seconds, "progress step bound seconds"))
+            .transpose()?,
         attempt_deadline_at: row.try_get("attempt_deadline_at").map_err(row_error)?,
         waiting_since: row.try_get("waiting_since").map_err(row_error)?,
         ready_at: row.try_get("ready_at").map_err(row_error)?,

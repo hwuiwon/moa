@@ -27,7 +27,7 @@ use super::{
         requeue_delivered_dispatch_in_conn,
     },
     run::enqueue_run_activation_in_conn,
-    sqlx_error, storage_error, to_i64, to_optional_i64,
+    sqlx_error, storage_error, to_i64, to_optional_i64, to_positive_u32,
 };
 
 const MAX_RECONCILE_BATCH_SIZE: u32 = 1_000;
@@ -1104,7 +1104,6 @@ impl ExecutionRepository {
         config: &ExecutionConfig,
         trigger_uid: Uuid,
     ) -> Result<ExecutionWatchdogDeferOutcome> {
-        let staleness = crate::repository::task::attempt_heartbeat_staleness_window(config)?;
         let mut conn = scope.begin(&self.pool).await?;
         prelock_trigger_scheduled_capacity_in_conn(conn.as_mut(), trigger_uid).await?;
         let row =
@@ -1131,8 +1130,17 @@ impl ExecutionRepository {
             conn.commit().await.map_err(storage_error)?;
             return Ok(ExecutionWatchdogDeferOutcome::NotDeferred);
         }
-        let progress = sqlx::query_as::<_, (Option<DateTime<Utc>>, DateTime<Utc>, DateTime<Utc>)>(
-            "SELECT attempt_deadline_at, last_progress_at, now() FROM moa.execution_task \
+        let progress = sqlx::query_as::<
+            _,
+            (
+                Option<DateTime<Utc>>,
+                DateTime<Utc>,
+                Option<i32>,
+                DateTime<Utc>,
+            ),
+        >(
+            "SELECT attempt_deadline_at, last_progress_at, progress_step_bound_seconds, now() \
+             FROM moa.execution_task \
              WHERE tenant_id=$1 AND run_uid=$2 AND task_id=$3 AND attempt_generation=$4 \
                AND active_dispatch_uid IS NOT NULL",
         )
@@ -1146,19 +1154,52 @@ impl ExecutionRepository {
         .fetch_optional(conn.as_mut())
         .await
         .map_err(sqlx_error)?;
-        let Some((Some(attempt_deadline_at), last_progress_at, observed_at)) = progress else {
+        let Some((Some(attempt_deadline_at), last_progress_at, step_bound_seconds, observed_at)) =
+            progress
+        else {
             conn.commit().await.map_err(storage_error)?;
             return Ok(ExecutionWatchdogDeferOutcome::NotDeferred);
         };
-        let Some(next_due_at) = last_progress_at
+        // Deferral must use the same window the classifier used. An attempt is Live only
+        // because its in-flight step declared a wider bound, so recomputing the next
+        // observation from the bare floor cannot advance past the due time that just fired:
+        // the deferral is refused, and the caller treats a still-current receiver as an error
+        // and retries the delivery forever.
+        let staleness = crate::repository::task::attempt_heartbeat_staleness_window(
+            config,
+            step_bound_seconds
+                .map(|seconds| {
+                    let seconds = to_positive_u32(seconds, "progress step bound seconds")?;
+                    chrono::TimeDelta::try_seconds(i64::from(seconds)).ok_or_else(|| {
+                        Error::InvalidRepositoryData {
+                            message: "progress step bound exceeds chrono duration".to_string(),
+                        }
+                    })
+                })
+                .transpose()?,
+        )?;
+        let Some(calculated_due_at) = last_progress_at
             .checked_add_signed(staleness)
             .map(|stale_at| stale_at.min(attempt_deadline_at))
         else {
             conn.commit().await.map_err(storage_error)?;
             return Ok(ExecutionWatchdogDeferOutcome::NotDeferred);
         };
-        // Strictly forward only. An observation at or before now would re-fire immediately, and one
-        // at or before the current arm would not move detection at all.
+        // The receiver and this transaction observe time independently. A recovered delivery can
+        // classify the attempt live immediately before its staleness boundary, then reach this
+        // transaction immediately after it. Give that already-journaled RetryDelivery one fresh
+        // identity instead of retrying the same memoized receiver response forever.
+        let next_due_at = if calculated_due_at <= observed_at || calculated_due_at <= trigger.due_at
+        {
+            observed_at
+                .checked_add_signed(chrono::TimeDelta::seconds(1))
+                .map(|retry_at| retry_at.min(attempt_deadline_at))
+                .unwrap_or(attempt_deadline_at)
+        } else {
+            calculated_due_at
+        };
+        // Strictly forward only. Once the deadline itself is due, the receiver must settle the
+        // attempt (or yield to another exact recovery owner) rather than extending its authority.
         if next_due_at <= observed_at || next_due_at <= trigger.due_at {
             conn.commit().await.map_err(storage_error)?;
             return Ok(ExecutionWatchdogDeferOutcome::NotDeferred);
@@ -1909,7 +1950,7 @@ fn trigger_capacity_request(trigger: &ExecutionTriggerRecord) -> ExecutionCapaci
     }
 }
 
-async fn settle_trigger_dispatch(
+pub(super) async fn settle_trigger_dispatch(
     conn: &mut PgConnection,
     trigger_uid: Uuid,
     state: ExecutionDeliveryState,

@@ -48,6 +48,8 @@ zstd.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
 moa-auth-providers = { workspace = true }
 moa-memory-graph = { workspace = true }
 moa-migrations = { workspace = true }

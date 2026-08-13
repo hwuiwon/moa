@@ -244,36 +244,6 @@ pub enum ExecutionHandReleaseOwner {
     },
 }
 
-/// What a continuation boundary actually did with the attempt's sandbox compute.
-///
-/// A continuation is not a wait: the next slice is enqueued immediately, so the
-/// boundary tries to keep the sandbox rather than destroy and re-provision it
-/// milliseconds later. The three keep-or-not outcomes have materially different
-/// cost and different follow-up work for the caller, so they are reported
-/// explicitly instead of being flattened into success.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "disposition", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ExecutionHandContinuationDisposition {
-    /// The attempt owned no durable workspace or no live lease; nothing was kept.
-    NoComputeOwned,
-    /// Compute was released in-path and the filesystem kept for the next slice.
-    ///
-    /// The lease stays live so the next slice reattaches, and the active-compute
-    /// capacity charge went back to the fleet.
-    Suspended,
-    /// The provider cannot release compute, so the hand stays hot on a short bound.
-    ///
-    /// The reaper owns the deadline; a slice that does not arrive inside it loses
-    /// the sandbox and restores from the checkpoint published here.
-    RetainedHot,
-    /// Suspension was attempted and failed; the caller must fall back to release.
-    ///
-    /// The checkpoint is published either way, so the caller finishes the
-    /// ordinary checkpoint-and-destroy path rather than leaving a hand hot on a
-    /// bet that already lost.
-    SuspendFailed,
-}
-
 /// Durable proof that one exact execution attempt released its sandbox compute.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

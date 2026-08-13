@@ -4,8 +4,9 @@ use super::preparation::{
     bounded_failure_evidence, narrow_amendment_context, narrow_authorized_capability_refs,
 };
 use super::{
-    AmendmentPlanningOrigin, ReplanStopReason, amendment_planning_identity,
-    parked_run_needs_amendment, planner_stop_amendment,
+    AmendmentPlanningOrigin, ReplanStopReason, amendment_planning_call_estimate,
+    amendment_planning_call_usage, amendment_planning_identity, parked_run_needs_amendment,
+    planner_stop_amendment,
 };
 
 use std::collections::BTreeSet;
@@ -30,6 +31,44 @@ fn unbounded_budget() -> ExecutionBudgetLimit {
         max_retrieved_bytes: None,
         deadline_at: None,
     }
+}
+
+#[test]
+fn amendment_planner_call_estimate_and_usage_are_cost_and_token_only_offline() {
+    // Pins: every automatic amendment model call reserves a conservative request-plus-output token
+    // bound, then reconciles the provider's exact normalized tokens and model-priced cost.
+    let mut request = moa_core::types::completion::CompletionRequest::new("repair the plan");
+    request.model = Some(moa_core::types::identifiers::ModelId::new(
+        "claude-sonnet-4-6",
+    ));
+    request.max_output_tokens = Some(32_768);
+    let estimate =
+        amendment_planning_call_estimate(&request, &moa_config::ExecutionConfig::default())
+            .expect("bounded planner request should estimate");
+    let expected_input =
+        u64::try_from(moa_core::types::context::sum_message_tokens(&request.messages) * 2)
+            .expect("fixture estimate should fit u64");
+    assert_eq!(estimate.tokens, 32_768 + expected_input);
+    assert!(estimate.cost_microusd >= 100_000);
+
+    let response = moa_core::types::completion::CompletionResponse {
+        text: "{}".to_string(),
+        content: Vec::new(),
+        stop_reason: moa_core::types::completion::StopReason::EndTurn,
+        model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
+        usage: moa_core::types::completion::TokenUsage {
+            input_tokens_uncached: 1_000,
+            input_tokens_cache_write: 200,
+            input_tokens_cache_read: 300,
+            output_tokens: 400,
+        },
+        duration_ms: 1,
+        thought_signature: None,
+    };
+    let actual = amendment_planning_call_usage(&response)
+        .expect("authoritative provider usage should reconcile");
+    assert_eq!(actual.tokens, 1_900);
+    assert!(actual.cost_microusd > 0);
 }
 
 fn reference(name: &str) -> CapabilityReference {

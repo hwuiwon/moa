@@ -299,7 +299,9 @@ impl ExecutionRepository {
         // instead of after its whole authorized window. `min` is load-bearing: the deadline stays
         // the hard backstop and the watchdog can never be armed beyond it.
         let watchdog_due_at = deadline.min(
-            now.checked_add_signed(attempt_heartbeat_staleness_window(config)?)
+            // No step is in flight at claim time, so the floor is the whole window; the
+            // first pre-dispatch heartbeat widens it if that step declares more.
+            now.checked_add_signed(attempt_heartbeat_staleness_window(config, None)?)
                 .ok_or_else(|| Error::InvalidRepositoryInput {
                     message: "active attempt heartbeat observation is not representable"
                         .to_string(),
@@ -402,20 +404,38 @@ impl ExecutionRepository {
                 continue;
             };
             let estimate = DbEstimate::try_from(task.estimate)?;
-            let budget = sqlx::query(RESERVE_RUN_BUDGET_SQL)
-                .bind(run.run_uid)
-                .bind(estimate.cost_microusd)
-                .bind(estimate.tokens)
-                .bind(estimate.tasks)
-                .bind(estimate.tool_calls)
-                .bind(estimate.retrieved_bytes)
-                .execute(conn.as_mut())
-                .await
-                .map_err(sqlx_error)?;
-            if budget.rows_affected() != 1 {
-                exhausted_runs.push(run.run_uid);
-                continue;
-            }
+            let held_reservation = DbEstimate::try_from(task.reserved)?;
+            let reservation_is_empty = held_reservation.cost_microusd == 0
+                && held_reservation.tokens == 0
+                && held_reservation.tasks == 0
+                && held_reservation.tool_calls == 0
+                && held_reservation.retrieved_bytes == 0;
+            let reservation = if held_reservation.tasks == 1 {
+                held_reservation
+            } else if reservation_is_empty {
+                let budget = sqlx::query(RESERVE_RUN_BUDGET_SQL)
+                    .bind(run.run_uid)
+                    .bind(estimate.cost_microusd)
+                    .bind(estimate.tokens)
+                    .bind(estimate.tasks)
+                    .bind(estimate.tool_calls)
+                    .bind(estimate.retrieved_bytes)
+                    .execute(conn.as_mut())
+                    .await
+                    .map_err(sqlx_error)?;
+                if budget.rows_affected() != 1 {
+                    exhausted_runs.push(run.run_uid);
+                    continue;
+                }
+                estimate
+            } else {
+                return Err(Error::InvalidRepositoryData {
+                    message: format!(
+                        "task {} has a partial logical-task budget reservation",
+                        task.task_id
+                    ),
+                });
+            };
 
             let dispatch_uid = Uuid::now_v7();
             let capacity_reservation_uid = Uuid::now_v7();
@@ -485,7 +505,8 @@ impl ExecutionRepository {
                      reserved_cost_microusd = $8, reserved_tokens = $9, \
                      reserved_tasks = $10, reserved_tool_calls = $11, \
                      reserved_retrieved_bytes = $12, reserved_at = NOW(), \
-                     last_progress_at = NOW(), updated_at = NOW() \
+                     last_progress_at = NOW(), progress_step_bound_seconds = NULL, \
+                     updated_at = NOW() \
                  WHERE run_uid = $1 AND task_id = $2 AND status = 'ready' \
                    AND ready_at IS NOT NULL AND ready_at <= $5 \
                    AND EXISTS (SELECT 1 FROM moa.execution_run AS current_run \
@@ -501,11 +522,11 @@ impl ExecutionRepository {
             .bind(now)
             .bind(deadline)
             .bind(dispatch_uid)
-            .bind(estimate.cost_microusd)
-            .bind(estimate.tokens)
-            .bind(estimate.tasks)
-            .bind(estimate.tool_calls)
-            .bind(estimate.retrieved_bytes)
+            .bind(reservation.cost_microusd)
+            .bind(reservation.tokens)
+            .bind(reservation.tasks)
+            .bind(reservation.tool_calls)
+            .bind(reservation.retrieved_bytes)
             .fetch_optional(conn.as_mut())
             .await
             .map_err(sqlx_error)?;

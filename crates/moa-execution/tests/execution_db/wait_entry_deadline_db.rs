@@ -5,6 +5,10 @@ use moa_execution::repository::ready::{ReadyMaterializationOutcome, ReadyMateria
 use moa_execution::repository::task::{
     TaskAttemptFence, TaskAttemptSettlementOutcome, TaskAttemptStartOutcome,
 };
+use moa_execution::repository::terminal::{
+    PendingTerminalAdvanceOutcome, PendingTerminalAdvanceStage,
+};
+use moa_execution::state::ExecutionTerminalEvidence;
 
 use super::support::*;
 
@@ -140,7 +144,10 @@ async fn storage_wait_past_run_deadline_fails_its_node_instead_of_erroring_db() 
     assert_eq!(failed_run.progress_failed_tasks, 1);
     assert_eq!(failed_run.waiting_task_count, 0);
     assert_eq!(failed_run.ready_task_count, 0);
-    assert_eq!(failed_run.next_wake_at, None);
+    assert_eq!(
+        failed_run.next_wake_at, failed_run.approved_budget.deadline_at,
+        "the run deadline remains the next durable wake when no task-local wait is parked"
+    );
     assert!(failed_run.waiting_reasons.is_empty());
 
     // A wait that still fits inside the same deadline keeps its ordinary parked projection.
@@ -173,6 +180,100 @@ async fn storage_wait_past_run_deadline_fails_its_node_instead_of_erroring_db() 
     };
     assert_eq!(tasks[0].status, ExecutionTaskStatus::WaitingTimer);
     assert_eq!(triggers.len(), 1);
+    let trigger_uid = triggers[0].trigger_uid;
+    let bucket_before: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT scope_kind,reserved_quantity FROM moa.execution_capacity_bucket \
+         WHERE resource_dimension='scheduled_triggers' \
+           AND (scope_kind='fleet' OR tenant_id=$1) ORDER BY scope_kind",
+    )
+    .bind(tenant_id.0)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(bucket_before.len(), 2);
+    let run_scheduled_before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM moa.execution_capacity_reservation \
+         WHERE run_uid=$1 AND resource_dimension='scheduled_triggers' \
+           AND state IN ('reserved','reconciling')",
+    )
+    .bind(run.run_uid)
+    .fetch_one(&pool)
+    .await?;
+    assert!(run_scheduled_before >= 1);
+    let current = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("wait-owning run remains visible");
+
+    let PendingTerminalAdvanceOutcome::Applied(commit) = repository
+        .fence_completion_terminal_and_enqueue_settlement(
+            &config,
+            scope,
+            run.run_uid,
+            current.controller_generation,
+            current.wake_epoch,
+            PendingExecutionTerminal {
+                status: ExecutionRunStatus::Failed,
+                reason: ExecutionTerminalReason::InternalFailure,
+                terminal_evidence: ExecutionTerminalEvidence {
+                    cause: ExecutionTerminalCause::InternalFailure,
+                    satisfied_requirement_count: 0,
+                    requirement_count: 1,
+                },
+                completion_check_results: Vec::new(),
+                terminal_gaps: vec!["fixture terminal fence".to_string()],
+                output: None,
+                cancellation_reason: None,
+            },
+            moa_test_support::fixtures::pg_now(),
+            100,
+        )
+        .await?
+    else {
+        panic!("terminal fencing must settle the storage-only wait");
+    };
+    assert_eq!(commit.stage, PendingTerminalAdvanceStage::Finalized);
+    let trigger_state: String =
+        sqlx::query_scalar("SELECT state FROM moa.execution_trigger WHERE trigger_uid=$1")
+            .bind(trigger_uid)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(trigger_state, "superseded");
+    let dispatch_state: String =
+        sqlx::query_scalar("SELECT state FROM moa.execution_dispatch_outbox WHERE trigger_uid=$1")
+            .bind(trigger_uid)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        dispatch_state, "cancelled",
+        "superseding a storage wait must terminally settle its pending outbox delivery"
+    );
+    let capacity_state: (String, bool) = sqlx::query_as(
+        "SELECT state,released_at IS NOT NULL FROM moa.execution_capacity_reservation \
+         WHERE trigger_uid=$1 AND resource_dimension='scheduled_triggers'",
+    )
+    .bind(trigger_uid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(capacity_state, ("released".to_string(), true));
+    let bucket_after: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT scope_kind,reserved_quantity FROM moa.execution_capacity_bucket \
+         WHERE resource_dimension='scheduled_triggers' \
+           AND (scope_kind='fleet' OR tenant_id=$1) ORDER BY scope_kind",
+    )
+    .bind(tenant_id.0)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(bucket_after.len(), bucket_before.len());
+    for ((before_scope, before), (after_scope, after)) in
+        bucket_before.into_iter().zip(bucket_after)
+    {
+        assert_eq!(after_scope, before_scope);
+        assert_eq!(
+            after,
+            before - run_scheduled_before,
+            "the wait plus any run-owned terminalized triggers must release every exact receipt"
+        );
+    }
     Ok(())
 }
 

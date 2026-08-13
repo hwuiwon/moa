@@ -364,7 +364,8 @@ scripts/cutover-long-horizon-execution.sh \
   --restate-ingress-url https://RESTATE_INGRESS_HOST \
   --old-deployment-id dp_EXACT_OLD_ID \
   --new-deployment-uri https://IMMUTABLE_NEW_HANDLER_URI \
-  --archive-dir /explicit/precreated/empty/archive/directory
+  --archive-dir /explicit/precreated/empty/archive/directory \
+  --session-events-schema public
 ```
 
 That first pass is read-only and must print zero nonterminal Postgres runs and

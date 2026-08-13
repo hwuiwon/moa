@@ -5,6 +5,20 @@ WORKDIR /build
 
 COPY . .
 ARG MOA_ORCHESTRATOR_FEATURES=""
+# `.cargo/config.toml` adds `-C prefer-dynamic` to speed up local dev builds, but the release
+# profile enables thin LTO and rustc rejects that combination outright ("cannot prefer dynamic
+# linking when performing LTO"). Only release builds hit it, so it breaks image builds while
+# leaving every local `cargo build` working, which is why it can go unnoticed.
+#
+# `RUSTFLAGS` is the only setting that reliably wins here: it sits above `build.rustflags` in
+# cargo's precedence order, whereas `CARGO_BUILD_RUSTFLAGS` is merely the environment spelling
+# of that same config key and does not displace it.
+#
+# It replaces the flags wholesale rather than appending, so `tokio_unstable` has to be restated:
+# the runtime metrics hooks the code compiles against are gated on it, and dropping it fails the
+# build on missing cfg items. A statically linked release binary is also what the runtime stage
+# needs, since it copies the binary into a slim image without the toolchain's shared objects.
+ENV RUSTFLAGS="--cfg tokio_unstable"
 RUN if [ -n "${MOA_ORCHESTRATOR_FEATURES}" ]; then \
       cargo build --locked --release -p moa-orchestrator --bin moa-orchestrator-bin --features "${MOA_ORCHESTRATOR_FEATURES}"; \
     else \

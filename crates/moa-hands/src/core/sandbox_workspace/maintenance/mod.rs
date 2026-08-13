@@ -401,19 +401,66 @@ impl WorkspaceMaintenanceCoordinator {
         Ok(())
     }
 
-    /// Emits the fleet-wide utilization ratio for every capacity dimension.
+    /// Emits the highest enforced-scope utilization for every capacity dimension.
     async fn emit_quota_utilization_metrics(&self) -> Result<()> {
         let mut conn = maintenance_conn(&self.pool).await?;
         let rows = sqlx::query(
-            "SELECT reservation.resource_dimension, \
-                    sum(reservation.quantity)::BIGINT AS reserved, \
-                    max(limits.limit_value)::BIGINT AS limit_value \
-             FROM moa.sandbox_capacity_reservations AS reservation \
-             LEFT JOIN moa.sandbox_tenant_capacity_limits AS limits \
-               ON limits.tenant_id = reservation.tenant_id \
-              AND limits.resource_dimension = reservation.resource_dimension \
-             WHERE reservation.reservation_state <> 'released' \
-             GROUP BY reservation.resource_dimension",
+            r#"
+            WITH active_reservations AS MATERIALIZED (
+                SELECT tenant_id,
+                       provider_account_id,
+                       provider_account_generation,
+                       resource_dimension,
+                       quantity
+                FROM moa.sandbox_capacity_reservations
+                WHERE reservation_state IN ('pending', 'committed', 'reconciling')
+            ),
+            tenant_usage AS (
+                SELECT reservation.tenant_id,
+                       reservation.resource_dimension,
+                       sum(reservation.quantity)::DOUBLE PRECISION AS reserved
+                FROM active_reservations AS reservation
+                GROUP BY reservation.tenant_id, reservation.resource_dimension
+            ),
+            provider_usage AS (
+                SELECT reservation.provider_account_id,
+                       reservation.provider_account_generation,
+                       reservation.resource_dimension,
+                       sum(reservation.quantity)::DOUBLE PRECISION AS reserved
+                FROM active_reservations AS reservation
+                GROUP BY reservation.provider_account_id,
+                         reservation.provider_account_generation,
+                         reservation.resource_dimension
+            ),
+            scoped_utilization AS (
+                SELECT usage.resource_dimension,
+                       usage.reserved,
+                       (limits.configured_limits ->> usage.resource_dimension)::BIGINT AS limit_value
+                FROM tenant_usage AS usage
+                JOIN moa.sandbox_tenant_capacity_limits AS limits
+                  ON limits.tenant_id = usage.tenant_id
+                 AND limits.configured_limits ? usage.resource_dimension
+                UNION ALL
+                SELECT usage.resource_dimension,
+                       usage.reserved,
+                       (account.configured_limits ->> usage.resource_dimension)::BIGINT AS limit_value
+                FROM provider_usage AS usage
+                JOIN moa.sandbox_provider_accounts AS account
+                  ON account.provider_account_id = usage.provider_account_id
+                 AND account.generation = usage.provider_account_generation
+                 AND account.configured_limits ? usage.resource_dimension
+            )
+            SELECT resource_dimension,
+                   max(
+                       CASE
+                           WHEN limit_value > 0 THEN reserved / limit_value::DOUBLE PRECISION
+                           WHEN reserved > 0 THEN 1.0
+                           ELSE 0.0
+                       END
+                   )::DOUBLE PRECISION AS utilization
+            FROM scoped_utilization
+            GROUP BY resource_dimension
+            "#,
         )
         .fetch_all(conn.as_mut())
         .await
@@ -424,18 +471,7 @@ impl WorkspaceMaintenanceCoordinator {
             let dimension = row
                 .try_get::<String, _>("resource_dimension")
                 .map_err(map_sqlx)?;
-            let reserved = row.try_get::<i64, _>("reserved").map_err(map_sqlx)?.max(0);
-            let limit = row
-                .try_get::<Option<i64>, _>("limit_value")
-                .map_err(map_sqlx)?
-                .unwrap_or(0);
-            // An absent or zero limit means the dimension is unbounded for every tenant
-            // observed, which is 0.0 pressure rather than a division by zero.
-            let ratio = if limit > 0 {
-                reserved as f64 / limit as f64
-            } else {
-                0.0
-            };
+            let ratio = row.try_get::<f64, _>("utilization").map_err(map_sqlx)?;
             ratios.insert(dimension, ratio);
         }
         for dimension in all_capacity_dimensions() {

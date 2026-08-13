@@ -37,7 +37,9 @@ use super::leases::{
     HandLeaseWorkspaceAttachment, LeaseHandle, PROVISIONING_EMPTY_CONFIRMATION,
     PROVISIONING_VISIBILITY_GRACE, map_sqlx_error,
 };
-use super::sandbox_workspace::capacity::release_active_hand_for_reaper_in_transaction;
+use super::sandbox_workspace::capacity::{
+    ActiveHandReaperRelease, release_active_hand_for_reaper_in_transaction,
+};
 
 /// One generation the reaper owns and must destroy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,18 +297,22 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
             conn.rollback().await?;
             return Ok(false);
         }
-        if claimed.attachment.is_some()
-            && !release_active_hand_for_reaper_in_transaction(
+        if claimed.attachment.is_some() {
+            let release = release_active_hand_for_reaper_in_transaction(
                 conn.as_mut(),
                 claimed.tenant_id,
                 claimed.provisioning_operation_id,
                 claimed.generation,
                 claimed.claim_token,
             )
-            .await?
-        {
-            conn.rollback().await?;
-            return Ok(false);
+            .await?;
+            let release_is_safe = matches!(release, ActiveHandReaperRelease::Released)
+                || (matches!(release, ActiveHandReaperRelease::Missing)
+                    && claimed.handle.is_none());
+            if !release_is_safe {
+                conn.rollback().await?;
+                return Ok(false);
+            }
         }
         let affected = sqlx::query(
             r#"

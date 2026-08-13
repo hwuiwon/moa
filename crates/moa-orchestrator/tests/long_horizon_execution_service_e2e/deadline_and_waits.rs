@@ -240,6 +240,13 @@ async fn watchdog_retries_idempotent_but_never_resends_ambiguous_effect_service_
                 "MOA_EXECUTION_ACTIVE_ATTEMPT_TIMEOUT_SECONDS".to_string(),
                 "2".to_string(),
             ),
+            // Staleness must stay strictly below the attempt timeout, so a scenario that
+            // shortens the timeout has to shorten this with it or the orchestrator refuses
+            // to boot.
+            (
+                "MOA_EXECUTION_ATTEMPT_HEARTBEAT_STALENESS_SECONDS".to_string(),
+                "1".to_string(),
+            ),
             (
                 "MOA_EXECUTION_TRIGGER_RECONCILIATION_CADENCE_SECONDS".to_string(),
                 "1".to_string(),

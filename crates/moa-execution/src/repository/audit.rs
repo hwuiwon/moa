@@ -75,6 +75,10 @@ pub struct PlannerCallAuditEvidence {
     pub outcome: ExecutionPlannerOutcome,
     /// First persisted measured duration.
     pub duration_micros: u64,
+    /// Normalized provider token usage attributed to this call.
+    pub usage: ExecutionRouteUsage,
+    /// Provider cost attributed to this call in micro-US-dollars.
+    pub cost_microusd: u64,
     /// Candidate hash when required by the outcome.
     pub candidate_hash: Option<String>,
 }
@@ -457,6 +461,8 @@ impl ExecutionRepository {
                 outcome,
                 provider_model,
                 prompt_version,
+                usage,
+                cost_microusd,
                 candidate_hash,
                 candidate_json,
                 compiler_report,
@@ -508,6 +514,20 @@ impl ExecutionRepository {
             .bind(candidate_hash)
             .bind(candidate_json)
             .bind(compiler_report)
+            .bind(to_i64(
+                usage.input_tokens_uncached,
+                "planner uncached input tokens",
+            )?)
+            .bind(to_i64(
+                usage.input_tokens_cache_write,
+                "planner cache-write tokens",
+            )?)
+            .bind(to_i64(
+                usage.input_tokens_cache_read,
+                "planner cache-read tokens",
+            )?)
+            .bind(to_i64(usage.output_tokens, "planner output tokens")?)
+            .bind(to_i64(*cost_microusd, "planner cost")?)
             .bind(duration_micros_db)
             .bind(*created_at)
             .fetch_optional(conn.as_mut())

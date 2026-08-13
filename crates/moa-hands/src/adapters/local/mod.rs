@@ -78,7 +78,7 @@ use crate::tools::{bash, file_outline, file_read, file_search, file_write, grep,
 
 const LOCAL_SUPPORTED_CAPABILITIES: &[SandboxToolCapability] = &SandboxToolCapability::ALL;
 const DEFAULT_DOCKER_IMAGE: &str = "alpine:3.20";
-const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_TOOL_TIMEOUT: Duration = crate::tools::bash::DEFAULT_BASH_TIMEOUT;
 const DOCKER_DETECTION_TIMEOUT: Duration = Duration::from_secs(2);
 const DOCKER_TMPFS_OPTIONS: &str = "rw,nosuid,nodev,size=64m";
 const HAND_SANDBOX_PREFIX: &str = "hand-";

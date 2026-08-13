@@ -10,13 +10,12 @@ use moa_core::{
             WorkspaceOperationId,
         },
         sandbox_workspace::{
-            ExecutionHandContinuationDisposition, ExecutionHandReleaseOwner,
-            ExecutionHandReleaseReceipt, ProviderStorageKind, ProviderStorageRef,
-            SandboxWorkspaceScope, SandboxWorkspaceState, WorkspaceAttachRequest, WorkspaceBinding,
-            WorkspaceCheckpointPublishRequest, WorkspaceCheckpointState,
-            WorkspaceConfirmedDisposition, WorkspaceOperationKind, WorkspaceOperationOutcome,
-            WorkspacePostCommitState, WorkspaceReconcileRequest, WorkspaceRestoreRequest,
-            WorkspaceStorageOperation, WorkspaceStoragePrepareRequest,
+            ExecutionHandReleaseOwner, ExecutionHandReleaseReceipt, ProviderStorageKind,
+            ProviderStorageRef, SandboxWorkspaceScope, SandboxWorkspaceState,
+            WorkspaceAttachRequest, WorkspaceBinding, WorkspaceCheckpointPublishRequest,
+            WorkspaceCheckpointState, WorkspaceConfirmedDisposition, WorkspaceOperationKind,
+            WorkspaceOperationOutcome, WorkspacePostCommitState, WorkspaceReconcileRequest,
+            WorkspaceRestoreRequest, WorkspaceStorageOperation, WorkspaceStoragePrepareRequest,
         },
         session::SessionMeta,
     },
@@ -42,13 +41,12 @@ use moa_observability::{
 };
 
 use crate::core::{
-    ActiveHand, ExecutionHandReleaseRequest, ExecutionHandRetentionRequest, HandProviderCacheKey,
-    HandRoute, InstalledManifestMarker, JournaledWorkspaceCommit, ToolCallScope, ToolExecution,
-    ToolRouter, TrustedSandboxManifest,
+    ActiveHand, ExecutionHandReleaseRequest, HandProviderCacheKey, HandRoute,
+    InstalledManifestMarker, JournaledWorkspaceCommit, ToolCallScope, ToolExecution, ToolRouter,
+    TrustedSandboxManifest,
     leases::{HandLease, HandLeaseStatus, HandLeaseWorkspaceAttachment},
     lifecycle::{
-        active_hand_capacity_request, manifest_scope_key, session_provider_key,
-        workspace_binding_for_hand, workspace_lease_scope,
+        manifest_scope_key, session_provider_key, workspace_binding_for_hand, workspace_lease_scope,
     },
     telemetry::{
         record_workspace_checkpoint, record_workspace_lifecycle, record_workspace_release,
@@ -813,10 +811,20 @@ impl ToolRouter {
             &workspace.workspace_id.0,
             b"prepare-initial-storage-v1",
         ));
-        let deadline_at = call_scope
-            .budget
-            .deadline
-            .unwrap_or_else(|| Utc::now() + ChronoDuration::minutes(5));
+        let existing = operations.get(workspace.tenant_id, operation_id).await?;
+        let deadline_at = existing.as_ref().map_or_else(
+            || {
+                call_scope
+                    .budget
+                    .deadline
+                    .unwrap_or_else(|| Utc::now() + ChronoDuration::minutes(5))
+            },
+            |operation| operation.deadline_at,
+        );
+        let reconcile_not_before = existing.as_ref().map_or_else(
+            || deadline_at + ChronoDuration::seconds(30),
+            |operation| operation.reconcile_not_before,
+        );
         let hash_bytes = serde_json::to_vec(&binding)?;
         let request_hash = format!("sha256:{}", hex::encode(Sha256::digest(hash_bytes)));
         let intent = WorkspaceOperationIntent {
@@ -831,23 +839,42 @@ impl ToolRouter {
             expected_instance_generation: workspace.instance_generation,
             expected_checkpoint_generation: workspace.checkpoint_generation,
             deadline_at,
-            reconcile_not_before: deadline_at + ChronoDuration::seconds(30),
+            reconcile_not_before,
         };
-        match operations.get(workspace.tenant_id, operation_id).await? {
-            Some(existing)
-                if existing.request_hash == request_hash
-                    && existing.kind == WorkspaceOperationKind::Create => {}
-            Some(_) => {
-                return Err(MoaError::StorageError(
-                    "workspace storage preparation replay changed its durable request".to_string(),
+        let operation = operations.persist_intent(&intent).await?;
+        match (operation.outcome, operation.confirmed_disposition) {
+            (
+                WorkspaceOperationOutcome::Confirmed,
+                Some(WorkspaceConfirmedDisposition::ResourcePresent),
+            ) => return Ok(()),
+            (WorkspaceOperationOutcome::Confirmed, _) => {
+                return Err(MoaError::ProviderError(
+                    "workspace storage preparation was durably confirmed absent".to_string(),
                 ));
             }
-            None => {
-                operations.persist_intent(&intent).await?;
+            (WorkspaceOperationOutcome::Unknown, _) => {
+                return Err(MoaError::ExternalEffectUnknownOutcome {
+                    operation_id: operation_id.to_string(),
+                });
+            }
+            (WorkspaceOperationOutcome::NotSent, None) => {}
+            _ => {
+                return Err(MoaError::StorageError(
+                    "workspace storage preparation has an inconsistent durable outcome".to_string(),
+                ));
             }
         }
         failpoints::hit("post_reservation_pre_provider_create").await?;
-        let result = storage_provider
+        call_scope.admit()?;
+        if !operations
+            .begin_provider_attempt(workspace.tenant_id, operation_id)
+            .await?
+        {
+            return Err(MoaError::ExternalEffectUnknownOutcome {
+                operation_id: operation_id.to_string(),
+            });
+        }
+        let result = match storage_provider
             .prepare_workspace_storage(WorkspaceStoragePrepareRequest {
                 operation: WorkspaceStorageOperation {
                     operation_id,
@@ -857,14 +884,42 @@ impl ToolRouter {
                     request_hash,
                 },
             })
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::warn!(
+                    operation_id = %operation_id,
+                    error = %error,
+                    "workspace storage preparation outcome is ambiguous"
+                );
+                operations
+                    .mark_unknown(workspace.tenant_id, operation_id)
+                    .await?;
+                return Err(MoaError::ExternalEffectUnknownOutcome {
+                    operation_id: operation_id.to_string(),
+                });
+            }
+        };
         // Every arm records an outcome, so the lifecycle counter carries the real
         // success/ambiguous ratio rather than only the happy path.
         match (result.outcome, result.confirmed_disposition) {
-            (WorkspaceOperationOutcome::Confirmed, Some(disposition)) => {
-                operations
-                    .confirm_disposition(workspace.tenant_id, operation_id, disposition)
-                    .await?;
+            (
+                WorkspaceOperationOutcome::Confirmed,
+                Some(WorkspaceConfirmedDisposition::ResourcePresent),
+            ) => {
+                if !operations
+                    .confirm_disposition(
+                        workspace.tenant_id,
+                        operation_id,
+                        WorkspaceConfirmedDisposition::ResourcePresent,
+                    )
+                    .await?
+                {
+                    return Err(MoaError::ExternalEffectUnknownOutcome {
+                        operation_id: operation_id.to_string(),
+                    });
+                }
                 record_workspace_lifecycle(
                     &workspace.provider,
                     SandboxWorkspaceLifecycleOperation::Create,
@@ -872,6 +927,32 @@ impl ToolRouter {
                     prepare_started_at.elapsed(),
                 );
                 Ok(())
+            }
+            (
+                WorkspaceOperationOutcome::Confirmed,
+                Some(WorkspaceConfirmedDisposition::ResourceAbsent),
+            ) => {
+                if !operations
+                    .confirm_disposition(
+                        workspace.tenant_id,
+                        operation_id,
+                        WorkspaceConfirmedDisposition::ResourceAbsent,
+                    )
+                    .await?
+                {
+                    return Err(MoaError::ExternalEffectUnknownOutcome {
+                        operation_id: operation_id.to_string(),
+                    });
+                }
+                record_workspace_lifecycle(
+                    &workspace.provider,
+                    SandboxWorkspaceLifecycleOperation::Create,
+                    SandboxWorkspaceMetricResult::Failed,
+                    prepare_started_at.elapsed(),
+                );
+                Err(MoaError::ProviderError(
+                    "workspace storage preparation was confirmed absent".to_string(),
+                ))
             }
             (WorkspaceOperationOutcome::Unknown, None) => {
                 operations
@@ -975,8 +1056,40 @@ impl ToolRouter {
             deadline_at: claim.provisioning_deadline_at,
             reconcile_not_before: claim.provisioning_deadline_at + ChronoDuration::seconds(30),
         };
-        operations.persist_intent(&intent).await?;
+        let persisted = operations.persist_intent(&intent).await?;
+        match (persisted.outcome, persisted.confirmed_disposition) {
+            (
+                WorkspaceOperationOutcome::Confirmed,
+                Some(WorkspaceConfirmedDisposition::ResourcePresent),
+            ) => return Ok(()),
+            (WorkspaceOperationOutcome::Confirmed, _) => {
+                return Err(MoaError::ProviderError(format!(
+                    "workspace {} was durably confirmed absent",
+                    kind.as_str()
+                )));
+            }
+            (WorkspaceOperationOutcome::Unknown, _) => {
+                return Err(MoaError::ExternalEffectUnknownOutcome {
+                    operation_id: operation_id.to_string(),
+                });
+            }
+            (WorkspaceOperationOutcome::NotSent, None) => {}
+            _ => {
+                return Err(MoaError::StorageError(format!(
+                    "workspace {} has an inconsistent durable outcome",
+                    kind.as_str()
+                )));
+            }
+        }
         call_scope.admit()?;
+        if !operations
+            .begin_provider_attempt(binding.tenant_id, operation_id)
+            .await?
+        {
+            return Err(MoaError::ExternalEffectUnknownOutcome {
+                operation_id: operation_id.to_string(),
+            });
+        }
         let operation = WorkspaceStorageOperation {
             operation_id,
             kind,
@@ -1051,7 +1164,7 @@ impl ToolRouter {
                 tracing::warn!(
                     operation_id = %operation_id,
                     error = %error,
-                    "workspace commit provider outcome is ambiguous"
+                    "workspace hydration provider outcome is ambiguous"
                 );
                 operations
                     .mark_unknown(binding.tenant_id, operation_id)
@@ -1062,9 +1175,16 @@ impl ToolRouter {
             }
         };
         match (result.outcome, result.confirmed_disposition) {
-            (WorkspaceOperationOutcome::Confirmed, Some(disposition)) => {
+            (
+                WorkspaceOperationOutcome::Confirmed,
+                Some(WorkspaceConfirmedDisposition::ResourcePresent),
+            ) => {
                 if !operations
-                    .confirm_disposition(binding.tenant_id, operation_id, disposition)
+                    .confirm_disposition(
+                        binding.tenant_id,
+                        operation_id,
+                        WorkspaceConfirmedDisposition::ResourcePresent,
+                    )
                     .await?
                 {
                     return Err(MoaError::StorageError(
@@ -1085,6 +1205,27 @@ impl ToolRouter {
                     );
                 }
                 Ok(())
+            }
+            (
+                WorkspaceOperationOutcome::Confirmed,
+                Some(WorkspaceConfirmedDisposition::ResourceAbsent),
+            ) => {
+                if !operations
+                    .confirm_disposition(
+                        binding.tenant_id,
+                        operation_id,
+                        WorkspaceConfirmedDisposition::ResourceAbsent,
+                    )
+                    .await?
+                {
+                    return Err(MoaError::ExternalEffectUnknownOutcome {
+                        operation_id: operation_id.to_string(),
+                    });
+                }
+                Err(MoaError::ProviderError(format!(
+                    "workspace {} was confirmed absent",
+                    kind.as_str()
+                )))
             }
             (WorkspaceOperationOutcome::Unknown, None) => {
                 operations
@@ -1339,263 +1480,6 @@ impl ToolRouter {
             release_compute: false,
         })
         .await
-    }
-
-    /// Publishes one execution-task continuation checkpoint and keeps what it can.
-    ///
-    /// A plain model/tool boundary is not a wait: the next slice is enqueued for
-    /// immediate re-admission, so destroying the sandbox here and restoring it
-    /// milliseconds later is pure loss — object-store read, decrypt, extract, and a
-    /// per-file upload round trip on both cloud providers. This publishes the exact
-    /// same durable checkpoint the release path publishes, so the portable recovery
-    /// authority advances on every boundary, and then chooses how to keep the
-    /// sandbox based on what the provider can actually do:
-    ///
-    /// * A provider with real compute suspension stops the sandbox **in this
-    ///   call** and hands its `ActiveHands` slot back to the fleet. Release timing
-    ///   is deterministic rather than reaper-lagged, and an idle sandbox stops
-    ///   costing compute and stops competing with runnable work for admission.
-    /// * A provider without it keeps the hand hot on a deliberately short
-    ///   reaper-owned deadline. That bet only pays off when the next slice arrives
-    ///   fast, so a longer window would only extend the loss.
-    ///
-    /// Both paths are safe for the same reason: the checkpoint commits *before*
-    /// any deadline is armed or any compute is stopped, so losing the warm
-    /// sandbox is a pure cache miss — the next slice restores from the same head.
-    pub async fn checkpoint_execution_hand_retaining_compute(
-        &self,
-        request: ExecutionHandRetentionRequest<'_>,
-    ) -> Result<ExecutionHandContinuationDisposition> {
-        if request.attempt_generation == 0 || request.logical_generation == 0 {
-            return Err(MoaError::ValidationError(
-                "execution task attempt and logical generations must be positive".to_string(),
-            ));
-        }
-        let Some(repository) = self.hands.workspace_repository.as_ref() else {
-            return Ok(ExecutionHandContinuationDisposition::NoComputeOwned);
-        };
-        let workspace_scope = SandboxWorkspaceScope::ExecutionTask {
-            run_id: request.run_id,
-            task_id: request.task_id,
-        };
-        // An attempt that never provisioned a durable workspace or whose lease is no
-        // longer live has nothing to publish and nothing to keep. Its committed head
-        // is already the recovery authority, so this is a no-op rather than an error.
-        let Some(workspace) = repository
-            .get_by_scope(request.session.tenant_id, &workspace_scope)
-            .await?
-        else {
-            return Ok(ExecutionHandContinuationDisposition::NoComputeOwned);
-        };
-        let lease_scope = workspace_lease_scope(&workspace_scope);
-        let lease_store = self.hands.hand_leases.as_ref().ok_or_else(|| {
-            MoaError::StorageError("durable hand lease store missing".to_string())
-        })?;
-        let Some(lease) = lease_store
-            .get(
-                request.session.tenant_id,
-                request.session.id,
-                &lease_scope,
-                &workspace.provider,
-            )
-            .await?
-        else {
-            return Ok(ExecutionHandContinuationDisposition::NoComputeOwned);
-        };
-        if lease.status != HandLeaseStatus::Active {
-            return Ok(ExecutionHandContinuationDisposition::NoComputeOwned);
-        }
-        let Some(hand) = lease.handle.as_ref().map(|handle| handle.handle.clone()) else {
-            return Ok(ExecutionHandContinuationDisposition::NoComputeOwned);
-        };
-
-        let continuation_key = format!(
-            "execution-task-continuation-v1:{}:{}:{}",
-            request.run_id, request.task_id, request.attempt_generation
-        );
-        let tool_call_id = ToolCallId(Uuid::new_v5(
-            &workspace.workspace_id.0,
-            continuation_key.as_bytes(),
-        ));
-        self.commit_workspace_after_tool(WorkspaceCommitExecution {
-            session: request.session,
-            workspace_scope: &workspace_scope,
-            tool_call_id,
-            provider_name: &workspace.provider,
-            hand: &hand,
-            call_scope: request.scope,
-            release_compute: false,
-        })
-        .await?;
-
-        let provider_impl = self
-            .hands
-            .providers
-            .get(&workspace.provider)
-            .ok_or_else(|| {
-                MoaError::ProviderError(format!(
-                    "hand provider {} is not registered",
-                    workspace.provider
-                ))
-            })?
-            .clone();
-        if provider_impl.supports_suspend() {
-            return self
-                .suspend_continuation_hand(
-                    &request,
-                    provider_impl.as_ref(),
-                    &workspace,
-                    &lease,
-                    &lease_scope,
-                    &hand,
-                )
-                .await;
-        }
-
-        // Armed only after the checkpoint commits. Arming it first would let the
-        // reaper claim and destroy the sandbox in the middle of its own publication.
-        let started_at = std::time::Instant::now();
-        self.bound_retained_hand_lifetime(request, &lease_scope, &workspace.provider)
-            .await?;
-        record_workspace_lifecycle(
-            &workspace.provider,
-            SandboxWorkspaceLifecycleOperation::Retain,
-            SandboxWorkspaceMetricResult::Succeeded,
-            started_at.elapsed(),
-        );
-        Ok(ExecutionHandContinuationDisposition::RetainedHot)
-    }
-
-    /// Stops a continuation sandbox's compute and returns its admission slot.
-    ///
-    /// The provider stop runs before the capacity release on purpose. Releasing
-    /// first and then failing to stop would under-count a sandbox that is still
-    /// burning compute; this order can only over-count a sandbox that is already
-    /// stopped, which the reattach path resolves without double-charging.
-    async fn suspend_continuation_hand(
-        &self,
-        request: &ExecutionHandRetentionRequest<'_>,
-        provider_impl: &dyn moa_core::traits::HandProvider,
-        workspace: &SandboxWorkspace,
-        lease: &HandLease,
-        lease_scope: &str,
-        hand: &HandHandle,
-    ) -> Result<ExecutionHandContinuationDisposition> {
-        let started_at = std::time::Instant::now();
-        if let Err(error) = self
-            .run_within_scope(request.scope, provider_impl.suspend(hand))
-            .await
-        {
-            // Non-fatal by contract: the checkpoint is already published, so the
-            // caller finishes the ordinary checkpoint-and-destroy path instead of
-            // leaving a hand hot on a bet that has already lost.
-            tracing::warn!(
-                provider = %workspace.provider,
-                generation = lease.generation,
-                error = %error,
-                "continuation sandbox suspension failed; falling back to release"
-            );
-            record_workspace_lifecycle(
-                &workspace.provider,
-                SandboxWorkspaceLifecycleOperation::Suspend,
-                SandboxWorkspaceMetricResult::Failed,
-                started_at.elapsed(),
-            );
-            return Ok(ExecutionHandContinuationDisposition::SuspendFailed);
-        }
-
-        // The in-process binding cache hands out an active lease's handle without
-        // consulting the provider, so a stopped sandbox must be evicted here or the
-        // next same-process slice would dispatch into compute that is not running.
-        let cache_key =
-            session_provider_key(request.session, Some(lease_scope), &workspace.provider);
-        self.remove_cached_binding_if_matches(&cache_key, hand, Some(lease.generation))
-            .await;
-
-        if let Some(capacity) = self.hands.workspace_capacity.as_ref() {
-            let binding = workspace.binding()?;
-            let released = capacity
-                .release_suspended_active_hand(&active_hand_capacity_request(&binding, lease)?)
-                .await?;
-            if !released {
-                // The charge stays held, which is the conservative direction: the
-                // sandbox really is stopped, so the fleet is only under-admitting.
-                tracing::warn!(
-                    provider = %workspace.provider,
-                    generation = lease.generation,
-                    "suspended continuation sandbox kept its active-hands charge"
-                );
-            }
-        }
-        record_workspace_lifecycle(
-            &workspace.provider,
-            SandboxWorkspaceLifecycleOperation::Suspend,
-            SandboxWorkspaceMetricResult::Succeeded,
-            started_at.elapsed(),
-        );
-        Ok(ExecutionHandContinuationDisposition::Suspended)
-    }
-
-    /// Shortens a retained continuation hand's idle deadline to its retention bound.
-    ///
-    /// Reuses the ordinary active-lease renewal, which sets the idle deadline under
-    /// the immutable hard lifetime. The requested bound is additionally clamped to the
-    /// lease's current idle deadline so retention can only shorten a sandbox's life,
-    /// never extend it past the policy it was admitted under.
-    async fn bound_retained_hand_lifetime(
-        &self,
-        request: ExecutionHandRetentionRequest<'_>,
-        lease_scope: &str,
-        provider: &str,
-    ) -> Result<()> {
-        let lease_store = self.hands.hand_leases.as_ref().ok_or_else(|| {
-            MoaError::StorageError("durable hand lease store missing".to_string())
-        })?;
-        let Some(lease) = lease_store
-            .get(
-                request.session.tenant_id,
-                request.session.id,
-                lease_scope,
-                provider,
-            )
-            .await?
-        else {
-            return Ok(());
-        };
-        if lease.status != HandLeaseStatus::Active {
-            return Ok(());
-        }
-        let Some(attachment) = lease.attachment.clone() else {
-            return Ok(());
-        };
-        let retention_deadline_at = lease
-            .idle_expires_at
-            .map_or(request.retention_deadline_at, |idle| {
-                idle.min(request.retention_deadline_at)
-            });
-        if !lease_store
-            .renew_active(crate::core::leases::HandLeaseRenewRequest {
-                tenant_id: request.session.tenant_id,
-                session_id: request.session.id,
-                worker_id: lease_scope,
-                provider,
-                generation: lease.generation,
-                provisioning_operation_id: lease.provisioning_operation_id,
-                attachment,
-                idle_expires_at: retention_deadline_at,
-            })
-            .await?
-        {
-            // The lease moved under us, so some other durable owner already governs
-            // this sandbox's lifetime. The checkpoint is published either way, so the
-            // worst outcome is that the hand expires on its ordinary idle policy.
-            tracing::warn!(
-                provider,
-                generation = lease.generation,
-                "retained execution continuation hand kept its ordinary idle deadline"
-            );
-        }
-        Ok(())
     }
 
     /// Checkpoints one execution-task workspace and releases its exact compute lease.

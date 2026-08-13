@@ -808,9 +808,12 @@ if [[ "${LIVE}" -eq 1 ]]; then
 
   if [[ "${RUN_LONG_HORIZON}" -eq 1 ]]; then
     # The suite owns its disposable Restate/Postgres/Valkey stack. Strip both
-    # external-stack discovery and provider keys so the lane remains hermetic
-    # and cannot accidentally consume billed provider credit.
+    # external-stack discovery, ambient runtime-cache selection, and provider
+    # keys so the lane remains hermetic and cannot accidentally consume billed
+    # provider credit.
     run_without_external_orchestrator env \
+      -u MOA_RUNTIME_CACHE_BACKEND \
+      -u MOA_RUNTIME_CACHE_REDIS_URL \
       -u MOA_ANTHROPIC_API_KEY \
       -u MOA_OPENAI_API_KEY \
       -u MOA_GOOGLE_API_KEY \

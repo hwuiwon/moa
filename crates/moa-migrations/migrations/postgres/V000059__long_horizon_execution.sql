@@ -435,6 +435,48 @@ ALTER TABLE moa.execution_run
         'completed', 'partial', 'blocked', 'unsupported', 'failed', 'cancelled'
     ));
 
+-- The expanded long-horizon status vocabulary is also the complete set of
+-- states from which a terminal fence may be staged.
+ALTER TABLE moa.execution_run
+    DROP CONSTRAINT execution_run_pending_terminal_check,
+    ADD CONSTRAINT execution_run_pending_terminal_check CHECK (
+        (
+            pending_terminal_status IS NULL
+            AND pending_terminal_reason IS NULL
+            AND pending_terminal_cause IS NULL
+            AND pending_terminal_output IS NULL
+        )
+        OR (
+            status IN (
+                'awaiting_confirmation', 'queued', 'running', 'waiting_input',
+                'waiting_review', 'waiting_signal', 'waiting_timer', 'waiting_external',
+                'waiting_replan', 'pause_requested', 'pausing', 'paused', 'compensating'
+            )
+            AND pending_terminal_status IN (
+                'completed','partial','blocked','unsupported','failed','cancelled'
+            )
+            AND pending_terminal_reason IS NOT NULL
+            AND btrim(pending_terminal_reason) <> ''
+            AND moa.execution_pending_terminal_payload_is_valid(pending_terminal_cause)
+            AND moa.execution_terminal_reason_for(
+                pending_terminal_status,
+                pending_terminal_cause #> '{terminal_evidence,cause}',
+                source_kind
+            ) = pending_terminal_reason
+            AND (
+                (
+                    pending_terminal_status = 'cancelled'
+                    AND cancellation_reason IS NOT NULL
+                    AND btrim(cancellation_reason) <> ''
+                )
+                OR (
+                    pending_terminal_status <> 'cancelled'
+                    AND cancellation_reason IS NULL
+                )
+            )
+        )
+    );
+
 -- Retire the two terminal-vocabulary values this architecture supersedes.
 --
 -- `scheduler_no_progress` was produced only by the deleted whole-plan scheduler's
@@ -651,6 +693,9 @@ ALTER TABLE moa.execution_task
     ADD COLUMN attempt_started_at TIMESTAMPTZ,
     ADD COLUMN last_progress_at TIMESTAMPTZ,
     ADD COLUMN attempt_deadline_at TIMESTAMPTZ,
+    ADD COLUMN progress_step_bound_seconds INTEGER CHECK (
+        progress_step_bound_seconds IS NULL OR progress_step_bound_seconds > 0
+    ),
     ADD COLUMN waiting_since TIMESTAMPTZ,
     ADD COLUMN ready_at TIMESTAMPTZ,
     ADD COLUMN active_dispatch_uid UUID,
@@ -1077,6 +1122,74 @@ CREATE INDEX execution_amendment_receipt_retention_idx
     ON moa.execution_amendment_receipt (
         tenant_id, created_at, run_uid, base_plan_revision
     );
+
+-- Every automatic amendment-planner call first reserves budget, then records
+-- its actual usage in a separate immutable settlement. Together these rows
+-- preserve the authorization decision even if mutable run counters are later
+-- repaired from the ledger.
+CREATE TABLE moa.execution_amendment_planning_reservation (
+    reservation_uid UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    contact_id UUID,
+    contact_scope_id UUID GENERATED ALWAYS AS (
+        COALESCE(contact_id, '00000000-0000-0000-0000-000000000000'::UUID)
+    ) STORED,
+    run_uid UUID NOT NULL,
+    base_plan_revision BIGINT NOT NULL CHECK (base_plan_revision >= 1),
+    call_ordinal SMALLINT NOT NULL CHECK (call_ordinal BETWEEN 0 AND 255),
+    reserved_cost_microusd BIGINT NOT NULL CHECK (reserved_cost_microusd >= 0),
+    reserved_tokens BIGINT NOT NULL CHECK (reserved_tokens >= 0),
+    created_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT execution_amendment_planning_reservation_contact_not_nil CHECK (
+        contact_id IS NULL
+        OR contact_id <> '00000000-0000-0000-0000-000000000000'::UUID
+    ),
+    CONSTRAINT execution_amendment_planning_reservation_run_fkey
+        FOREIGN KEY (run_uid, tenant_id, contact_scope_id)
+        REFERENCES moa.execution_run (run_uid, tenant_id, contact_scope_id),
+    CONSTRAINT execution_amendment_planning_reservation_logical_key
+        UNIQUE (run_uid, base_plan_revision, call_ordinal),
+    CONSTRAINT execution_amendment_planning_reservation_scope_key
+        UNIQUE (reservation_uid, tenant_id, contact_scope_id, run_uid)
+);
+
+CREATE TABLE moa.execution_amendment_planning_settlement (
+    settlement_uid UUID PRIMARY KEY,
+    reservation_uid UUID NOT NULL UNIQUE,
+    tenant_id UUID NOT NULL,
+    contact_id UUID,
+    contact_scope_id UUID GENERATED ALWAYS AS (
+        COALESCE(contact_id, '00000000-0000-0000-0000-000000000000'::UUID)
+    ) STORED,
+    run_uid UUID NOT NULL,
+    actual_cost_microusd BIGINT NOT NULL CHECK (actual_cost_microusd >= 0),
+    actual_tokens BIGINT NOT NULL CHECK (actual_tokens >= 0),
+    budget_overrun BOOLEAN NOT NULL,
+    settled_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT execution_amendment_planning_settlement_contact_not_nil CHECK (
+        contact_id IS NULL
+        OR contact_id <> '00000000-0000-0000-0000-000000000000'::UUID
+    ),
+    CONSTRAINT execution_amendment_planning_settlement_reservation_fkey
+        FOREIGN KEY (reservation_uid, tenant_id, contact_scope_id, run_uid)
+        REFERENCES moa.execution_amendment_planning_reservation (
+            reservation_uid, tenant_id, contact_scope_id, run_uid
+        )
+);
+
+-- Planner audits carry exact normalized usage even when later compilation or
+-- amendment application fails.
+ALTER TABLE moa.execution_planner_call_audit
+    ADD COLUMN input_tokens_uncached BIGINT NOT NULL DEFAULT 0
+        CHECK (input_tokens_uncached >= 0),
+    ADD COLUMN input_tokens_cache_write BIGINT NOT NULL DEFAULT 0
+        CHECK (input_tokens_cache_write >= 0),
+    ADD COLUMN input_tokens_cache_read BIGINT NOT NULL DEFAULT 0
+        CHECK (input_tokens_cache_read >= 0),
+    ADD COLUMN output_tokens BIGINT NOT NULL DEFAULT 0
+        CHECK (output_tokens >= 0),
+    ADD COLUMN cost_microusd BIGINT NOT NULL DEFAULT 0
+        CHECK (cost_microusd >= 0);
 
 -- Replan-stop evaluation persists one bounded controller handoff. The exact
 -- compensation fence consumes this row atomically; no controller activation
@@ -2814,6 +2927,8 @@ BEGIN
         'execution_node_state',
         'execution_completion_scan',
         'execution_amendment_receipt',
+        'execution_amendment_planning_reservation',
+        'execution_amendment_planning_settlement',
         'execution_replan_stop_intent',
         'execution_external_job',
         'execution_trigger',
@@ -2960,6 +3075,12 @@ FOR EACH ROW EXECUTE FUNCTION moa.reject_tenant_id_change();
 CREATE TRIGGER execution_amendment_receipt_immutable_guard
 BEFORE UPDATE OR DELETE ON moa.execution_amendment_receipt
 FOR EACH ROW EXECUTE FUNCTION moa.reject_execution_immutable_payload();
+CREATE TRIGGER execution_amendment_planning_reservation_immutable_guard
+BEFORE UPDATE OR DELETE ON moa.execution_amendment_planning_reservation
+FOR EACH ROW EXECUTE FUNCTION moa.reject_execution_immutable_payload();
+CREATE TRIGGER execution_amendment_planning_settlement_immutable_guard
+BEFORE UPDATE OR DELETE ON moa.execution_amendment_planning_settlement
+FOR EACH ROW EXECUTE FUNCTION moa.reject_execution_immutable_payload();
 CREATE TRIGGER execution_replan_stop_intent_immutable_guard
 BEFORE UPDATE OR DELETE ON moa.execution_replan_stop_intent
 FOR EACH ROW EXECUTE FUNCTION moa.reject_execution_replan_stop_intent_mutation();
@@ -3000,6 +3121,8 @@ FOR EACH ROW EXECUTE FUNCTION moa.reject_tenant_id_change();
 SELECT moa.apply_tenant_rls('moa.execution_node_state');
 SELECT moa.apply_tenant_rls('moa.execution_completion_scan');
 SELECT moa.apply_tenant_rls('moa.execution_amendment_receipt');
+SELECT moa.apply_contact_rls('moa.execution_amendment_planning_reservation'::REGCLASS);
+SELECT moa.apply_contact_rls('moa.execution_amendment_planning_settlement'::REGCLASS);
 SELECT moa.apply_tenant_rls('moa.execution_replan_stop_intent');
 SELECT moa.apply_tenant_rls('moa.execution_trigger');
 SELECT moa.apply_tenant_rls('moa.execution_dispatch_outbox');
@@ -3052,6 +3175,8 @@ BEGIN
         'execution_node_state',
         'execution_completion_scan',
         'execution_amendment_receipt',
+        'execution_amendment_planning_reservation',
+        'execution_amendment_planning_settlement',
         'execution_replan_stop_intent',
         'execution_trigger',
         'execution_dispatch_outbox',
@@ -3085,30 +3210,34 @@ BEGIN
 END
 $execution_long_horizon_purge_fences$;
 
--- Delete children before execution_compensation/task/run. Shift through a
+-- Delete execution-owned children before planner audits, tasks, and runs. Shift through a
 -- remote range to preserve the catalog's unique stage ordering.
 UPDATE moa.tenant_purge_catalog
 SET stage_order = stage_order + 1000
 WHERE stage_order >= (
     SELECT stage_order FROM moa.tenant_purge_catalog
-    WHERE stage_name = 'moa.execution_compensation'
+    WHERE stage_name = 'moa.execution_planner_call_audit'
 );
 
 UPDATE moa.tenant_purge_catalog
-SET stage_order = stage_order - 985
+SET stage_order = stage_order - 983
 WHERE stage_order >= 1000;
 
 INSERT INTO moa.tenant_purge_catalog (
     stage_order, stage_name, table_schema, table_name, scope_mode, action_mode
 )
-SELECT compensation.stage_order - execution_stage.stage_offset,
+SELECT planner_audit.stage_order - execution_stage.stage_offset,
        execution_stage.stage_name,
        'moa',
        execution_stage.table_name,
        'tenant_id',
        'delete'
-FROM moa.tenant_purge_catalog AS compensation
+FROM moa.tenant_purge_catalog AS planner_audit
 CROSS JOIN (VALUES
+    (17, 'moa.execution_amendment_planning_settlement',
+        'execution_amendment_planning_settlement'),
+    (16, 'moa.execution_amendment_planning_reservation',
+        'execution_amendment_planning_reservation'),
     (15, 'moa.execution_replan_stop_intent', 'execution_replan_stop_intent'),
     (14, 'moa.execution_amendment_receipt', 'execution_amendment_receipt'),
     (13, 'moa.execution_task_checkpoint', 'execution_task_checkpoint'),
@@ -3127,10 +3256,10 @@ CROSS JOIN (VALUES
         'execution_terminal_archive_segment'),
     (1, 'moa.execution_terminal_archive', 'execution_terminal_archive')
 ) AS execution_stage(stage_offset, stage_name, table_name)
-WHERE compensation.stage_name = 'moa.execution_compensation';
+WHERE planner_audit.stage_name = 'moa.execution_planner_call_audit';
 
 COMMENT ON TABLE moa.tenant_purge_catalog IS
-    'Closed 157-table tenant-offboarding residue surface. Fleet capacity-bucket rows, sandbox provider accounts, and inventory findings are global maintenance authority; the two nullable-scope simulator certification authority tables are also intentionally global and absent.';
+    'Closed 159-table tenant-offboarding residue surface. Fleet capacity-bucket rows, sandbox provider accounts, and inventory findings are global maintenance authority; the two nullable-scope simulator certification authority tables are also intentionally global and absent.';
 
 DO $execution_long_horizon_purge_function$
 DECLARE
@@ -3144,8 +3273,8 @@ BEGIN
         RAISE EXCEPTION 'unexpected V58 tenant purge function definition'
             USING ERRCODE = '55000';
     END IF;
-    replacement := replace(predecessor, 'catalog_count <> 142', 'catalog_count <> 157');
-    replacement := replace(replacement, 'exactly 142 tables', 'exactly 157 tables');
+    replacement := replace(predecessor, 'catalog_count <> 142', 'catalog_count <> 159');
+    replacement := replace(replacement, 'exactly 142 tables', 'exactly 159 tables');
     EXECUTE replacement;
 END
 $execution_long_horizon_purge_function$;

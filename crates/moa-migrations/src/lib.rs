@@ -310,7 +310,7 @@ async fn rewrite_archived_session_statuses(client: &mut Client) -> Result<u64> {
         .context("begin archived session status rewrite")?;
     let rows = tx
         .query(
-            "SELECT session_id::TEXT AS session_id, payload, content_digest \
+            "SELECT session_id, payload, content_digest \
              FROM public.session_event_archives \
              ORDER BY session_id FOR UPDATE",
             &[],
@@ -320,7 +320,7 @@ async fn rewrite_archived_session_statuses(client: &mut Client) -> Result<u64> {
 
     let mut rewrites = Vec::new();
     for row in rows {
-        let session_id: String = row.get("session_id");
+        let session_id: uuid::Uuid = row.get("session_id");
         let payload: Vec<u8> = row.get("payload");
         let stored_digest: Vec<u8> = row.get("content_digest");
         let actual_digest = blake3::hash(&payload);
@@ -361,7 +361,7 @@ async fn rewrite_archived_session_statuses(client: &mut Client) -> Result<u64> {
             .execute(
                 "UPDATE public.session_event_archives \
                  SET payload = $2, content_digest = $3 \
-                 WHERE session_id = $1::UUID",
+                 WHERE session_id = $1",
                 &[session_id, payload, digest],
             )
             .await
@@ -382,14 +382,14 @@ async fn rewrite_archived_session_statuses(client: &mut Client) -> Result<u64> {
 
     let verification_rows = tx
         .query(
-            "SELECT session_id::TEXT AS session_id, payload, content_digest \
+            "SELECT session_id, payload, content_digest \
              FROM public.session_event_archives ORDER BY session_id",
             &[],
         )
         .await
         .context("verify rewritten session event archives")?;
     for row in verification_rows {
-        let session_id: String = row.get("session_id");
+        let session_id: uuid::Uuid = row.get("session_id");
         let payload: Vec<u8> = row.get("payload");
         let stored_digest: Vec<u8> = row.get("content_digest");
         if stored_digest.as_slice() != blake3::hash(&payload).as_bytes() {

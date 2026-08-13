@@ -173,7 +173,7 @@ its operation enum has exactly eight variants:
 8. `Output { value }` resolves and validates the terminal output.
 
 Every wait expiry uses `ExecutionWaitPolicy { expiry, on_expiry }`, where
-`on_expiry` is `FailTask`, `FailTask`, or `ContinueWith { output }`.
+`on_expiry` is `FailTask` or `ContinueWith { output }`.
 `ExecutionTemporalTarget::At { at }` is an exact UTC instant and is allowed in
 one-off compiled plans. `After { delay_seconds }` is nonzero and resolves from
 the instant the task actually enters its wait, not from planning or run
@@ -247,6 +247,12 @@ consume one logical task.
 `ExecutionConfig` provides one planner repair attempt. It either regenerates from
 the frozen context after a strict response-schema rejection or repairs one parsed
 compiler-rejected candidate; malformed raw provider output is never replayed.
+Every automatic amendment-planner provider call, including that sole repair,
+atomically reserves its conservative cost and token ceiling from the live run
+before gateway dispatch, reconciles authoritative response usage exactly once,
+and persists the run revision and call ordinal that incurred the spend. A denied
+reservation issues no gateway call. Restate replay reuses the same reservation,
+gateway idempotency key, settlement, and planner-call audit attribution.
 `repeated_failure_limit = 3`, and tenant-independent defaults of
 `max_tasks = 10_000`, `max_tokens = 10_000_000`,
 `max_tool_calls = 100_000`, `max_retrieved_bytes = 10_000_000_000`, and
@@ -685,7 +691,7 @@ policy.
 | Security events | Postgres | Signed OCSF v1.3 events in `security_events` |
 
 The central PostgreSQL migration inventory is a fresh-install-only chain of
-exactly 57 files, `V000001..V000057`. The ownership manifest contains one entry
+exactly 60 files, `V000001..V000060`. The ownership manifest contains one entry
 for every logical table family. `xtask check-migrations` rejects gaps, extra
 files, and missing or stale ownership entries. The 2026-08-03 hard-reset epoch
 removes the retired per-user token-vault tables from their original catalog

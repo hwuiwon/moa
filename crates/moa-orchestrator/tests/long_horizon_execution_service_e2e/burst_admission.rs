@@ -141,6 +141,18 @@ async fn one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_a
     let controller = fixture
         .fixture_capability()
         .context("thousand-wake fixture omitted capability controller")?;
+    // `PHASE_TIMEOUT` bounds the first drain wave, not the wait for the timer that
+    // releases it. The runs are parked on an absolute wake that is still in the future
+    // here — by the assertion above, at least `PRE_WAKE_MARGIN_SECONDS` of it remains,
+    // and after fast admission far more than that. Starting a 90s observation now
+    // measures the pre-wake window instead of the drain and fails before the wake can
+    // fire, and it fails *sooner* the faster admission was. Wait out the remaining
+    // pre-wake window first, then bound the wave itself.
+    let until_wake = common_wake
+        .signed_duration_since(Utc::now())
+        .to_std()
+        .unwrap_or(Duration::ZERO);
+    tokio::time::sleep(until_wake).await;
     controller.wait_for_calls(FLEET_CAP, PHASE_TIMEOUT).await?;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(controller.calls().len(), FLEET_CAP);
@@ -229,7 +241,12 @@ async fn one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_a
         maximum_oldest_ready_seconds <= 60.0,
         "oldest ready task exceeded bounded age: {maximum_oldest_ready_seconds}s"
     );
-    await_tenant_run_count(&pool, tenant_id, "completed", RUN_COUNT, PHASE_TIMEOUT).await?;
+    // The terminal settle is the tail of the same fleet-capped drain the loop above
+    // budgets `DRAIN_BUDGET` for: every one of `RUN_COUNT` runs still has to finish
+    // through a `FLEET_CAP` slot. `PHASE_TIMEOUT` bounds a single observation, so
+    // applying it here measures one phase against work that is `RUN_COUNT / FLEET_CAP`
+    // waves deep and fails partway through steady progress rather than on a stall.
+    await_tenant_run_count(&pool, tenant_id, "completed", RUN_COUNT, DRAIN_BUDGET).await?;
     let first = status(&test, &runs[0]).await?;
     let last = status(&test, &runs[RUN_COUNT - 1]).await?;
     assert_eq!(first.output, Some(json!({"completed": true})));

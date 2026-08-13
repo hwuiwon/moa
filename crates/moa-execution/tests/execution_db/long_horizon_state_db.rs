@@ -3,8 +3,9 @@
 use moa_artifacts::execution_plan::{ExecutionNode, ExecutionOperation};
 use moa_execution::repository::ready::{ReadyMaterializationOutcome, ReadyMaterializationRequest};
 use moa_execution::repository::task::{
-    ActiveAttemptLiveness, TaskAttemptFence, TaskAttemptProgressOutcome, TaskAttemptStartOutcome,
-    classify_active_attempt_liveness,
+    ActiveAttemptLiveness, NewTaskAttemptCheckpoint, TaskAttemptCheckpointKind,
+    TaskAttemptContinuationYieldOutcome, TaskAttemptFence, TaskAttemptProgressOutcome,
+    TaskAttemptReleaseClaimOutcome, TaskAttemptStartOutcome, classify_active_attempt_liveness,
 };
 use moa_execution::repository::trigger::{
     ExecutionTriggerNoOp, ExecutionWatchdogDeferOutcome, ExecutionWatchdogTriggerOutcome,
@@ -392,7 +393,7 @@ async fn attempt_heartbeat_keeps_a_progressing_attempt_live_while_a_wedged_one_s
     let heartbeat_at = progressing_started_at + Duration::seconds(90);
     assert_eq!(
         repository
-            .record_task_attempt_progress(progressing_fence, heartbeat_at)
+            .record_task_attempt_progress(progressing_fence, heartbeat_at, None)
             .await?,
         TaskAttemptProgressOutcome::Applied
     );
@@ -414,6 +415,7 @@ async fn attempt_heartbeat_keeps_a_progressing_attempt_live_while_a_wedged_one_s
             &config,
             progressing_fence.attempt_deadline_at,
             progressing.last_progress_at,
+            None,
             observed_at,
         ),
         ActiveAttemptLiveness::Live,
@@ -424,6 +426,7 @@ async fn attempt_heartbeat_keeps_a_progressing_attempt_live_while_a_wedged_one_s
             &config,
             wedged_fence.attempt_deadline_at,
             wedged.last_progress_at,
+            None,
             observed_at,
         ),
         ActiveAttemptLiveness::Stalled,
@@ -433,6 +436,248 @@ async fn attempt_heartbeat_keeps_a_progressing_attempt_live_while_a_wedged_one_s
         wedged_fence.attempt_deadline_at - observed_at >= Duration::minutes(7),
         "the stall must be observable long before the admission deadline exposes it"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn declared_step_bound_defers_the_watchdog_it_kept_alive_db() -> TestResult {
+    // Pins: when a step declares a bound wider than the staleness floor, the liveness
+    // classifier and the watchdog deferral must derive their window from that same bound.
+    // Deriving the deferral from the bare floor instead produces a state with no exit: the
+    // attempt classifies Live because of the wider bound, but the floor-derived next
+    // observation cannot advance past the due time that just fired, so the deferral refuses,
+    // the caller treats a still-current receiver as an error, and the delivery retries
+    // forever behind the fleet-serialized drain. Only a bound wider than the floor reaches
+    // this; an unbounded step defers normally and hides it.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let repository = ExecutionRepository::new(pool.clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let config = ExecutionConfig {
+        attempt_heartbeat_staleness_seconds: 2,
+        active_attempt_timeout_seconds: 600,
+        ..ExecutionConfig::default()
+    };
+    let (_run_uid, started) = start_admitted_attempts(
+        &repository,
+        tenant_id,
+        "watchdog-step-bound-deferral",
+        &config,
+        &["bounded"],
+    )
+    .await?;
+    let [(fence, _)] = started[..] else {
+        panic!("one attempt must start");
+    };
+
+    let armed_due_at: chrono::DateTime<Utc> =
+        sqlx::query_scalar("SELECT due_at FROM moa.execution_trigger WHERE trigger_uid=$1")
+            .bind(fence.watchdog_trigger_uid)
+            .fetch_one(&pool)
+            .await?;
+
+    // The step declares far more than the two-second floor, as a long sandbox command or an
+    // external provider start does.
+    let bound_seconds = 120_u32;
+    let heartbeat_at: chrono::DateTime<Utc> =
+        sqlx::query_scalar("SELECT now()").fetch_one(&pool).await?;
+    assert_eq!(
+        repository
+            .record_task_attempt_progress(fence, heartbeat_at, Some(bound_seconds))
+            .await?,
+        TaskAttemptProgressOutcome::Applied
+    );
+
+    // Past the floor, well inside the declared bound: still working, not stalled.
+    let observed_at = heartbeat_at + Duration::seconds(30);
+    assert_eq!(
+        classify_active_attempt_liveness(
+            &config,
+            fence.attempt_deadline_at,
+            heartbeat_at,
+            Some(Duration::seconds(i64::from(bound_seconds))),
+            observed_at,
+        ),
+        ActiveAttemptLiveness::Live,
+        "a step inside its declared bound is live even past the staleness floor"
+    );
+
+    // The deferral must agree, and must move strictly forward. A floor-derived window would
+    // land at heartbeat + 2s, which is not past the already-armed due time, and refuse.
+    let ExecutionWatchdogDeferOutcome::Deferred { next_due_at } = repository
+        .defer_task_attempt_watchdog(scope, &config, fence.watchdog_trigger_uid)
+        .await?
+    else {
+        panic!(
+            "an attempt kept alive by its declared step bound must be rearmed on that same bound"
+        );
+    };
+    assert!(
+        next_due_at > armed_due_at,
+        "the rearmed observation must advance past the due time that just fired"
+    );
+    assert!(
+        next_due_at >= heartbeat_at + Duration::seconds(i64::from(bound_seconds)),
+        "the rearmed observation must outlast the bound the step declared"
+    );
+    assert_eq!(
+        repository
+            .prepare_watchdog_trigger(scope, fence.watchdog_trigger_uid)
+            .await?,
+        ExecutionWatchdogTriggerOutcome::NoOp(ExecutionTriggerNoOp::NotDue),
+        "a rearmed watchdog must stop firing until its next observation"
+    );
+
+    // A recovered delivery can journal Live just before the boundary while the deferral
+    // transaction observes the database clock just after it. The same delivery identity must
+    // still advance once; otherwise Restate memoizes RetryDelivery and revalidation loops forever.
+    let raced_progress_at: chrono::DateTime<Utc> =
+        sqlx::query_scalar("SELECT now()").fetch_one(&pool).await?;
+    assert_eq!(
+        repository
+            .record_task_attempt_progress(fence, raced_progress_at, None)
+            .await?,
+        TaskAttemptProgressOutcome::Applied
+    );
+    let raced_at = raced_progress_at + Duration::seconds(2);
+    sqlx::query("UPDATE moa.execution_trigger SET state='pending',due_at=$2 WHERE trigger_uid=$1")
+        .bind(fence.watchdog_trigger_uid)
+        .bind(raced_at)
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE moa.execution_dispatch_outbox SET state='pending',not_before_at=$2 \
+         WHERE trigger_uid=$1 AND dispatch_kind='trigger_delivery'",
+    )
+    .bind(fence.watchdog_trigger_uid)
+    .bind(raced_at)
+    .execute(&pool)
+    .await?;
+    tokio::time::sleep(std::time::Duration::from_millis(2_050)).await;
+    let ExecutionWatchdogDeferOutcome::Deferred { next_due_at } = repository
+        .defer_task_attempt_watchdog(scope, &config, fence.watchdog_trigger_uid)
+        .await?
+    else {
+        panic!("a boundary-crossing RetryDelivery must receive a fresh delivery identity");
+    };
+    assert!(next_due_at > raced_at);
+    Ok(())
+}
+
+#[tokio::test]
+async fn three_agent_slices_keep_one_logical_task_reservation_and_reset_step_bound_db() -> TestResult
+{
+    // Pins: bounded continuations release only active capacity. Redispatching the same logical
+    // task must keep its original task-budget reservation, while each successor slice starts
+    // without inheriting the predecessor step's wider heartbeat bound.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let repository = ExecutionRepository::new(pool);
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let config = ExecutionConfig::default();
+    let (run_uid, started) = start_admitted_attempts(
+        &repository,
+        tenant_id,
+        "three-slice-logical-reservation",
+        &config,
+        &["agent"],
+    )
+    .await?;
+    let [(mut fence, _)] = started[..] else {
+        panic!("one first slice must start");
+    };
+    let initially_reserved = repository
+        .load_run(scope, run_uid)
+        .await?
+        .expect("run remains visible")
+        .reserved;
+    assert_eq!(initially_reserved.tasks, 1);
+
+    for completed_slice in 1..=2 {
+        let heartbeat_at = moa_test_support::fixtures::pg_now();
+        assert_eq!(
+            repository
+                .record_task_attempt_progress(fence, heartbeat_at, Some(120))
+                .await?,
+            TaskAttemptProgressOutcome::Applied
+        );
+        let active = listed_task(&repository, scope, run_uid, fence.task_id).await?;
+        assert_eq!(active.progress_step_bound_seconds, Some(120));
+        let TaskAttemptReleaseClaimOutcome::Applied(releasing) = repository
+            .begin_task_attempt_release(
+                fence,
+                active.generation,
+                "bounded_agent_continuation",
+                heartbeat_at,
+            )
+            .await?
+        else {
+            panic!("the active slice must enter its release boundary");
+        };
+        assert_eq!(releasing.task.progress_step_bound_seconds, None);
+        let TaskAttemptContinuationYieldOutcome::Applied { task: ready, .. } = repository
+            .yield_task_attempt_continuation(NewTaskAttemptCheckpoint {
+                fence,
+                task_generation: active.generation,
+                kind: TaskAttemptCheckpointKind::AgentContinuation,
+                schema_version: 1,
+                payload: json!({"state":{"kind":"agent","slice":completed_slice}}),
+                workspace_release_receipt: None,
+                created_at: heartbeat_at,
+            })
+            .await?
+        else {
+            panic!("each bounded slice must checkpoint and return the task to ready storage");
+        };
+        assert_eq!(ready.progress_step_bound_seconds, None);
+        assert_eq!(
+            repository
+                .load_run(scope, run_uid)
+                .await?
+                .expect("run remains visible")
+                .reserved,
+            initially_reserved,
+            "yield must retain exactly one logical-task reservation"
+        );
+
+        let admission = repository
+            .admit_ready_attempts(&config, 1, Utc::now())
+            .await?
+            .admitted
+            .into_iter()
+            .next()
+            .expect("successor bounded slice must be admitted");
+        assert_eq!(admission.attempt_generation, fence.attempt_generation + 1);
+        fence = TaskAttemptFence {
+            tenant_id: admission.tenant_id,
+            run_uid: admission.run_uid,
+            task_id: admission.task_id,
+            controller_generation: admission.controller_generation,
+            attempt_generation: admission.attempt_generation,
+            dispatch_uid: admission.dispatch_uid,
+            capacity_reservation_uid: admission.capacity_reservation_uid,
+            watchdog_trigger_uid: admission.watchdog_trigger_uid,
+            attempt_deadline_at: admission.attempt_deadline_at,
+        };
+        let TaskAttemptStartOutcome::Started(started) =
+            repository.start_task_attempt(fence).await?
+        else {
+            panic!("successor admission must start");
+        };
+        assert_eq!(started.task.progress_step_bound_seconds, None);
+        assert_eq!(
+            repository
+                .load_run(scope, run_uid)
+                .await?
+                .expect("run remains visible")
+                .reserved,
+            initially_reserved,
+            "redispatch must reuse rather than duplicate the logical-task reservation"
+        );
+    }
+    assert_eq!(fence.attempt_generation, 3, "the third slice is active");
     Ok(())
 }
 
@@ -491,7 +736,7 @@ async fn stalled_attempt_watchdog_becomes_deliverable_before_its_deadline_db() -
     for fence in [progressing_fence, capped_fence] {
         assert_eq!(
             repository
-                .record_task_attempt_progress(fence, heartbeat_at)
+                .record_task_attempt_progress(fence, heartbeat_at, None)
                 .await?,
             TaskAttemptProgressOutcome::Applied
         );
@@ -517,6 +762,7 @@ async fn stalled_attempt_watchdog_becomes_deliverable_before_its_deadline_db() -
             &config,
             wedged_fence.attempt_deadline_at,
             wedged.last_progress_at,
+            None,
             observed_at,
         ),
         ActiveAttemptLiveness::Stalled

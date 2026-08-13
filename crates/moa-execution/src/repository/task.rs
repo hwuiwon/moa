@@ -122,36 +122,76 @@ impl ActiveAttemptLiveness {
     }
 }
 
-/// Returns the configured heartbeat staleness window as a chrono duration.
+/// Returns the staleness window for an attempt whose in-flight step declared `step_bound`.
 ///
 /// Shared by watchdog arming, watchdog deferral, and liveness classification so all three
-/// derive the same window from one configured value.
-pub fn attempt_heartbeat_staleness_window(config: &ExecutionConfig) -> Result<chrono::TimeDelta> {
-    i64::try_from(config.attempt_heartbeat_staleness_seconds)
+/// derive the same window from one configured value and one recorded step bound.
+///
+/// The heartbeat is written at step boundaries and never while a step runs, so the window
+/// has to outlast the step in flight or it classifies a working attempt as stalled. A
+/// single global window would therefore have to clear the slowest step any attempt can
+/// take, which pushes detection for every attempt out to the worst case. Taking the bound
+/// from the step actually running keeps the common case tight: a step that declared
+/// nothing gets the configured floor, and one that declared a long timeout gets exactly
+/// that plus [`ATTEMPT_STEP_BOUND_MARGIN_SECONDS`].
+///
+/// The floor also applies to declared bounds shorter than it, because scheduling jitter
+/// around a two-second step must not read as a stall.
+pub fn attempt_heartbeat_staleness_window(
+    config: &ExecutionConfig,
+    step_bound: Option<chrono::TimeDelta>,
+) -> Result<chrono::TimeDelta> {
+    let floor = i64::try_from(config.attempt_heartbeat_staleness_seconds)
         .ok()
         .and_then(chrono::TimeDelta::try_seconds)
         .ok_or_else(|| Error::InvalidRepositoryInput {
             message: "attempt heartbeat staleness window exceeds chrono duration".to_string(),
-        })
+        })?;
+    let Some(bound) = step_bound else {
+        return Ok(floor);
+    };
+    let margin =
+        chrono::TimeDelta::try_seconds(ATTEMPT_STEP_BOUND_MARGIN_SECONDS).ok_or_else(|| {
+            Error::InvalidRepositoryInput {
+                message: "attempt step bound margin exceeds chrono duration".to_string(),
+            }
+        })?;
+    let bounded = bound
+        .checked_add(&margin)
+        .ok_or_else(|| Error::InvalidRepositoryInput {
+            message: "attempt step bound plus margin exceeds chrono duration".to_string(),
+        })?;
+    Ok(floor.max(bounded))
 }
 
-/// Classifies one active attempt from its admission deadline and last durable progress.
+/// Grace added to a declared step bound before the step is treated as stalled.
+///
+/// A step that promised N seconds is not late at exactly N: the promise bounds the work,
+/// not the dispatch, result write, and clock skew around it. Without this margin every
+/// step that legitimately runs to its own limit races the watchdog.
+pub const ATTEMPT_STEP_BOUND_MARGIN_SECONDS: i64 = 30;
+
+/// Classifies one active attempt from its deadline, last durable progress, and step bound.
 ///
 /// The deadline is evaluated first so the pre-existing absolute-deadline behaviour is
 /// unchanged; heartbeat staleness only ever classifies an attempt that is still inside its
 /// deadline. A staleness window is only meaningful when it is shorter than the attempt
-/// timeout, which [`moa_config::ExecutionConfig::validate`] enforces.
+/// timeout, which [`moa_config::ExecutionConfig::validate`] enforces for the floor.
+///
+/// `step_bound` is the bound recorded for the step in flight, or `None` when the attempt is
+/// between steps or running a step that declares no bound.
 #[must_use]
 pub fn classify_active_attempt_liveness(
     config: &ExecutionConfig,
     attempt_deadline_at: DateTime<Utc>,
     last_progress_at: DateTime<Utc>,
+    step_bound: Option<chrono::TimeDelta>,
     observed_at: DateTime<Utc>,
 ) -> ActiveAttemptLiveness {
     if attempt_deadline_at <= observed_at {
         return ActiveAttemptLiveness::DeadlineExceeded;
     }
-    let Ok(staleness) = attempt_heartbeat_staleness_window(config) else {
+    let Ok(staleness) = attempt_heartbeat_staleness_window(config, step_bound) else {
         // An unrepresentable window can never elapse, so the deadline stays the only authority.
         return ActiveAttemptLiveness::Live;
     };
@@ -315,7 +355,7 @@ impl TaskAttemptCheckpointKind {
         }
     }
 
-    fn parse(value: &str) -> Result<Self> {
+    pub(super) fn parse(value: &str) -> Result<Self> {
         match value {
             "agent_continuation" => Ok(Self::AgentContinuation),
             "capability_review" => Ok(Self::CapabilityReview),
@@ -725,6 +765,7 @@ impl ExecutionRepository {
         let row = sqlx::query(
             "UPDATE moa.execution_task SET status='ready', attempt_state='idle', \
              attempt_generation=$5, waiting_since=NULL, ready_at=$6, \
+             progress_step_bound_seconds=NULL, \
              last_progress_at=GREATEST(last_progress_at,$6), \
              generation_history=generation_history || jsonb_build_array(jsonb_build_object( \
                 'kind','action_review_resolved','review_uid',$4::TEXT,'recorded_at',$6)), \
@@ -861,6 +902,7 @@ impl ExecutionRepository {
         }
         let row = sqlx::query(
             "UPDATE moa.execution_task SET attempt_state='cancelling', external_job_uid=$5, \
+             progress_step_bound_seconds=NULL, \
              last_progress_at=GREATEST(last_progress_at,$6), \
              generation_history=generation_history || \
              jsonb_build_array(jsonb_build_object( \
@@ -949,6 +991,7 @@ impl ExecutionRepository {
         }
         let row = sqlx::query(
             "UPDATE moa.execution_task SET attempt_state='cancelling', \
+             progress_step_bound_seconds=NULL, \
              last_progress_at=GREATEST(last_progress_at,$5), \
              generation_history=generation_history || jsonb_build_array(jsonb_build_object( \
                  'kind','bounded_attempt_release_claimed','dispatch_uid',$4::TEXT, \
@@ -1093,6 +1136,7 @@ impl ExecutionRepository {
         let row = sqlx::query(
             "UPDATE moa.execution_task SET status='waiting_review', attempt_state='waiting', \
              waiting_since=$5, active_dispatch_uid=NULL, attempt_deadline_at=NULL, \
+             progress_step_bound_seconds=NULL, \
              last_progress_at=GREATEST(last_progress_at,$5), updated_at=NOW() \
              WHERE run_uid=$1 AND task_id=$2 AND attempt_generation=$3 \
                AND active_dispatch_uid=$4 AND status='running' RETURNING *",
@@ -1260,6 +1304,7 @@ impl ExecutionRepository {
         let row = sqlx::query(
             "UPDATE moa.execution_task SET status='ready', attempt_state='idle', ready_at=$5, \
              waiting_since=NULL, active_dispatch_uid=NULL, attempt_deadline_at=NULL, \
+             progress_step_bound_seconds=NULL, \
              attempt_generation=$6, last_progress_at=GREATEST(last_progress_at,$5), \
              updated_at=NOW() \
              WHERE run_uid=$1 AND task_id=$2 AND attempt_generation=$3 \
@@ -1368,6 +1413,7 @@ impl ExecutionRepository {
              SET status = 'running', attempt_state = 'running', \
                  attempt_started_at = COALESCE(attempt_started_at, NOW()), \
                  started_at = COALESCE(started_at, NOW()), last_progress_at = NOW(), \
+                 progress_step_bound_seconds = NULL, \
                  updated_at = NOW() \
              WHERE run_uid = $1 AND task_id = $2 AND status = 'dispatching' \
                AND attempt_generation = $3 AND active_dispatch_uid = $4 \
@@ -1577,7 +1623,8 @@ impl ExecutionRepository {
                 };
                 let row = sqlx::query(
                     "UPDATE moa.execution_task SET active_dispatch_uid=NULL, \
-                         attempt_deadline_at=NULL, generation_history=generation_history || \
+                         attempt_deadline_at=NULL, progress_step_bound_seconds=NULL, \
+                         generation_history=generation_history || \
                          jsonb_build_array($5::JSONB), \
                          last_progress_at=GREATEST(last_progress_at,$6), updated_at=NOW() \
                      WHERE run_uid=$1 AND task_id=$2 AND attempt_generation=$3 \
@@ -1618,6 +1665,7 @@ impl ExecutionRepository {
                     "UPDATE moa.execution_task SET status='ready', attempt_state='idle', \
                          attempt_generation=$5, active_dispatch_uid=NULL, \
                          attempt_deadline_at=NULL, ready_at=$6, waiting_since=NULL, \
+                         progress_step_bound_seconds=NULL, \
                          generation_history=generation_history || jsonb_build_array($7::JSONB), \
                          last_progress_at=GREATEST(last_progress_at,$6), updated_at=NOW() \
                      WHERE run_uid=$1 AND task_id=$2 AND attempt_generation=$3 \
@@ -1679,11 +1727,29 @@ impl ExecutionRepository {
     }
 
     /// Records monotonic progress for one exact active task attempt.
+    ///
+    /// `step_bound_seconds` is the upper bound declared by the step the attempt is about to
+    /// enter, or `None` when the attempt is between steps. The watchdog widens its staleness
+    /// window to that bound, so a heartbeat written before a long declared step is what keeps
+    /// the step from being classified as stalled while it legitimately runs.
     pub async fn record_task_attempt_progress(
         &self,
         fence: TaskAttemptFence,
         observed_at: DateTime<Utc>,
+        step_bound_seconds: Option<u32>,
     ) -> Result<TaskAttemptProgressOutcome> {
+        let step_bound_seconds_db = step_bound_seconds
+            .map(|seconds| {
+                if seconds == 0 {
+                    return Err(Error::InvalidRepositoryInput {
+                        message: "progress step bound seconds must be positive".to_string(),
+                    });
+                }
+                i32::try_from(seconds).map_err(|_| Error::InvalidRepositoryInput {
+                    message: "progress step bound seconds exceeds PostgreSQL INTEGER".to_string(),
+                })
+            })
+            .transpose()?;
         let mut conn = ExecutionScope::ControlPlane.begin(&self.pool).await?;
         let Some(run_row) = sqlx::query(LOAD_RUN_FOR_UPDATE_SQL)
             .bind(fence.run_uid)
@@ -1716,12 +1782,18 @@ impl ExecutionRepository {
             conn.commit().await.map_err(storage_error)?;
             return Ok(TaskAttemptProgressOutcome::InvalidState);
         }
-        if observed_at <= task.last_progress_at {
-            conn.commit().await.map_err(storage_error)?;
-            return Ok(TaskAttemptProgressOutcome::Replayed);
-        }
+        let outcome = if observed_at <= task.last_progress_at {
+            TaskAttemptProgressOutcome::Replayed
+        } else {
+            TaskAttemptProgressOutcome::Applied
+        };
+        // The bound is overwritten rather than merged: it describes the step now in flight,
+        // so a stale wider bound from the previous step must not outlive it and keep the
+        // watchdog lenient after a long step has already finished.
         sqlx::query(
-            "UPDATE moa.execution_task SET last_progress_at = $5, updated_at = NOW() \
+            "UPDATE moa.execution_task \
+             SET last_progress_at = GREATEST(last_progress_at, $5), \
+                 progress_step_bound_seconds = $6, updated_at = NOW() \
              WHERE run_uid = $1 AND task_id = $2 AND attempt_generation = $3 \
                AND active_dispatch_uid = $4 AND attempt_state = 'running'",
         )
@@ -1730,9 +1802,14 @@ impl ExecutionRepository {
         .bind(to_i64(fence.attempt_generation, "attempt generation")?)
         .bind(fence.dispatch_uid)
         .bind(observed_at)
+        .bind(step_bound_seconds_db)
         .execute(conn.as_mut())
         .await
         .map_err(sqlx_error)?;
+        if outcome == TaskAttemptProgressOutcome::Replayed {
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(outcome);
+        }
         sqlx::query(
             "UPDATE moa.execution_run SET last_progress_at = GREATEST(last_progress_at, $2), \
              updated_at = NOW() WHERE run_uid = $1",
@@ -1743,7 +1820,7 @@ impl ExecutionRepository {
         .await
         .map_err(sqlx_error)?;
         conn.commit().await.map_err(storage_error)?;
-        Ok(TaskAttemptProgressOutcome::Applied)
+        Ok(outcome)
     }
 
     /// Persists one bounded task outcome, releases active capacity, and wakes its controller.
@@ -2067,6 +2144,7 @@ impl ExecutionRepository {
             "UPDATE moa.execution_task SET status='ready', attempt_state='idle', \
              attempt_generation=attempt_generation+1, active_dispatch_uid=NULL, \
              attempt_deadline_at=NULL, ready_at=$5, waiting_since=NULL, \
+             progress_step_bound_seconds=NULL, \
              last_progress_at=GREATEST(last_progress_at,$5), \
              generation_history=generation_history || jsonb_build_array(jsonb_build_object( \
                 'kind','pause_release_finalized','dispatch_uid',$4::TEXT, \
@@ -2390,6 +2468,7 @@ impl ExecutionRepository {
              SET status = $3, attempt_state = $4, generation = $5, \
                  attempt_generation = $6, attempt = CASE WHEN $7::BOOLEAN THEN attempt + 1 ELSE attempt END, \
                  active_dispatch_uid = NULL, attempt_deadline_at = NULL, \
+                 progress_step_bound_seconds = NULL, \
                  waiting_since = CASE WHEN $4 = 'waiting' THEN $8 ELSE NULL END, \
                  ready_at = $9, last_progress_at = GREATEST(last_progress_at, $8), \
                  generation_history = generation_history || jsonb_build_array($11::JSONB), \
@@ -2671,6 +2750,7 @@ impl ExecutionRepository {
         let row = sqlx::query(
             "UPDATE moa.execution_task SET status='ready',attempt_state='idle', \
                  attempt_generation=$5,active_dispatch_uid=NULL,attempt_deadline_at=NULL, \
+                 progress_step_bound_seconds=NULL, \
                  waiting_since=NULL,ready_at=$6, \
                  last_progress_at=GREATEST(last_progress_at,$6), \
                  generation_history=generation_history || jsonb_build_array(jsonb_build_object( \
@@ -2834,6 +2914,7 @@ impl ExecutionRepository {
             "UPDATE moa.execution_task SET status='waiting_external',attempt_state='waiting', \
                  waiting_since=$5,external_job_uid=$6,active_dispatch_uid=NULL, \
                  attempt_deadline_at=NULL, \
+                 progress_step_bound_seconds=NULL, \
                  last_progress_at=GREATEST(last_progress_at,$5),updated_at=NOW() \
              WHERE run_uid=$1 AND task_id=$2 AND attempt_generation=$3 \
                AND active_dispatch_uid=$4 AND status='running' AND attempt_state='running' \
@@ -3050,7 +3131,7 @@ impl ExecutionRepository {
             "UPDATE moa.execution_task \
              SET status = 'waiting_external', attempt_state = 'waiting', \
                  waiting_since = $5, external_job_uid = $6, active_dispatch_uid = NULL, \
-                 attempt_deadline_at = NULL, \
+                 attempt_deadline_at = NULL, progress_step_bound_seconds = NULL, \
                  last_progress_at = GREATEST(last_progress_at, $5), updated_at = NOW() \
              WHERE run_uid = $1 AND task_id = $2 AND attempt_generation = $3 \
                AND active_dispatch_uid = $4 RETURNING *",
@@ -3275,6 +3356,7 @@ pub async fn settle_external_job_terminal_in_conn(
             let row = sqlx::query(
                 "UPDATE moa.execution_task SET status='ready', attempt_state='idle', \
                  waiting_since=NULL, ready_at=$3, external_job_uid=NULL, \
+                 progress_step_bound_seconds=NULL, \
                  attempt_generation=$4, last_progress_at=GREATEST(last_progress_at,$3), \
                  updated_at=NOW() \
                  WHERE run_uid=$1 AND task_id=$2 AND status='waiting_external' \
@@ -3539,7 +3621,7 @@ async fn persist_task_attempt_checkpoint_for_state_in_conn(
     )))
 }
 
-fn external_start_checkpoint_payload_is_provisional(
+pub(super) fn external_start_checkpoint_payload_is_provisional(
     kind: TaskAttemptCheckpointKind,
     payload: &Value,
 ) -> bool {
@@ -3927,6 +4009,7 @@ pub(super) async fn settle_unstarted_task_attempt_in_conn(
     let row = sqlx::query(
         "UPDATE moa.execution_task SET status='ready', attempt_state='idle', \
              attempt_generation=$5, active_dispatch_uid=NULL, attempt_deadline_at=NULL, \
+             progress_step_bound_seconds=NULL, \
              ready_at=$6, waiting_since=NULL, generation_history=generation_history || \
              jsonb_build_array($7::JSONB), \
              last_progress_at=GREATEST(last_progress_at,$6), updated_at=NOW() \
@@ -5228,8 +5311,8 @@ impl ExecutionRepository {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveAttemptLiveness, TaskAttemptCheckpointKind, TaskAttemptFence,
-        UnstartedTaskAttemptDisposition, append_agent_resume_input,
+        ATTEMPT_STEP_BOUND_MARGIN_SECONDS, ActiveAttemptLiveness, TaskAttemptCheckpointKind,
+        TaskAttemptFence, UnstartedTaskAttemptDisposition, append_agent_resume_input,
         classify_active_attempt_liveness, external_start_checkpoint_payload_is_provisional,
         paused_task_attempt_release_history_matches, task_release_receipt_is_verified_absence,
         unstarted_task_attempt_history_matches,
@@ -5512,6 +5595,7 @@ mod tests {
                 &config,
                 deadline,
                 observed_at - Duration::seconds(30),
+                None,
                 observed_at,
             ),
             ActiveAttemptLiveness::Live
@@ -5519,7 +5603,7 @@ mod tests {
 
         // Same instant, but the attempt has committed nothing since it started.
         assert_eq!(
-            classify_active_attempt_liveness(&config, deadline, started_at, observed_at),
+            classify_active_attempt_liveness(&config, deadline, started_at, None, observed_at),
             ActiveAttemptLiveness::Stalled
         );
 
@@ -5529,6 +5613,7 @@ mod tests {
                 &config,
                 deadline,
                 started_at,
+                None,
                 started_at + Duration::seconds(60),
             ),
             ActiveAttemptLiveness::Stalled
@@ -5538,6 +5623,7 @@ mod tests {
                 &config,
                 deadline,
                 started_at,
+                None,
                 started_at + Duration::seconds(59),
             ),
             ActiveAttemptLiveness::Live
@@ -5545,11 +5631,70 @@ mod tests {
 
         // A progressing attempt that reaches its deadline is deadline-exceeded, never stalled.
         assert_eq!(
-            classify_active_attempt_liveness(&config, deadline, deadline, deadline),
+            classify_active_attempt_liveness(&config, deadline, deadline, None, deadline),
             ActiveAttemptLiveness::DeadlineExceeded
         );
         assert!(!ActiveAttemptLiveness::Live.is_expired());
         assert!(ActiveAttemptLiveness::Stalled.is_expired());
         assert!(ActiveAttemptLiveness::DeadlineExceeded.is_expired());
+    }
+
+    #[test]
+    fn declared_step_bound_widens_only_its_own_stall_window() {
+        // Pins: a step that declared a bound longer than the configured floor is Live until
+        // that bound plus the margin elapses, while an attempt between steps at the very same
+        // instant is already Stalled. Without this, one long-running step would have to raise
+        // the floor for every attempt, which is what made the stall guard barely beat the
+        // deadline it is supposed to improve on.
+        let config = ExecutionConfig {
+            attempt_heartbeat_staleness_seconds: 120,
+            active_attempt_timeout_seconds: 600,
+            ..ExecutionConfig::default()
+        };
+        let started_at = Utc::now();
+        let deadline = started_at + Duration::seconds(600);
+        let bound = Some(Duration::seconds(300));
+
+        // Past the floor, inside the declared bound: the step is still working.
+        let inside = started_at + Duration::seconds(200);
+        assert_eq!(
+            classify_active_attempt_liveness(&config, deadline, started_at, bound, inside),
+            ActiveAttemptLiveness::Live
+        );
+        // The same silence with no declared bound is a stall at the floor.
+        assert_eq!(
+            classify_active_attempt_liveness(&config, deadline, started_at, None, inside),
+            ActiveAttemptLiveness::Stalled
+        );
+
+        // The bound is not a grace-free cliff: it ends one margin after the declared bound.
+        let at_bound = started_at + Duration::seconds(300);
+        assert_eq!(
+            classify_active_attempt_liveness(&config, deadline, started_at, bound, at_bound),
+            ActiveAttemptLiveness::Live
+        );
+        assert_eq!(
+            classify_active_attempt_liveness(
+                &config,
+                deadline,
+                started_at,
+                bound,
+                at_bound + Duration::seconds(ATTEMPT_STEP_BOUND_MARGIN_SECONDS),
+            ),
+            ActiveAttemptLiveness::Stalled
+        );
+
+        // A bound shorter than the floor never tightens the window below it, so jitter around
+        // a two-second step cannot read as a stall.
+        assert_eq!(
+            classify_active_attempt_liveness(
+                &config,
+                deadline,
+                started_at,
+                Some(Duration::seconds(2)),
+                started_at + Duration::seconds(119),
+            ),
+            ActiveAttemptLiveness::Live
+        );
     }
 }

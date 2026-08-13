@@ -277,7 +277,12 @@ services:
       - |
         /usr/local/bin/moa-orchestrator wait-status-cutover \
           --database-url "$${MOA_DATABASE_URL}"
-        exec /usr/local/bin/moa-orchestrator
+        # `--port` is required, not cosmetic: the binary defaults to 10020, while
+        # restate-bootstrap registers this deployment at `http://moa-orchestrator:9080`
+        # and the session-status-migrator serves 9080 explicitly. Without it the
+        # registration fails with META0003 connection refused and no handler is ever
+        # reachable, even though the container itself looks healthy.
+        exec /usr/local/bin/moa-orchestrator --port 9080
     environment:
       HOME: /var/lib/moa
       MOA_DATABASE_URL: postgres://moa_owner:dev@postgres:5432/moa

@@ -13,6 +13,8 @@ mod materialize;
 pub mod outbox;
 mod outcome;
 mod outcome_support;
+/// Durable amendment-planner provider-call budget reservations and attribution.
+pub mod planning_budget;
 mod projection;
 pub mod ready;
 /// Durable bounded replan-stop intent handoff.
@@ -459,6 +461,11 @@ pub struct ExecutionTaskRecord {
     pub attempt_started_at: Option<DateTime<Utc>>,
     /// Latest durable progress timestamp for this logical task.
     pub last_progress_at: DateTime<Utc>,
+    /// Upper bound declared by the durable step currently in flight.
+    ///
+    /// `None` when the attempt sits between steps or runs a step that declares no bound,
+    /// in which case the configured staleness floor is the whole window.
+    pub progress_step_bound_seconds: Option<u32>,
     /// Absolute watchdog deadline for the current active attempt.
     pub attempt_deadline_at: Option<DateTime<Utc>>,
     /// Time at which the task entered its current storage-only wait.
@@ -1159,6 +1166,16 @@ fn to_u32(value: i32, field: &str) -> Result<u32> {
     u32::try_from(value).map_err(|_| Error::InvalidRepositoryData {
         message: format!("{field} is negative"),
     })
+}
+
+fn to_positive_u32(value: i32, field: &str) -> Result<u32> {
+    let value = to_u32(value, field)?;
+    if value == 0 {
+        return Err(Error::InvalidRepositoryData {
+            message: format!("{field} must be positive"),
+        });
+    }
+    Ok(value)
 }
 
 fn storage_error(error: moa_core::error::MoaError) -> Error {

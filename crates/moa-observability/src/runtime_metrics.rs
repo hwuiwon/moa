@@ -1346,11 +1346,12 @@ pub fn record_sandbox_workspace_quota_decision(
     .increment(1);
 }
 
-/// Sets fleet quota utilization for one capacity dimension.
+/// Sets the highest enforced-scope quota utilization for one capacity dimension.
 ///
-/// Callers must aggregate across tenants before recording. Per-tenant values are
-/// intentionally not accepted because a shared unlabeled gauge would otherwise
-/// expose only the last tenant observed while tenant labels would be unbounded.
+/// Callers must aggregate the tenant and provider-account scopes before recording.
+/// Per-scope values are intentionally not accepted because a shared gauge would
+/// otherwise expose only the last scope observed while identity labels would be
+/// unbounded.
 pub fn record_sandbox_workspace_quota_utilization(
     dimension: WorkspaceCapacityDimension,
     ratio: f64,

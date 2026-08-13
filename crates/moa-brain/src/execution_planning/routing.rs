@@ -484,7 +484,7 @@ fn decision_missing_input_count(decision: &ExecutionRouteDecision) -> Result<u8>
     }
 }
 
-fn route_usage(usage: TokenUsage) -> Result<ExecutionRouteUsage> {
+pub(super) fn route_usage(usage: TokenUsage) -> Result<ExecutionRouteUsage> {
     Ok(ExecutionRouteUsage {
         input_tokens_uncached: u64::try_from(usage.input_tokens_uncached).map_err(|_| {
             MoaError::ValidationError("route uncached input usage exceeds u64".to_string())

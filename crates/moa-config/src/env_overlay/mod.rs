@@ -1237,6 +1237,7 @@ const ALLOWLIST_EXACT: &[&str] = &[
     "MOA_ORCHESTRATOR_FEATURES",
     "MOA_PERSIST_TURN_METRICS",
     "MOA_PROVIDERS_OVERRIDE",
+    "MOA_RESTATE_ADMIN_URL", // maintenance-only drain observer override
     "MOA_SCIM_BASE_URL",
     "MOA_SKIP_FGA",
     "MOA_TOXIPROXY_URL",

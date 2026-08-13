@@ -89,6 +89,14 @@ fn registry_accepts_known_field_and_allowlisted_specials() {
 }
 
 #[test]
+fn strict_registry_accepts_maintenance_restate_admin_override() {
+    // Pins: the singleton maintenance drain observer may use its direct Admin
+    // endpoint override without strict environment auditing rejecting startup.
+    EnvOverlay::audit_env_registry(names(&["MOA_RESTATE_ADMIN_URL"]), true)
+        .expect("maintenance Restate Admin override must be an exact approved special variable");
+}
+
+#[test]
 fn registry_ignores_non_moa_and_lowercase_prefix_boundary() {
     // Pins: only `MOA_`-prefixed names are considered; `MOALITE` and unrelated
     // vars are left alone.

@@ -13,7 +13,7 @@ use moa_core::{
     types::completion::ToolInvocation,
     types::hands::HandHandle,
     types::hands::HandStatus,
-    types::identifiers::{ExecutionRunScopeId, ExecutionTaskScopeId, ToolCallId},
+    types::identifiers::{ExecutionRunScopeId, ToolCallId},
     types::resource::DeadlineGuard,
     types::sandbox_workspace::{ExecutionHandReleaseOwner, SandboxWorkspaceScope, WorkspaceEffect},
     types::security::ToolCapabilityId,
@@ -109,34 +109,6 @@ pub struct JournaledWorkspaceCommit<'a> {
     /// Replay-stable tool call that owns the deterministic commit operation.
     pub tool_call_id: ToolCallId,
     /// Fresh bounded budget owned by the durable commit step.
-    pub scope: ToolCallScope<'a>,
-}
-
-/// One idempotent request to publish an attempt's checkpoint while keeping its compute.
-///
-/// This is the continuation-boundary counterpart to
-/// [`ExecutionHandReleaseRequest`]. It advances the durable checkpoint head so the
-/// next slice can always restore, and deliberately performs no provider teardown:
-/// a plain model/tool boundary is not a wait, so destroying and re-provisioning the
-/// sandbox between two adjacent slices is pure loss. `retention_deadline_at` is the
-/// bound that keeps the retained hand from starving fleet admission.
-#[derive(Clone, Copy)]
-pub struct ExecutionHandRetentionRequest<'a> {
-    /// Session whose tenant owns the execution workspace and hand lease.
-    pub session: &'a SessionMeta,
-    /// Verified durable execution run.
-    pub run_id: ExecutionRunScopeId,
-    /// Verified durable execution task owning the workspace scope.
-    pub task_id: ExecutionTaskScopeId,
-    /// Logical task generation the retained compute belongs to.
-    pub logical_generation: u64,
-    /// Exact bounded attempt generation publishing this continuation checkpoint.
-    pub attempt_generation: u64,
-    /// Absolute instant after which the reaper may destroy the retained sandbox.
-    ///
-    /// Never extends the lease's existing idle or hard deadline; it only shortens.
-    pub retention_deadline_at: chrono::DateTime<chrono::Utc>,
-    /// Fresh bounded budget for checkpoint publication.
     pub scope: ToolCallScope<'a>,
 }
 
