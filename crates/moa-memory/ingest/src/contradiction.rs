@@ -34,7 +34,7 @@ const DEFAULT_FAST_BUDGET: Duration = Duration::from_millis(250);
 const DEFAULT_SLOW_BUDGET: Duration = Duration::from_secs(5);
 const DEFAULT_JUDGE_BUDGET: Duration = Duration::from_millis(200);
 const CACHE_CAPACITY: u64 = 10_000;
-const JUDGE_PROMPT: &str = include_str!("../prompts/judge.txt");
+const JUDGE_PROMPT: &str = include_str!("../prompts/judge.md");
 
 /// Conflict routing decision returned by contradiction detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

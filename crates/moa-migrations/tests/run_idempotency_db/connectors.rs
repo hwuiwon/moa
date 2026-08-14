@@ -1067,6 +1067,10 @@ async fn tenant_connector_use_grants_enforce_same_tenant_rls_and_restrict_deleti
         )
         .fetch_all(&target)
         .await?;
+        let purge_catalog_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM moa.tenant_purge_catalog")
+                .fetch_one(&target)
+                .await?;
         let purge_definition: String = sqlx::query_scalar(
             "SELECT pg_get_functiondef('moa.run_tenant_purge_batch(uuid,text)'::REGPROCEDURE)",
         )
@@ -1185,6 +1189,7 @@ async fn tenant_connector_use_grants_enforce_same_tenant_rls_and_restrict_deleti
             policy_names,
             foreign_keys,
             purge_stages,
+            purge_catalog_count,
             purge_definition,
             visible_count,
             neighbour_visible,
@@ -1215,6 +1220,7 @@ async fn tenant_connector_use_grants_enforce_same_tenant_rls_and_restrict_deleti
         policy_names,
         foreign_keys,
         purge_stages,
+        purge_catalog_count,
         purge_definition,
         visible_count,
         neighbour_visible,
@@ -1342,19 +1348,23 @@ async fn tenant_connector_use_grants_enforce_same_tenant_rls_and_restrict_deleti
         "every registry parent must use NO ACTION so inverse rows cannot disappear by cascade"
     );
     assert_eq!(
-        purge_stages,
+        purge_stages
+            .iter()
+            .map(|(_, stage_name)| stage_name.as_str())
+            .collect::<Vec<_>>(),
         vec![
-            (26, "moa.connector_action_invocations".to_string()),
-            (27, "moa.connector_action_bindings".to_string()),
-            (28, "moa.connector_connection_use_grants".to_string()),
-            (29, "moa.connector_connections".to_string()),
-            (57, "public.contacts".to_string()),
-            (66, "public.agents".to_string()),
-            (69, "public.users".to_string()),
-        ]
+            "moa.connector_action_invocations",
+            "moa.connector_action_bindings",
+            "moa.connector_connection_use_grants",
+            "moa.connector_connections",
+            "public.contacts",
+            "public.agents",
+            "public.users",
+        ],
+        "connector children and inverse grants must purge before every referenced parent"
     );
-    assert!(purge_definition.contains("catalog_count <> 131"));
-    assert!(purge_definition.contains("exactly 131 tables"));
+    assert!(purge_definition.contains(&format!("catalog_count <> {purge_catalog_count}")));
+    assert!(purge_definition.contains(&format!("exactly {purge_catalog_count} tables")));
     assert_eq!(visible_count, 3);
     assert_eq!(neighbour_visible, 0);
     assert_eq!(cross_rls_fact.0.as_deref(), Some("42501"));
@@ -1425,11 +1435,12 @@ async fn knowledge_connection_parent_constraint_and_replay_ledgers_are_strict_db
         .bind(tenant_id)
         .execute(&target)
         .await?;
-        let unknown_error =
+        let unknown_error = format!(
+            "{:#}",
             apply_through_migration(&target_url, "knowledge_connection_parent_constraint")
                 .await
                 .expect_err("unknown providers must fail the closed V52 catch-up")
-                .to_string();
+        );
         sqlx::query("DELETE FROM moa.knowledge_connections WHERE connection_uid = $1")
             .bind(unknown_connection)
             .execute(&target)
@@ -1468,11 +1479,12 @@ async fn knowledge_connection_parent_constraint_and_replay_ledgers_are_strict_db
         .bind(tenant_id)
         .execute(&target)
         .await?;
-        let incompatible_error =
+        let incompatible_error = format!(
+            "{:#}",
             apply_through_migration(&target_url, "knowledge_connection_parent_constraint")
                 .await
                 .expect_err("an incompatible pre-existing parent must fail closed")
-                .to_string();
+        );
         sqlx::query(
             "UPDATE moa.connector_connections SET built_in_key = 'knowledge:merge' \
              WHERE connection_uid = $1",
@@ -2033,11 +2045,22 @@ async fn knowledge_connection_parent_constraint_and_replay_ledgers_are_strict_db
         missing_scope_visible,
     ) = outcome.expect("V52 migration assertions should complete");
 
-    assert!(unknown_error.contains("no closed connector parent mapping"));
-    assert!(incompatible_error.contains("incompatible connector parent"));
+    assert!(
+        unknown_error.contains("no closed connector parent mapping"),
+        "migration error chain lost the closed-mapping cause: {unknown_error}"
+    );
+    assert!(
+        incompatible_error.contains("incompatible connector parent"),
+        "migration error chain lost the incompatible-parent cause: {incompatible_error}"
+    );
     assert_eq!(
         first,
-        expected_migration_labels_from("knowledge_connection_parent_constraint")
+        vec![
+            expected_migration_labels_from("knowledge_connection_parent_constraint")
+                .into_iter()
+                .next()
+                .expect("V52 label must be embedded")
+        ]
     );
     assert!(second.is_empty(), "V52 replay must be a no-op: {second:?}");
     assert_eq!(
@@ -2204,7 +2227,7 @@ async fn knowledge_connection_parent_constraint_and_replay_ledgers_are_strict_db
                 true,
                 true,
                 true,
-                false,
+                true,
                 false,
             ),
             (
@@ -2251,9 +2274,9 @@ async fn knowledge_connection_parent_constraint_and_replay_ledgers_are_strict_db
             (31, "moa.connector_connections".to_string()),
         ]
     );
-    assert_eq!(purge_count, 134);
-    assert!(purge_definition.contains("catalog_count <> 142"));
-    assert!(purge_definition.contains("exactly 142 tables"));
+    assert_eq!(purge_count, 133);
+    assert!(purge_definition.contains(&format!("catalog_count <> {purge_count}")));
+    assert!(purge_definition.contains(&format!("exactly {purge_count} tables")));
     assert_eq!(visible, (1, 5));
     assert_eq!(neighbour_visible, 0);
     assert_eq!(cross_tenant_fact.0.as_deref(), Some("42501"));

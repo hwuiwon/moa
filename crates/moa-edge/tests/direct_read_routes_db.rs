@@ -281,6 +281,10 @@ async fn start_edge_with_auth_upstream_and_connector_management(
             moa_edge::connector_credential_proxy::ConnectorCredentialProxy::new(upstream)
                 .expect("credential proxy URL should be syntactically valid"),
         ),
+        external_job_callbacks: Arc::new(
+            moa_edge::external_job_callback_proxy::ExternalJobCallbackProxy::new(upstream)
+                .expect("callback proxy URL should be syntactically valid"),
+        ),
         clickhouse_lineage: None,
         clickhouse_analytics: None,
     };

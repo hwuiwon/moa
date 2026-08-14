@@ -8,11 +8,12 @@ pub(super) async fn start_inner(
     config: ExecutionConfig,
     request: ExecutionStartRequest,
     originating_objective: String,
+    admitted_identity: moa_core::traits::Identity,
 ) -> Result<ExecutionStartResponse, HandlerError> {
     let scope = execution_scope(request.tenant_id, request.contact_id);
     let repository = ExecutionRepository::new(pool);
     let planning_context = repository
-        .load_planning_context(scope, request.planning_context_uid)
+        .load_planning_context_for_session(scope, request.planning_context_uid, request.session_id)
         .await
         .map_err(execution_error)?
         .ok_or_else(|| {
@@ -73,7 +74,13 @@ pub(super) async fn start_inner(
     .map_err(|error| invalid_execution_request(error.to_string()))?;
     let existing = if let Some(key) = request.idempotency_key.as_deref() {
         repository
-            .load_run_by_idempotency_key(scope, request.tenant_id, request.contact_id, key)
+            .load_run_by_idempotency_key_for_session(
+                scope,
+                request.tenant_id,
+                request.contact_id,
+                request.session_id,
+                key,
+            )
             .await
             .map_err(execution_error)?
     } else {
@@ -103,9 +110,10 @@ pub(super) async fn start_inner(
     } else {
         ExecutionRunStatus::Queued
     };
-    let run = repository
+    let admission = repository
         .create_run(
             scope,
+            &config,
             NewExecutionRun {
                 tenant_id: request.tenant_id,
                 contact_id: request.contact_id,
@@ -114,25 +122,49 @@ pub(super) async fn start_inner(
                 planning_context_uid: request.planning_context_uid,
                 planning_context_hash: expected_context_hash,
                 owner_user_id: snapshot.owner_user_id.clone(),
-                goal: request.compiled.goal,
-                plan: request.compiled.plan,
+                admitted_identity,
+                goal: request.compiled.goal.clone(),
+                plan: request.compiled.plan.clone(),
                 catalog: snapshot.catalog.clone(),
                 authorization: snapshot.authorization.clone(),
                 pinned_instruction_skills: snapshot.pinned_instruction_skills.clone(),
-                source_provenance: request.source_provenance,
-                input: request.run_input,
+                source_provenance: request.source_provenance.clone(),
+                input: request.run_input.clone(),
                 status,
                 approved_budget: snapshot.budget.clone(),
-                idempotency_key: request.idempotency_key,
+                idempotency_key: request.idempotency_key.clone(),
             },
         )
         .await
         .map_err(execution_error)?;
+    let (run, created) = match admission {
+        moa_execution::repository::run::RunAdmissionOutcome::Admitted(run) => (*run, true),
+        moa_execution::repository::run::RunAdmissionOutcome::Replayed(run) => {
+            verify_run_scope(
+                &run,
+                request.tenant_id,
+                request.contact_id,
+                request.session_id,
+            )?;
+            verify_start_replay(&run, &request, snapshot)?;
+            (*run, false)
+        }
+        moa_execution::repository::run::RunAdmissionOutcome::CapacitySaturated { dimension } => {
+            return Err(TerminalError::new_with_code(
+                429,
+                format!(
+                    "execution {} capacity is exhausted; retry admission later",
+                    dimension.as_str()
+                ),
+            )
+            .into());
+        }
+    };
     Ok(ExecutionStartResponse {
         active_plan_hash: run.active_plan_hash,
         estimate: run.active_plan.estimate,
         run: run_summary(&run),
-        created: true,
+        created,
         confirmation_required,
     })
 }

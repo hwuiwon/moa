@@ -56,10 +56,10 @@ use moa_core::{
     types::session::SessionMeta,
     types::session::TurnOutcome as CoreTurnOutcome,
 };
-use moa_execution::repository::{
-    CompileAuditWriteOutcome, ExecutionRepository, ExecutionScope, PlannerCallAuditWriteOutcome,
-    RouteAuditWriteOutcome,
+use moa_execution::repository::audit::{
+    CompileAuditWriteOutcome, PlannerCallAuditWriteOutcome, RouteAuditWriteOutcome,
 };
+use moa_execution::repository::{ExecutionRepository, ExecutionScope};
 use moa_lineage_core::TurnId;
 use moa_observability::restate_observability::{
     emit_turn_coordination_summary, emit_turn_latency_summary, emit_turn_replay_summary,
@@ -284,8 +284,6 @@ enum TurnIterationOutcome {
     ToolBudgetExceeded(ToolBudgetExhausted),
     /// The prompt-injection circuit halted this coordinator turn.
     SecurityHalt,
-    /// The coordinator's bounded security-input wait expired.
-    SecurityInputTimedOut,
 }
 
 struct DurableUpgradeGuard {
@@ -802,24 +800,6 @@ async fn execute_turn_inside_workflow(
                     post_outcome_assessment,
                 });
             }
-            TurnIterationOutcome::SecurityInputTimedOut => {
-                let post_outcome_assessment = capture_current_active_segment_assessment(
-                    workflow,
-                    ctx,
-                    session_id,
-                    AssessmentPhase::Final,
-                    &[],
-                    last_response_cutoff_before_seq(ctx).await?,
-                )
-                .await?;
-                return Ok(BodyOutcome {
-                    kind: TurnOutcomeKind::Failed,
-                    message: last_summary.take().unwrap_or_else(|| {
-                        "The turn stopped safely because required user input timed out.".to_string()
-                    }),
-                    post_outcome_assessment,
-                });
-            }
             TurnIterationOutcome::ToolBudgetExceeded(exhaustion) => {
                 emit_tool_budget_exceeded(appender, ctx, session_id, &exhaustion).await?;
                 let (message, sequence_num) = append_zero_cost_assistant_response_with_sequence(
@@ -1114,6 +1094,18 @@ async fn execute_durable_admission(
         .into());
     }
     let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
+    let planning_now = durable_utc_now(ctx, "execution_planning_now").await?;
+    let horizon_seconds = i64::try_from(workflow.config.execution.maximum_horizon_seconds)
+        .map_err(|_| TerminalError::new("execution maximum horizon does not fit i64"))?;
+    let horizon = chrono::TimeDelta::try_seconds(horizon_seconds)
+        .ok_or_else(|| TerminalError::new("execution maximum horizon does not fit chrono"))?;
+    let maximum_deadline = planning_now
+        .checked_add_signed(horizon)
+        .ok_or_else(|| TerminalError::new("execution maximum horizon exceeds timestamp range"))?;
+    let deadline_at = request
+        .resource_budget
+        .deadline
+        .map_or(maximum_deadline, |deadline| deadline.min(maximum_deadline));
     let planning_call = ctx
         .service_client::<ExecutionClient>()
         .planning_context(Json::from(
@@ -1122,6 +1114,7 @@ async fn execute_durable_admission(
                 contact_id,
                 session_id,
                 originating_user_sequence_num,
+                deadline_at,
                 requested_template: request
                     .execution_template
                     .as_ref()
@@ -1139,7 +1132,6 @@ async fn execute_durable_admission(
         .auxiliary
         .clone()
         .unwrap_or_else(|| workflow.config.models.main.clone());
-    let planning_now = durable_utc_now(ctx, "execution_planning_now").await?;
     let provider = RestateExecutionModelProvider::new(
         ctx,
         per_model_call_budget(request.resource_budget),
@@ -1491,9 +1483,6 @@ async fn run_once_inside_workflow(
         }
         ToolDispatchOutcome::SecurityHalt => {
             return Ok(TurnIterationOutcome::SecurityHalt);
-        }
-        ToolDispatchOutcome::SecurityInputTimedOut => {
-            return Ok(TurnIterationOutcome::SecurityInputTimedOut);
         }
     }
 

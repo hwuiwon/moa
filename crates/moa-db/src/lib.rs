@@ -192,5 +192,152 @@ impl AsMut<PgConnection> for ScopedConn<'_> {
 }
 
 pub(crate) fn map_sqlx_error(error: sqlx::Error) -> MoaError {
-    MoaError::StorageError(error.to_string())
+    if is_retryable_sqlx_error(&error) {
+        MoaError::StorageUnavailable(error.to_string())
+    } else {
+        MoaError::StorageError(error.to_string())
+    }
+}
+
+/// Returns whether replaying an idempotent operation may recover from this SQLx failure.
+///
+/// The classification is intentionally narrow. Connection failures, pool availability,
+/// transaction serialization/deadlock conflicts, and PostgreSQL shutdown or overload states
+/// are transient. Query-shape, constraint, schema, and decode failures are permanent.
+#[must_use]
+pub fn is_retryable_sqlx_error(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Io(error) if is_transient_io(error.kind()) => true,
+        sqlx::Error::Tls(_)
+        | sqlx::Error::PoolTimedOut
+        | sqlx::Error::PoolClosed
+        | sqlx::Error::WorkerCrashed
+        | sqlx::Error::Protocol(_)
+        | sqlx::Error::BeginFailed => true,
+        sqlx::Error::Database(database_error) => database_error
+            .code()
+            .as_deref()
+            .is_some_and(is_retryable_postgres_sqlstate),
+        _ => false,
+    }
+}
+
+fn is_transient_io(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::NetworkDown
+            | std::io::ErrorKind::NetworkUnreachable
+            | std::io::ErrorKind::HostUnreachable
+    )
+}
+
+fn is_retryable_postgres_sqlstate(code: &str) -> bool {
+    code.starts_with("08")
+        || matches!(
+            code,
+            "40001" | "40P01" | "53300" | "53400" | "57P01" | "57P02" | "57P03"
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{borrow::Cow, error::Error as StdError, fmt};
+
+    use sqlx::error::{DatabaseError, ErrorKind};
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct TestDatabaseError {
+        code: &'static str,
+        kind: ErrorKind,
+    }
+
+    impl fmt::Display for TestDatabaseError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "test database error {}", self.code)
+        }
+    }
+
+    impl StdError for TestDatabaseError {}
+
+    impl DatabaseError for TestDatabaseError {
+        fn message(&self) -> &str {
+            "test database error"
+        }
+
+        fn code(&self) -> Option<Cow<'_, str>> {
+            Some(Cow::Borrowed(self.code))
+        }
+
+        fn as_error(&self) -> &(dyn StdError + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn StdError + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn StdError + Send + Sync + 'static> {
+            self
+        }
+
+        fn kind(&self) -> ErrorKind {
+            match self.kind {
+                ErrorKind::UniqueViolation => ErrorKind::UniqueViolation,
+                _ => ErrorKind::Other,
+            }
+        }
+    }
+
+    fn database_error(code: &'static str, kind: ErrorKind) -> sqlx::Error {
+        sqlx::Error::Database(Box::new(TestDatabaseError { code, kind }))
+    }
+
+    #[test]
+    fn sqlx_storage_classification_separates_transient_from_permanent_failures() {
+        // Pins: retry-owning callers may replay pool and transaction-contention
+        // failures, but must not retry deterministic constraint violations.
+        for error in [
+            sqlx::Error::PoolClosed,
+            sqlx::Error::PoolTimedOut,
+            database_error("40001", ErrorKind::Other),
+            database_error("40P01", ErrorKind::Other),
+            database_error("08006", ErrorKind::Other),
+            database_error("57P03", ErrorKind::Other),
+        ] {
+            assert!(
+                is_retryable_sqlx_error(&error),
+                "classified {error} as permanent"
+            );
+            assert!(
+                matches!(map_sqlx_error(error), MoaError::StorageUnavailable(_)),
+                "transient SQLx failure lost its retry provenance"
+            );
+        }
+
+        let constraint = database_error("23505", ErrorKind::UniqueViolation);
+        assert!(!is_retryable_sqlx_error(&constraint));
+        assert!(matches!(
+            map_sqlx_error(constraint),
+            MoaError::StorageError(_)
+        ));
+
+        let invalid_data = sqlx::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid database protocol payload",
+        ));
+        assert!(!is_retryable_sqlx_error(&invalid_data));
+        assert!(matches!(
+            map_sqlx_error(invalid_data),
+            MoaError::StorageError(_)
+        ));
+    }
 }

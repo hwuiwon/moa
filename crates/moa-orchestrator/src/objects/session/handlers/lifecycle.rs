@@ -211,6 +211,7 @@ impl SessionImpl {
                     .release_session_hands(Json::from(ReleaseSessionHandsRequest {
                         tenant_id: meta.tenant_id,
                         session_id,
+                        continuation_attempt: 0,
                     })),
             )
             .send();

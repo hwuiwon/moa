@@ -40,17 +40,19 @@ use moa_core::{
         },
         session::SessionMeta,
         tools::{IdempotencyClass, ToolDiffStrategy, ToolInputShape, ToolOutput, ToolPolicySpec},
+        worker::state::WorkerInputTarget,
     },
 };
 use moa_hands::{
     AuthorizedToolCall, HandRoute, JournaledWorkspaceCommit, ToolCallScope, ToolRegistry,
-    ToolRouter,
+    ToolRouter, WorkerHandReleaseRequest,
     core::{
         leases::{
             HandLeasePolicy, HandLeaseProvisionRequest, HandLeaseStatus, HandLeaseStore,
             HandLeaseWorkspaceAttachment, LeaseHandle, PostgresHandLeaseStore,
         },
         sandbox_workspace::{
+            capacity::{ActiveHandCapacityRequest, PostgresWorkspaceCapacityRepository},
             checkpoint::model::{CreateCheckpointRequest, PublishCheckpointCommitRequest},
             model::{
                 ActivateHydratedWorkspaceRequest, CreateWorkspaceRequest, SandboxWorkspace,
@@ -352,6 +354,21 @@ async fn hydration_and_checkpoint_commits_are_atomic_replay_safe_and_generation_
         provisioning.provisioning_operation_id,
         HandHandle::local(PathBuf::from(format!("/tmp/{workspace_id}"))),
     );
+    let active_capacity = ActiveHandCapacityRequest {
+        tenant_id,
+        workspace_id,
+        provider_account_id: account_id,
+        provider_account_generation: 1,
+        provisioning_operation_id: provisioning.provisioning_operation_id,
+        hand_lease_generation: provisioning.generation,
+        expected_writer_epoch: restoring.writer_epoch,
+        expected_instance_generation: restoring.instance_generation,
+    };
+    let capacity = PostgresWorkspaceCapacityRepository::new(pool.clone());
+    capacity
+        .reserve_active_hand(&active_capacity)
+        .await
+        .expect("reserve exact active hand before activation");
     assert!(
         workspaces
             .activate_hydrated(ActivateHydratedWorkspaceRequest {
@@ -361,6 +378,12 @@ async fn hydration_and_checkpoint_commits_are_atomic_replay_safe_and_generation_
             })
             .await
             .expect("activate exact hydrated lease")
+    );
+    assert!(
+        capacity
+            .commit_active_hand(&active_capacity)
+            .await
+            .expect("commit exact active hand after activation")
     );
     let mut active_workspace = workspaces
         .get(tenant_id, workspace_id)
@@ -469,6 +492,19 @@ async fn hydration_and_checkpoint_commits_are_atomic_replay_safe_and_generation_
             Some(creating.clone())
         );
         let publication = publication(&commit_binding, operation_id, 17 + commit_index);
+        PostgresWorkspaceCapacityRepository::new(pool.clone())
+            .reserve_checkpoint_publication(
+                &WorkspaceStorageOperation {
+                    operation_id,
+                    kind: WorkspaceOperationKind::Commit,
+                    binding: commit_binding.clone(),
+                    deadline: intent.deadline_at,
+                    request_hash: intent.request_hash.clone(),
+                },
+                publication.logical_bytes,
+            )
+            .await
+            .expect("reserve checkpoint capacity before publication");
 
         if commit_index == 1 {
             let mut stale_lease = active_lease.clone();
@@ -574,6 +610,133 @@ async fn hydration_and_checkpoint_commits_are_atomic_replay_safe_and_generation_
                     .and_then(|attachment| attachment.restored_checkpoint_id),
                 Some(checkpoint_id)
             );
+
+            // Pins: if another writer wins after immutable bytes are uploaded,
+            // the losing checkpoint is failed and its exact count/bytes charge is
+            // released so the upload can be garbage-collected without a quota leak.
+            for (from, to) in [
+                (
+                    SandboxWorkspaceState::Active,
+                    SandboxWorkspaceState::Quiescing,
+                ),
+                (
+                    SandboxWorkspaceState::Quiescing,
+                    SandboxWorkspaceState::Committing,
+                ),
+            ] {
+                assert!(
+                    workspaces
+                        .transition(WorkspaceTransition {
+                            tenant_id,
+                            workspace_id,
+                            from,
+                            to,
+                            writer_epoch: active_workspace.writer_epoch,
+                            instance_generation: active_workspace.instance_generation,
+                        })
+                        .await
+                        .expect("enter abandoned checkpoint barrier")
+                );
+            }
+            let abandoned_workspace = workspaces
+                .get(tenant_id, workspace_id)
+                .await
+                .expect("load abandoned workspace")
+                .expect("abandoned workspace exists");
+            let abandoned_binding = binding(&abandoned_workspace);
+            let abandoned_operation_id = WorkspaceOperationId::new();
+            let abandoned_intent = operation_intent(
+                tenant_id,
+                &abandoned_workspace,
+                abandoned_operation_id,
+                WorkspaceOperationKind::Commit,
+                "sha256:abandoned-cas-loss",
+            );
+            operations
+                .persist_intent(&abandoned_intent)
+                .await
+                .expect("persist abandoned operation");
+            let abandoned_checkpoint_id = WorkspaceCheckpointId(abandoned_operation_id.0);
+            workspaces
+                .create_checkpoint(CreateCheckpointRequest {
+                    checkpoint_id: abandoned_checkpoint_id,
+                    tenant_id,
+                    workspace_id,
+                    parent_checkpoint_id: Some(checkpoint_id),
+                    operation_id: abandoned_operation_id,
+                    expected_writer_epoch: abandoned_workspace.writer_epoch,
+                    expected_instance_generation: abandoned_workspace.instance_generation,
+                    expected_checkpoint_generation: abandoned_workspace.checkpoint_generation,
+                })
+                .await
+                .expect("create abandoned checkpoint")
+                .expect("abandoned checkpoint fence matches");
+            let abandoned_publication =
+                self::publication(&abandoned_binding, abandoned_operation_id, 23);
+            PostgresWorkspaceCapacityRepository::new(pool.clone())
+                .reserve_checkpoint_publication(
+                    &WorkspaceStorageOperation {
+                        operation_id: abandoned_operation_id,
+                        kind: WorkspaceOperationKind::Commit,
+                        binding: abandoned_binding.clone(),
+                        deadline: abandoned_intent.deadline_at,
+                        request_hash: abandoned_intent.request_hash.clone(),
+                    },
+                    abandoned_publication.logical_bytes,
+                )
+                .await
+                .expect("reserve abandoned checkpoint before upload");
+            sqlx::query(
+                "UPDATE moa.sandbox_workspaces SET lifecycle_state = 'active' WHERE workspace_id = $1",
+            )
+            .bind(workspace_id)
+            .execute(&pool)
+            .await
+            .expect("simulate another writer winning the lifecycle CAS");
+            assert!(
+                !workspaces
+                    .publish_checkpoint_commit(PublishCheckpointCommitRequest {
+                        binding: &abandoned_binding,
+                        operation_id: abandoned_operation_id,
+                        publication: &abandoned_publication,
+                        post_commit_state: WorkspacePostCommitState::AttachmentRetained,
+                        lease: &active_lease,
+                    })
+                    .await
+                    .expect("CAS loss must be safely abandoned")
+            );
+            let abandoned_state = sqlx::query_as::<_, (String, String)>(
+                r#"
+                SELECT checkpoint.lifecycle_state, reservation.reservation_state
+                FROM moa.sandbox_workspace_checkpoints AS checkpoint
+                JOIN moa.sandbox_capacity_reservations AS reservation
+                  ON reservation.operation_id = checkpoint.operation_id
+                 AND reservation.resource_dimension = 'checkpoints'
+                WHERE checkpoint.checkpoint_id = $1
+                "#,
+            )
+            .bind(abandoned_checkpoint_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load abandoned checkpoint and capacity");
+            assert_eq!(
+                abandoned_state,
+                ("failed".to_string(), "released".to_string())
+            );
+            let failed_revival = sqlx::query(
+                "UPDATE moa.sandbox_workspace_checkpoints SET lifecycle_state='creating' \
+                 WHERE checkpoint_id=$1",
+            )
+            .bind(abandoned_checkpoint_id)
+            .execute(&pool)
+            .await
+            .expect_err("failed checkpoint audit must not re-enter the live generation index");
+            assert!(
+                failed_revival
+                    .to_string()
+                    .contains("failed sandbox checkpoint audit is immutable"),
+                "unexpected failed-checkpoint mutation error: {failed_revival}"
+            );
         } else {
             assert_eq!(active_workspace.state, SandboxWorkspaceState::Ready);
             assert_eq!(active_lease.status, HandLeaseStatus::Destroyed);
@@ -625,6 +788,12 @@ async fn synchronous_absence_and_reconciled_absence_use_distinct_proof_rules_db(
         .persist_intent(&synchronous)
         .await
         .expect("persist synchronous operation");
+    assert!(
+        operations
+            .begin_provider_attempt(tenant_id, synchronous_id)
+            .await
+            .expect("fence the synchronous provider attempt")
+    );
     sqlx::query(
         r#"
         INSERT INTO moa.sandbox_capacity_reservations (
@@ -632,7 +801,7 @@ async fn synchronous_absence_and_reconciled_absence_use_distinct_proof_rules_db(
             provider_account_generation, workspace_id, operation_id,
             expected_writer_epoch, expected_instance_generation,
             resource_dimension, quantity
-        ) VALUES (gen_random_uuid(), $1, $2, 1, $3, $4, 0, 0, 'workspaces', 1)
+        ) VALUES (gen_random_uuid(), $1, $2, 1, $3, $4, 0, 0, 'checkpoints', 1)
         "#,
     )
     .bind(tenant_id)
@@ -767,10 +936,13 @@ struct GatedWorkspaceProvider {
     restore_calls: AtomicUsize,
     reconcile_calls: AtomicUsize,
     checkpoint_post_commit_state: WorkspacePostCommitState,
+    checkpoint_capacity: Option<PostgresWorkspaceCapacityRepository>,
 }
 
 impl GatedWorkspaceProvider {
-    fn new() -> (
+    fn new(
+        pool: PgPool,
+    ) -> (
         Self,
         oneshot::Receiver<WorkspaceCheckpointPublishRequest>,
         oneshot::Sender<()>,
@@ -787,6 +959,7 @@ impl GatedWorkspaceProvider {
                 restore_calls: AtomicUsize::new(0),
                 reconcile_calls: AtomicUsize::new(0),
                 checkpoint_post_commit_state: WorkspacePostCommitState::AttachmentRetained,
+                checkpoint_capacity: Some(PostgresWorkspaceCapacityRepository::new(pool)),
             },
             started_rx,
             release_tx,
@@ -794,17 +967,23 @@ impl GatedWorkspaceProvider {
     }
 
     fn management() -> Self {
-        let (started_tx, _started_rx) = oneshot::channel();
-        let (_release_tx, release_rx) = oneshot::channel();
         Self {
-            commit_started: Mutex::new(Some(started_tx)),
-            commit_release: Mutex::new(Some(release_rx)),
+            commit_started: Mutex::new(None),
+            commit_release: Mutex::new(None),
             commit_calls: AtomicUsize::new(0),
             attach_calls: AtomicUsize::new(0),
             checkpoint_calls: AtomicUsize::new(0),
             restore_calls: AtomicUsize::new(0),
             reconcile_calls: AtomicUsize::new(0),
             checkpoint_post_commit_state: WorkspacePostCommitState::ComputeDestroyed,
+            checkpoint_capacity: None,
+        }
+    }
+
+    fn parking(pool: PgPool) -> Self {
+        Self {
+            checkpoint_capacity: Some(PostgresWorkspaceCapacityRepository::new(pool)),
+            ..Self::management()
         }
     }
 
@@ -922,10 +1101,6 @@ impl HandProvider for GatedWorkspaceProvider {
         Ok(HandStatus::Running)
     }
 
-    async fn pause(&self, _handle: &HandHandle) -> Result<()> {
-        Ok(())
-    }
-
     async fn resume(&self, _handle: &HandHandle) -> Result<()> {
         Ok(())
     }
@@ -980,24 +1155,32 @@ impl SandboxStorageProvider for GatedWorkspaceProvider {
         match request.operation.kind {
             WorkspaceOperationKind::Commit => {
                 self.commit_calls.fetch_add(1, Ordering::SeqCst);
-                self.commit_started
+                let started = self
+                    .commit_started
                     .lock()
                     .expect("commit gate mutex should not be poisoned")
-                    .take()
-                    .expect("the router must publish exactly one commit request")
-                    .send(request.clone())
-                    .map_err(|_| {
-                        MoaError::StorageError("commit observer disappeared".to_string())
-                    })?;
+                    .take();
                 let release = self
                     .commit_release
                     .lock()
                     .expect("commit release mutex should not be poisoned")
-                    .take()
-                    .expect("the router must await exactly one commit release");
-                release.await.map_err(|_| {
-                    MoaError::StorageError("commit release disappeared".to_string())
-                })?;
+                    .take();
+                match (started, release) {
+                    (Some(started), Some(release)) => {
+                        started.send(request.clone()).map_err(|_| {
+                            MoaError::StorageError("commit observer disappeared".to_string())
+                        })?;
+                        release.await.map_err(|_| {
+                            MoaError::StorageError("commit release disappeared".to_string())
+                        })?;
+                    }
+                    (None, None) => {}
+                    _ => {
+                        return Err(MoaError::StorageError(
+                            "commit gate is only partially configured".to_string(),
+                        ));
+                    }
+                }
             }
             WorkspaceOperationKind::Checkpoint => {
                 self.checkpoint_calls.fetch_add(1, Ordering::SeqCst);
@@ -1008,7 +1191,16 @@ impl SandboxStorageProvider for GatedWorkspaceProvider {
                 ));
             }
         }
-        Ok(self.committed_result(&request.operation))
+        let result = self.committed_result(&request.operation);
+        if let (Some(capacity), Some(publication)) = (
+            self.checkpoint_capacity.as_ref(),
+            result.checkpoint_publication.as_ref(),
+        ) {
+            capacity
+                .reserve_checkpoint_publication(&request.operation, publication.logical_bytes)
+                .await?;
+        }
+        Ok(result)
     }
 
     async fn restore_workspace(
@@ -1101,7 +1293,7 @@ async fn public_management_attach_checkpoint_and_exact_restore_are_durable_db() 
         .await
         .expect("create public-management workspace");
 
-    let provider = Arc::new(GatedWorkspaceProvider::management());
+    let provider = Arc::new(GatedWorkspaceProvider::parking(pool.clone()));
     let mut registry = ToolRegistry::new();
     registry.register_hand(
         "management_route_anchor",
@@ -1210,6 +1402,172 @@ async fn public_management_attach_checkpoint_and_exact_restore_are_durable_db() 
 
 #[tokio::test]
 #[ignore = "requires a fresh V58 compose Postgres via MOA_DATABASE_URL"]
+async fn worker_input_wait_checkpoints_releases_and_rejects_stale_replay_db() {
+    // Pins: a worker parks only the exact hand generation captured before its input
+    // registration. The portable checkpoint survives fresh provision/restore, and a
+    // delayed replay cannot checkpoint or destroy that replacement hand.
+    let pool = pool().await;
+    let tenant_id = TenantId::new();
+    let session_id = SessionId::new();
+    let account_id = ProviderAccountId::new();
+    let workspace_id = SandboxWorkspaceId::new();
+    let worker_id = format!("worker-input-wait-{workspace_id}");
+    let scope = SandboxWorkspaceScope::Worker {
+        session_id,
+        worker_id: worker_id.clone(),
+    };
+    seed_session(&pool, session_id, tenant_id).await;
+    seed_named_account(&pool, account_id, GATED_PROVIDER).await;
+    let workspaces = PostgresWorkspaceRepository::new(pool.clone());
+    workspaces
+        .create(&CreateWorkspaceRequest {
+            workspace_id,
+            tenant_id,
+            scope: scope.clone(),
+            provider: GATED_PROVIDER.to_string(),
+            provider_account_id: account_id,
+            provider_account_generation: 1,
+            durability_class: DurabilityClass::PortableFilesystem,
+            retention_deadline_at: None,
+        })
+        .await
+        .expect("create worker input-wait workspace");
+
+    let provider = Arc::new(GatedWorkspaceProvider::parking(pool.clone()));
+    let mut registry = ToolRegistry::new();
+    registry.register_hand(
+        "worker_input_wait_route_anchor",
+        "exposes the worker input-wait provider route",
+        serde_json::json!({ "type": "object", "additionalProperties": false }),
+        ToolPolicySpec {
+            risk_level: RiskLevel::Low,
+            default_effect: ActionPolicyEffect::Allow,
+            action_class: ActionClass::Read,
+            input_shape: ToolInputShape::Json,
+            diff_strategy: ToolDiffStrategy::None,
+        },
+        IdempotencyClass::Idempotent,
+    );
+    registry.retarget_hand_tools(vec![HandRoute {
+        provider: GATED_PROVIDER.to_string(),
+        tier: SandboxTier::Container,
+        policy: SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::RouteUnset),
+    }]);
+    let mut hand_providers = HashMap::new();
+    hand_providers.insert(
+        GATED_PROVIDER.to_string(),
+        Arc::clone(&provider) as Arc<dyn HandProvider>,
+    );
+    let router = ToolRouter::new(registry, hand_providers, local_development_sandbox_policy())
+        .with_sandbox_storage_provider(Arc::clone(&provider) as Arc<dyn SandboxStorageProvider>)
+        .expect("register input-wait storage provider")
+        .with_workspace_repositories(pool.clone())
+        .with_hand_lease_store(Arc::new(PostgresHandLeaseStore::new(pool.clone())))
+        .with_hand_lease_reaper();
+    let session = SessionMeta {
+        id: session_id,
+        tenant_id,
+        model: ModelId::new("worker-input-wait-model"),
+        ..SessionMeta::default()
+    };
+    router
+        .attach_managed_workspace(&session, &scope, workspace_id)
+        .await
+        .expect("materialize the worker hand");
+    let first_fence = router
+        .capture_worker_hand_release_fence(&session, &worker_id)
+        .await
+        .expect("capture exact first hand")
+        .expect("active worker has a hand fence");
+    let target = WorkerInputTarget {
+        turn_id: "turn-1".to_string(),
+        generation: 1,
+        input_request_id: "input-1".to_string(),
+    };
+    let park = WorkerHandReleaseRequest {
+        session: &session,
+        worker_id: &worker_id,
+        input_target: &target,
+        expected: Some(&first_fence),
+        scope: ToolCallScope::unbounded(),
+    };
+    router
+        .checkpoint_and_release_worker_hand(park)
+        .await
+        .expect("checkpoint and release the exact worker hand");
+    assert_eq!(provider.commit_calls.load(Ordering::SeqCst), 1);
+    let parked = workspaces
+        .get(tenant_id, workspace_id)
+        .await
+        .expect("load parked workspace")
+        .expect("parked workspace exists");
+    assert_eq!(parked.state, SandboxWorkspaceState::Ready);
+    let checkpoint_id = parked
+        .checkpoint_id
+        .expect("parked workspace has a verified checkpoint");
+    let parked_lease = PostgresHandLeaseStore::new(pool.clone())
+        .get(tenant_id, session_id, &worker_id, GATED_PROVIDER)
+        .await
+        .expect("load parked hand lease")
+        .expect("parked hand lease exists");
+    assert_eq!(parked_lease.status, HandLeaseStatus::Destroyed);
+    assert!(parked_lease.handle.is_none());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM moa.sandbox_capacity_reservations \
+             WHERE tenant_id = $1 AND workspace_id = $2 \
+               AND resource_dimension = 'active_hands' AND reservation_state != 'released'",
+        )
+        .bind(tenant_id)
+        .bind(workspace_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count live active-hand charges"),
+        0
+    );
+
+    router
+        .checkpoint_and_release_worker_hand(park)
+        .await
+        .expect("exact release replay is a no-op");
+    assert_eq!(provider.commit_calls.load(Ordering::SeqCst), 1);
+    router
+        .restore_managed_workspace(&session, &scope, workspace_id, checkpoint_id)
+        .await
+        .expect("fresh compute restores the parked checkpoint");
+    let replacement_fence = router
+        .capture_worker_hand_release_fence(&session, &worker_id)
+        .await
+        .expect("capture replacement hand")
+        .expect("restored worker has a replacement hand");
+    assert_ne!(replacement_fence, first_fence);
+
+    let delayed_target = WorkerInputTarget {
+        turn_id: "turn-delayed".to_string(),
+        generation: 1,
+        input_request_id: "input-delayed".to_string(),
+    };
+    router
+        .checkpoint_and_release_worker_hand(WorkerHandReleaseRequest {
+            input_target: &delayed_target,
+            ..park
+        })
+        .await
+        .expect_err("unused stale release fence cannot touch replacement compute");
+    assert_eq!(provider.commit_calls.load(Ordering::SeqCst), 1);
+    let restored = workspaces
+        .get(tenant_id, workspace_id)
+        .await
+        .expect("load restored workspace")
+        .expect("restored workspace exists");
+    assert_eq!(restored.state, SandboxWorkspaceState::Active);
+
+    cleanup(&pool, session_id, workspace_id, account_id).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh V58 compose Postgres via MOA_DATABASE_URL"]
 async fn may_write_result_waits_for_atomic_checkpoint_publication_db() {
     // Pins: the production router cannot return a successful MayWrite result
     // while provider checkpoint publication is blocked; only the atomic
@@ -1242,7 +1600,7 @@ async fn may_write_result_waits_for_atomic_checkpoint_publication_db() {
         .await
         .expect("create typed workspace before router dispatch");
 
-    let (provider, commit_started, commit_release) = GatedWorkspaceProvider::new();
+    let (provider, commit_started, commit_release) = GatedWorkspaceProvider::new(pool.clone());
     let provider = Arc::new(provider);
     let mut registry = ToolRegistry::new();
     registry.register_hand(
@@ -1512,6 +1870,19 @@ async fn may_write_result_waits_for_atomic_checkpoint_publication_db() {
             .await
             .expect("fence the externally started provider attempt")
     );
+    PostgresWorkspaceCapacityRepository::new(pool.clone())
+        .reserve_checkpoint_publication(
+            &WorkspaceStorageOperation {
+                operation_id: replay_operation_id,
+                kind: WorkspaceOperationKind::Commit,
+                binding: replay_binding,
+                deadline: replay_intent.deadline_at,
+                request_hash: replay_request_hash,
+            },
+            19,
+        )
+        .await
+        .expect("reserve the exact recovered checkpoint publication");
 
     router
         .commit_authorized_workspace_after_tool(JournaledWorkspaceCommit {

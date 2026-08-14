@@ -416,8 +416,15 @@ fn redacted_event_summary(event: &Event) -> String {
             format!("execution run {} started", started.run_uid)
         }
         Event::ExecutionProgress(progress) => format!(
-            "execution run {} progress {}/{} status={}",
-            progress.run_uid, progress.completed, progress.total, progress.status
+            "execution run {} progress {}/{} ready={} active={} parked={} blocker={:?} status={}",
+            progress.run_uid,
+            progress.completed,
+            progress.total,
+            progress.ready_tasks,
+            progress.active_tasks,
+            progress.parked_tasks,
+            progress.blocker_audience,
+            progress.status
         ),
         Event::ExecutionInputRequired(required) => {
             format!("execution run {} requires user input", required.run_uid)

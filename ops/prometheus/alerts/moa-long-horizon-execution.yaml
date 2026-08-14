@@ -1,0 +1,127 @@
+# Long-horizon execution and singleton-maintenance alerts.
+#
+# Every unlabeled scalar guard below is written `absent(metric) or max(metric) > N`.
+# A bare `max(metric) > N` evaluates to *no data* when nothing emits the series, so
+# the alert silently stops guarding instead of firing - which is exactly how the
+# deadline and stuck-attempt guards shipped inert. The two `by (...)` alerts keep the
+# bare form on purpose: `absent()` returns a label-less vector, which would fire an
+# alert whose own description renders empty labels. Their producer is the same handler
+# that emits `moa_execution_maintenance_ready`, so MOAExecutionMaintenanceReconcileStale
+# is their absence guard.
+#
+# Every metric here is recorded unconditionally from the bounded fleet snapshot,
+# including the healthy zero. A gauge written only while work exists would make
+# `absent()` fire on a quiet fleet and would keep its last value forever after a
+# drain; both are treated as producer bugs, not as reasons to weaken these alerts.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: moa-long-horizon-execution
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: moa-long-horizon-execution-alerts
+    app.kubernetes.io/part-of: moa
+    moa.dev/rule-sync: mimir
+spec:
+  groups:
+    - name: moa-long-horizon-execution
+      interval: 30s
+      rules:
+        - alert: MOAExecutionOverdueDeadlines
+          expr: absent(moa_execution_overdue_deadlines) or max(moa_execution_overdue_deadlines) > 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: Nonterminal executions remain past their deadline
+            description: "{{ $value }} execution runs are still nonterminal after their absolute deadline. Verify deadline triggers, controller activation, and terminal projection delivery."
+
+        - alert: MOAExecutionOldestReadySLO
+          expr: absent(moa_execution_oldest_ready_age_seconds) or max(moa_execution_oldest_ready_age_seconds) > 120
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Ready execution work is not being dispatched
+            description: "The oldest ready task has waited {{ $value }} seconds (threshold 120s). Check admission capacity, dispatcher ownership, and outbox delivery."
+
+        - alert: MOAExecutionActiveAttemptStuck
+          expr: absent(moa_execution_active_attempt_oldest_age_seconds) or max(moa_execution_active_attempt_oldest_age_seconds) > 900
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: An active execution attempt exceeded its lease SLO
+            description: "The oldest active task attempt is {{ $value }} seconds old (threshold 900s). Verify watchdog delivery and ambiguous-effect reconciliation before replaying work."
+
+        - alert: MOAExecutionTriggerLagHigh
+          expr: absent(moa_execution_trigger_lag_seconds) or max(moa_execution_trigger_lag_seconds) > 120
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Due execution triggers are delayed
+            description: "The oldest due undelivered trigger is {{ $value }} seconds late (threshold 120s). Check the maintenance owner, Restate ingress, and trigger claim expiry."
+
+        - alert: MOAExecutionOutboxLagHigh
+          expr: absent(moa_execution_outbox_lag_seconds) or max(moa_execution_outbox_lag_seconds) > 120
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Execution dispatch outbox is delayed
+            description: "The oldest undispatched execution outbox row is {{ $value }} seconds old (threshold 120s). Check claim ownership and Restate ingress availability."
+
+        - alert: MOAExecutionOutboxDeadLetters
+          expr: absent(moa_execution_outbox_dead_letters) or max(moa_execution_outbox_dead_letters) > 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: Execution dispatch rows entered dead-letter state
+            description: "{{ $value }} execution outbox rows require operator repair. Preserve the persisted generation and idempotency key during redelivery."
+
+        - alert: MOAExecutionQueueSampleSaturated
+          expr: max by (queue, sample) (moa_execution_queue_sample_saturated) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Execution queue-health observation reached its cap
+            description: "The bounded {{ $labels.queue }} {{ $labels.sample }} sample is saturated, so its exported depth is a lower bound. Inspect the queue and repair capacity before treating the count as exact."
+
+        - alert: MOAExecutionMaintenanceReconcileStale
+          expr: absent(moa_execution_maintenance_ready) or max(moa_execution_maintenance_ready) == 0 or max(moa_execution_maintenance_last_success_age_seconds) > 120
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: Singleton execution maintenance reconciliation is stale
+            description: "The maintenance owner is absent, unready, or has not committed a successful bounded reconciliation receipt within 120 seconds. Due triggers and dispatch repair cannot be assumed healthy."
+
+        - alert: MOAExecutionRetentionStale
+          expr: absent(moa_execution_retention_ready) or max(moa_execution_retention_ready) == 0 or max(moa_execution_retention_last_success_age_seconds) > 7200
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Execution retention is stale
+            description: "Execution retention is absent, unready, or its durable last-success receipt is older than two hours. The bounded retention owner normally runs at least once per hour; inspect its checkpoint and errors before terminal evidence exceeds policy."
+
+        - alert: MOAExecutionAdmissionSaturated
+          expr: max by (resource, scope) (moa_execution_admission_utilization_ratio) > 0.9
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Execution admission is near a configured ceiling
+            description: "Execution {{ $labels.resource }} utilization at {{ $labels.scope }} scope is {{ $value | humanizePercentage }} (threshold 90%). Confirm fair queueing before increasing the durable limit."
+
+        - alert: MOAExecutionExternalJobStuck
+          expr: absent(moa_execution_external_job_oldest_age_seconds) or max(moa_execution_external_job_oldest_age_seconds) > 86400
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: An asynchronous external execution job is stale
+            description: "The oldest nonterminal external job is {{ $value }} seconds old (threshold 24h). Check callback delivery, sparse reconciliation, and provider status."

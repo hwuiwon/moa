@@ -404,6 +404,9 @@ impl RemoteClient {
             MoaError::ProviderError(format!("failed to call MCP server: {error}"))
         })?;
         let status = response.status();
+        if !status.is_success() {
+            return Err(super::http_util::http_error(response).await);
+        }
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -412,16 +415,7 @@ impl RemoteClient {
             .to_string();
         if content_type.contains("text/event-stream") {
             let body = read_sse_response(response, message_id).await?;
-            if status.is_success() {
-                return Ok(body);
-            }
-            return parse_jsonrpc_result(body, message_id).and_then(|_| {
-                Err(MoaError::HttpStatus {
-                    status: status.as_u16(),
-                    retry_after: None,
-                    message: "MCP server request failed".to_string(),
-                })
-            });
+            return Ok(body);
         }
         if !content_type.contains("application/json") {
             return Err(MoaError::StreamError(format!(
@@ -431,15 +425,6 @@ impl RemoteClient {
         let body = response.json::<Value>().await.map_err(|error| {
             MoaError::StreamError(format!("invalid MCP JSON response: {error}"))
         })?;
-        if !status.is_success() {
-            return parse_jsonrpc_result(body, message_id).and_then(|_| {
-                Err(MoaError::HttpStatus {
-                    status: status.as_u16(),
-                    retry_after: None,
-                    message: "MCP server request failed".to_string(),
-                })
-            });
-        }
         Ok(body)
     }
 }

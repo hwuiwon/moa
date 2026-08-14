@@ -2391,6 +2391,11 @@ async fn provenance_backed_rows_drive_run_scenario_and_variant_eligibility_db() 
         artifact_revision_uid,
     )
     .await?;
+    let complete_evidence_hash = vec![3_u8; 32];
+    store
+        .set_trial_final_evidence_hash(&scope, complete.trial_uid, &complete_evidence_hash)
+        .await?
+        .expect("complete trial should retain its final evidence hash");
     insert_provenance_backed_score(
         &pool,
         &scope,
@@ -2398,6 +2403,7 @@ async fn provenance_backed_rows_drive_run_scenario_and_variant_eligibility_db() 
         run.run_uid,
         plan_revision_uid,
         complete_session,
+        &complete_evidence_hash,
         true,
     )
     .await?;
@@ -2502,6 +2508,11 @@ async fn a_provenance_backed_row_from_another_trial_never_satisfies_the_gate_db(
         artifact_revision_uid,
     )
     .await?;
+    let owner_evidence_hash = vec![3_u8; 32];
+    store
+        .set_trial_final_evidence_hash(&scope, owner.trial_uid, &owner_evidence_hash)
+        .await?
+        .expect("owner trial should retain its final evidence hash");
     insert_provenance_backed_score(
         &pool,
         &scope,
@@ -2509,6 +2520,7 @@ async fn a_provenance_backed_row_from_another_trial_never_satisfies_the_gate_db(
         run.run_uid,
         plan_revision_uid,
         owner_session,
+        &owner_evidence_hash,
         true,
     )
     .await?;
@@ -2601,6 +2613,7 @@ async fn insert_provenance_backed_score(
     run_uid: Uuid,
     plan_revision_uid: Uuid,
     session_id: SessionId,
+    evidence_hash: &[u8],
     value: bool,
 ) -> Result<()> {
     let score_id = Uuid::now_v7();
@@ -2646,7 +2659,7 @@ async fn insert_provenance_backed_score(
     .bind(plan_revision_uid)
     .bind(trial.trial_uid)
     .bind(session_id.0)
-    .bind(vec![3_u8; 32])
+    .bind(evidence_hash)
     .execute(conn.as_mut())
     .await
     .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;

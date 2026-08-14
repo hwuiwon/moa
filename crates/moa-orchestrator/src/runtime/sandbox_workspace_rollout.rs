@@ -160,18 +160,21 @@ async fn bootstrap_provider_account(
         || format!("local:{}", account.isolation_cell),
         ToOwned::to_owned,
     );
-    let headroom = if account.provider == "daytona" {
-        config
-            .cloud
-            .daytona_storage
-            .account(account.provider_account_id)
-            .map_or_else(
-                || json!({}),
-                |storage| json!({ "volumes": storage.admission_headroom }),
-            )
-    } else {
-        json!({})
-    };
+    // Volumes are a Daytona-only lifetime resource with an operator-authored
+    // organization ceiling. Non-Daytona accounts have no volume inventory, so
+    // they carry neither a volume limit nor volume headroom.
+    let daytona_storage = (account.provider == "daytona")
+        .then(|| {
+            config
+                .cloud
+                .daytona_storage
+                .account(account.provider_account_id)
+        })
+        .flatten();
+    let headroom = daytona_storage.map_or_else(
+        || json!({}),
+        |storage| json!({ "volumes": storage.admission_headroom }),
+    );
     let generation = i64::try_from(account.generation)
         .context("sandbox provider-account generation exceeds Postgres bigint")?;
     sqlx::query("SELECT moa.bootstrap_sandbox_provider_account($1, $2, $3, $4, $5, $6, $7, $8)")
@@ -181,7 +184,7 @@ async fn bootstrap_provider_account(
         .bind(account.isolation_cell)
         .bind(organization_fingerprint)
         .bind(account.project_fingerprint)
-        .bind(limits.as_json())
+        .bind(limits.as_json(daytona_storage.map(|storage| storage.volume_ceiling)))
         .bind(headroom)
         .execute(connection)
         .await
@@ -197,7 +200,7 @@ async fn bootstrap_provider_account(
 #[derive(Debug, Default)]
 struct ProviderCapacityLimits {
     workspaces: u64,
-    volumes: u64,
+    active_hands: u64,
     checkpoints: u64,
     logical_bytes: u64,
 }
@@ -205,27 +208,35 @@ struct ProviderCapacityLimits {
 impl ProviderCapacityLimits {
     fn add_route(&mut self, route: &moa_config::SandboxWorkspaceQuotaRouteConfig) -> Result<()> {
         self.workspaces = checked_sum(self.workspaces, route.max_workspaces, "workspaces")?;
-        self.volumes = checked_sum(self.volumes, route.max_active_hands, "volumes")?;
+        self.active_hands = checked_sum(self.active_hands, route.max_active_hands, "active_hands")?;
         self.checkpoints = checked_sum(self.checkpoints, route.max_checkpoints, "checkpoints")?;
         self.logical_bytes =
             checked_sum(self.logical_bytes, route.max_logical_bytes, "logical_bytes")?;
         Ok(())
     }
 
-    fn as_json(&self) -> Value {
-        json!({
+    /// Renders the account-wide ceiling, including the Daytona volume ceiling
+    /// when the account owns a configured volume isolation cell.
+    fn as_json(&self, volume_ceiling: Option<u16>) -> Value {
+        let mut limits = json!({
             "workspaces": self.workspaces,
-            "volumes": self.volumes,
+            "active_hands": self.active_hands,
             "checkpoints": self.checkpoints,
             "logical_bytes": self.logical_bytes,
-        })
+        });
+        if let Some(volume_ceiling) = volume_ceiling
+            && let Some(object) = limits.as_object_mut()
+        {
+            object.insert("volumes".to_string(), json!(volume_ceiling));
+        }
+        limits
     }
 }
 
 fn tenant_limits(route: &moa_config::SandboxWorkspaceQuotaRouteConfig) -> Value {
     json!({
         "workspaces": route.max_workspaces,
-        "volumes": route.max_active_hands,
+        "active_hands": route.max_active_hands,
         "checkpoints": route.max_checkpoints,
         "logical_bytes": route.max_logical_bytes,
     })
@@ -265,13 +276,25 @@ mod tests {
                 .expect("bounded route should aggregate");
         }
         assert_eq!(
-            limits.as_json(),
+            limits.as_json(None),
             json!({
                 "workspaces": 8,
-                "volumes": 4,
+                "active_hands": 4,
                 "checkpoints": 20,
                 "logical_bytes": 2_048,
-            })
+            }),
+            "concurrent-hand quotas must charge active_hands, never the Daytona volume ceiling"
+        );
+        assert_eq!(
+            limits.as_json(Some(12)),
+            json!({
+                "workspaces": 8,
+                "active_hands": 4,
+                "checkpoints": 20,
+                "logical_bytes": 2_048,
+                "volumes": 12,
+            }),
+            "a Daytona account's volume ceiling is the operator-authored organization cap"
         );
     }
 }

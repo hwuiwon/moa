@@ -884,7 +884,8 @@ async fn hand_storage_v58_requires_legacy_drain_and_installs_tenant_schema_db() 
                AND class.relname IN (\
                    'hand_leases', 'sandbox_workspaces', 'sandbox_workspace_operations',\
                    'sandbox_workspace_checkpoints', 'sandbox_workspace_grants',\
-                   'sandbox_storage_resources', 'sandbox_capacity_reservations'\
+                   'sandbox_storage_resources', 'sandbox_capacity_reservations',\
+                   'sandbox_execution_hand_release_receipts'\
                ) ORDER BY class.relname",
         )
         .fetch_all(&pool)
@@ -896,6 +897,48 @@ async fn hand_storage_v58_requires_legacy_drain_and_installs_tenant_schema_db() 
         )
         .fetch_one(&pool)
         .await?;
+        let release_receipt_fks = sqlx::query_scalar::<_, bool>(
+            "SELECT count(*) = 4 FROM pg_constraint \
+             WHERE conrelid = 'moa.sandbox_execution_hand_release_receipts'::regclass \
+               AND conname IN (\
+                   'sandbox_execution_hand_release_receipts_task_fk',\
+                   'sandbox_execution_hand_release_receipts_compensation_fk',\
+                   'sandbox_execution_hand_release_receipts_workspace_fk',\
+                   'sandbox_execution_hand_release_receipts_checkpoint_fk'\
+               )",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let release_receipt_retention_guards = sqlx::query_scalar::<_, bool>(
+            "SELECT count(*) = 2 FROM pg_trigger AS trigger \
+             JOIN pg_proc AS procedure ON procedure.oid = trigger.tgfoid \
+             JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace \
+             WHERE trigger.tgrelid = 'moa.sandbox_execution_hand_release_receipts'::regclass \
+               AND NOT trigger.tgisinternal \
+               AND namespace.nspname = 'moa' \
+               AND (trigger.tgname, procedure.proname) IN (\
+                   ('sandbox_execution_hand_release_receipt_archived_write_guard',\
+                    'reject_execution_archived_detail_write'),\
+                   ('sandbox_execution_hand_release_receipt_delete_guard',\
+                    'reject_execution_immutable_payload')\
+               )",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let checkpoint_generation_index = sqlx::query_scalar::<_, String>(
+            "SELECT indexdef FROM pg_indexes \
+             WHERE schemaname='moa' AND tablename='sandbox_workspace_checkpoints' \
+               AND indexname='sandbox_workspace_checkpoints_generation_key'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let checkpoint_generation_constraint = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_constraint \
+             WHERE conrelid='moa.sandbox_workspace_checkpoints'::regclass \
+               AND conname='sandbox_workspace_checkpoints_generation_key')",
+        )
+        .fetch_one(&pool)
+        .await?;
         pool.close().await;
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
             first_error,
@@ -904,12 +947,26 @@ async fn hand_storage_v58_requires_legacy_drain_and_installs_tenant_schema_db() 
             attachment,
             rls_tables,
             composite_fk,
+            release_receipt_fks,
+            release_receipt_retention_guards,
+            checkpoint_generation_index,
+            checkpoint_generation_constraint,
         ))
     }
     .await;
     let outcome = database.finish(outcome).await;
-    let (first_error, applied, workspace_count, attachment, rls_tables, composite_fk) =
-        outcome.expect("V58 should apply after legacy compute is drained");
+    let (
+        first_error,
+        applied,
+        workspace_count,
+        attachment,
+        rls_tables,
+        composite_fk,
+        release_receipt_fks,
+        release_receipt_retention_guards,
+        checkpoint_generation_index,
+        checkpoint_generation_constraint,
+    ) = outcome.expect("V58 should apply after legacy compute is drained");
     assert!(
         first_error.contains("legacy hands remain live"),
         "preflight should require an explicit drain: {first_error}"
@@ -922,7 +979,7 @@ async fn hand_storage_v58_requires_legacy_drain_and_installs_tenant_schema_db() 
     );
     assert_eq!(workspace_count, 0, "V58 must not fabricate workspace state");
     assert_eq!(attachment, (None, None, None));
-    assert_eq!(rls_tables.len(), 7);
+    assert_eq!(rls_tables.len(), 8);
     assert!(
         rls_tables
             .iter()
@@ -932,5 +989,23 @@ async fn hand_storage_v58_requires_legacy_drain_and_installs_tenant_schema_db() 
     assert!(
         composite_fk,
         "hand leases must reference session plus tenant"
+    );
+    assert!(
+        release_receipt_fks,
+        "task hand release receipts must retain task, workspace, and checkpoint ownership"
+    );
+    assert!(
+        release_receipt_retention_guards,
+        "task hand release receipts must reject post-archive writes and fence retention deletes"
+    );
+    assert!(
+        checkpoint_generation_index.contains(
+            "WHERE (lifecycle_state = ANY (ARRAY['creating'::text, 'available'::text, 'deleting'::text, 'deleted'::text]))"
+        ),
+        "only live checkpoint rows may reserve a committed generation: {checkpoint_generation_index}"
+    );
+    assert!(
+        !checkpoint_generation_constraint,
+        "failed checkpoint attempts must not permanently consume the next committed generation"
     );
 }

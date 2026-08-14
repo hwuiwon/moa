@@ -1,7 +1,11 @@
 //! Shared execution-service mutation handoff types and conversion helpers.
 
 use super::*;
-use moa_observability::runtime_metrics::record_execution_mutation_run_wake_ack;
+use crate::runtime::execution_dispatch::{ExecutionDispatchTarget, JournaledExecutionDispatch};
+use moa_execution::{
+    repository::outbox::{ExecutionDispatchKind, ExecutionDispatchRecord},
+    wire::ExecutionAttemptCancelReason,
+};
 
 pub(super) fn scoped_catalog_error(
     error: crate::connector_catalog::ScopedConnectorCatalogError,
@@ -14,13 +18,14 @@ pub(super) fn scoped_catalog_error(
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(super) struct ExecutionMutationHandoff {
+pub(crate) struct ExecutionMutationHandoff {
     wake_epoch: u64,
     task_ids_to_release: Vec<moa_execution::state::ExecutionTaskId>,
+    llm_owner_dispatch_uids: Vec<uuid::Uuid>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(super) enum ExecutionMutationAccepted {
+pub(crate) enum ExecutionMutationAccepted {
     Accepted {
         response: ExecutionMutationResponse,
         handoff: ExecutionMutationHandoff,
@@ -31,21 +36,14 @@ pub(super) enum ExecutionMutationAccepted {
 }
 
 impl ExecutionMutationAccepted {
-    pub(super) fn wake_epoch(&self) -> Option<u64> {
+    pub(crate) fn wake_epoch(&self) -> Option<u64> {
         match self {
             Self::Accepted { handoff, .. } => Some(handoff.wake_epoch),
             Self::Rejected { .. } => None,
         }
     }
 
-    pub(super) fn task_ids_to_release(&self) -> &[moa_execution::state::ExecutionTaskId] {
-        match self {
-            Self::Accepted { handoff, .. } => &handoff.task_ids_to_release,
-            Self::Rejected { .. } => &[],
-        }
-    }
-
-    pub(super) fn with_task_ids_to_release(
+    pub(crate) fn with_task_ids_to_release(
         mut self,
         task_ids_to_release: Vec<moa_execution::state::ExecutionTaskId>,
     ) -> Self {
@@ -55,14 +53,31 @@ impl ExecutionMutationAccepted {
         self
     }
 
-    pub(super) fn into_response(self) -> ExecutionMutationResponse {
+    pub(crate) fn llm_owner_dispatch_uids(&self) -> &[uuid::Uuid] {
+        match self {
+            Self::Accepted { handoff, .. } => &handoff.llm_owner_dispatch_uids,
+            Self::Rejected { .. } => &[],
+        }
+    }
+
+    pub(crate) fn with_llm_owner_dispatch_uids(
+        mut self,
+        llm_owner_dispatch_uids: Vec<uuid::Uuid>,
+    ) -> Self {
+        if let Self::Accepted { handoff, .. } = &mut self {
+            handoff.llm_owner_dispatch_uids = llm_owner_dispatch_uids;
+        }
+        self
+    }
+
+    pub(crate) fn into_response(self) -> ExecutionMutationResponse {
         match self {
             Self::Accepted { response, .. } | Self::Rejected { response } => response,
         }
     }
 }
 pub(super) fn replan_evaluation_request(
-    snapshot: &moa_execution::repository::ExecutionSchedulingSnapshot,
+    snapshot: &moa_execution::repository::amendment::ExecutionAmendmentSnapshot,
     proposed_plan: &moa_execution::compiler::CanonicalExecutionPlan,
     proposed_estimate: ExecutionEstimate,
     remaining_budget: moa_artifacts::execution_plan::ExecutionBudgetLimit,
@@ -97,7 +112,7 @@ pub(super) fn replan_evaluation_request(
 }
 
 pub(super) fn replan_loop_evaluation_request(
-    snapshot: &moa_execution::repository::ExecutionSchedulingSnapshot,
+    snapshot: &moa_execution::repository::amendment::ExecutionAmendmentSnapshot,
     proposed_amendment_fingerprint: ExecutionHash,
     amendment: PlanAmendment,
     config: ExecutionConfig,
@@ -105,21 +120,7 @@ pub(super) fn replan_loop_evaluation_request(
 ) -> moa_execution::Result<ReplanLoopEvaluationRequest> {
     let seen_amendment_fingerprints =
         durable_amendment_operation_fingerprints(&snapshot.run.plan_history)?;
-    let failures = snapshot
-        .projection
-        .tasks
-        .iter()
-        .filter(|task| task.task_id != waiting_task.task_id)
-        .filter_map(task_failure_fingerprint)
-        .collect::<Vec<_>>();
     let current_failure = task_failure_fingerprint(waiting_task);
-    let mut failure_fingerprint_counts =
-        durable_failure_fingerprint_counts(&snapshot.run.plan_history);
-    for failure in failures {
-        if let Ok(fingerprint) = failure_fingerprint(&failure) {
-            *failure_fingerprint_counts.entry(fingerprint).or_insert(0) += 1;
-        }
-    }
     let unresolved_requirement_ids = snapshot
         .run
         .goal
@@ -143,7 +144,7 @@ pub(super) fn replan_loop_evaluation_request(
     Ok(ReplanLoopEvaluationRequest {
         proposed_amendment_fingerprint,
         seen_amendment_fingerprints,
-        failure_fingerprint_counts,
+        failure_fingerprint_counts: snapshot.prior_failure_fingerprint_counts.clone(),
         current_failure,
         unresolved_requirement_ids,
         amendment,
@@ -170,30 +171,6 @@ pub(super) fn durable_amendment_operation_fingerprints(
         fingerprints.insert(amendment_operations_fingerprint(&amendment)?);
     }
     Ok(fingerprints)
-}
-
-pub(super) fn durable_failure_fingerprint_counts(
-    plan_history: &[Value],
-) -> BTreeMap<ExecutionHash, u32> {
-    let mut counts: BTreeMap<ExecutionHash, u32> = BTreeMap::new();
-    for entry in plan_history {
-        let Some(fingerprint) = entry
-            .get("failure_fingerprint")
-            .and_then(Value::as_str)
-            .and_then(|value| value.parse::<ExecutionHash>().ok())
-        else {
-            continue;
-        };
-        let count = entry
-            .get("failure_fingerprint_count")
-            .and_then(Value::as_u64)
-            .map_or(1, |count| u32::try_from(count).unwrap_or(u32::MAX));
-        counts
-            .entry(fingerprint)
-            .and_modify(|persisted| *persisted = (*persisted).max(count))
-            .or_insert(count);
-    }
-    counts
 }
 
 pub(super) fn task_failure_fingerprint(
@@ -422,6 +399,7 @@ pub(super) fn applied_mutation(run: &ExecutionRunRecord) -> ExecutionMutationAcc
         handoff: ExecutionMutationHandoff {
             wake_epoch: run.wake_epoch,
             task_ids_to_release: Vec::new(),
+            llm_owner_dispatch_uids: Vec::new(),
         },
     }
 }
@@ -434,8 +412,39 @@ pub(super) fn replayed_mutation(run: &ExecutionRunRecord) -> ExecutionMutationAc
         handoff: ExecutionMutationHandoff {
             wake_epoch: run.wake_epoch,
             task_ids_to_release: Vec::new(),
+            llm_owner_dispatch_uids: Vec::new(),
         },
     }
+}
+
+pub(super) fn terminal_task_llm_owner_dispatch_uids(
+    cancellation_dispatches: &[ExecutionDispatchRecord],
+) -> Result<Vec<uuid::Uuid>, HandlerError> {
+    let mut owner_dispatch_uids = Vec::new();
+    for dispatch in cancellation_dispatches {
+        if dispatch.kind != ExecutionDispatchKind::TaskAttemptCancel {
+            continue;
+        }
+        let target = JournaledExecutionDispatch::from(dispatch.clone())
+            .target()
+            .map_err(execution_error)?;
+        let ExecutionDispatchTarget::TaskAttemptCancel(request) = target else {
+            return Err(TerminalError::new(
+                "task cancellation dispatch decoded to a different execution target",
+            )
+            .into());
+        };
+        if request.reason != ExecutionAttemptCancelReason::RunTerminal {
+            return Err(TerminalError::new(
+                "terminal cancellation handoff contained a non-terminal task cancellation",
+            )
+            .into());
+        }
+        owner_dispatch_uids.push(request.active_dispatch_uid);
+    }
+    owner_dispatch_uids.sort_unstable();
+    owner_dispatch_uids.dedup();
+    Ok(owner_dispatch_uids)
 }
 
 pub(super) fn conflict_mutation(reason: ExecutionConflictReason) -> ExecutionMutationAccepted {
@@ -538,29 +547,6 @@ pub(super) fn execution_run_started_delivery(
     }
 }
 
-/// Joins the run wake handoff before an externally visible mutation returns.
-pub(super) async fn call_run_wake(
-    ctx: &Context<'_>,
-    run_uid: uuid::Uuid,
-    wake_epoch: u64,
-    reason: ExecutionRunWakeReason,
-    handoff_started: std::time::Instant,
-) -> Result<(), HandlerError> {
-    crate::restate_identity::replay_safe_request(
-        ctx.workflow_client::<ExecutionRunClient>(run_uid.to_string())
-            .wake(Json::from(ExecutionRunWakeRequest {
-                run_uid,
-                wake_epoch,
-                reason,
-            })),
-    )
-    .call()
-    .await
-    .map_err(HandlerError::from)?;
-    record_execution_mutation_run_wake_ack(handoff_started.elapsed());
-    Ok(())
-}
-
 #[cfg(feature = "integration")]
 pub(super) async fn pause_execution_mutation_handoff_for_test() {
     if std::env::var("MOA_EXECUTION_TEST_PAUSE_MUTATION_HANDOFF").as_deref() == Ok("true") {
@@ -573,16 +559,22 @@ pub(super) async fn pause_execution_mutation_handoff_for_test() {
 #[cfg(not(feature = "integration"))]
 pub(super) async fn pause_execution_mutation_handoff_for_test() {}
 
+#[cfg(feature = "integration")]
+pub(super) async fn pause_execution_cancel_db_handoff_for_test() {
+    if std::env::var("MOA_EXECUTION_TEST_PAUSE_CANCEL_DB_HANDOFF").as_deref() == Ok("true") {
+        // Deliberately inside the journaled closure but after the database commit: recovery must
+        // rebuild the exact current owner fence from Postgres when this result was not journaled.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    }
+}
+
+#[cfg(not(feature = "integration"))]
+pub(super) async fn pause_execution_cancel_db_handoff_for_test() {}
+
 pub(super) fn invalid_execution_request(message: impl Into<String>) -> HandlerError {
     TerminalError::new_with_code(400, message.into()).into()
 }
 
 pub(super) fn execution_error(error: moa_execution::Error) -> HandlerError {
-    match error {
-        moa_execution::Error::Storage { message } => {
-            TerminalError::new_with_code(503, format!("execution storage unavailable: {message}"))
-                .into()
-        }
-        other => invalid_execution_request(other.to_string()),
-    }
+    crate::workflows::errors::execution_error_to_handler_error(error)
 }

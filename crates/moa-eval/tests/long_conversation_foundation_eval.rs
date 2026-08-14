@@ -2,7 +2,6 @@
 use std::sync::Arc;
 
 use moa_config::MoaConfig;
-use moa_core::transcript::{ProviderEvent, Transcript, Turn, UserUtterance};
 use moa_core::{
     types::completion::CompletionRequest, types::completion::StopReason,
     types::completion::TokenUsage, types::identifiers::SessionId,
@@ -15,6 +14,7 @@ use moa_eval::long_conversation::{
     SafetyScores, ScoreCard, ToolScores, TurnUsage, compute_input_cached_ratio,
     compute_prefix_stability,
 };
+use moa_eval_core::transcript::{ProviderEvent, Transcript, Turn, UserUtterance};
 use moa_eval_core::{
     AgentConfig, EngineOptions, EvalStatus, LongConversationMode, LongTestCase, TestCase,
     TestCaseKind, TestSuite,

@@ -14,9 +14,11 @@ definition:
       path: SKILL.md
     inputs:
       type: object
+      required: [priority, retry]
       properties:
         priority:
           type: string
+          enum: [high, standard]
         retry:
           type: boolean
     execution_plan:
@@ -38,14 +40,20 @@ definition:
         cancel_policy: retain_effects
         input_schema:
           type: object
+          required: [priority, retry]
           properties:
             priority:
               type: string
+              enum: [high, standard]
             retry:
               type: boolean
         output_schema:
           type: object
         nodes:
+          # Explicit routing: each branch declares the exact value it runs for, so a run
+          # takes one of them and the other is committed as `skipped`. The branches are
+          # effectful leaves — the terminal output reports the route that was chosen, not
+          # a branch's output, because a skipped branch produces none.
           - id: escalate
             requirement_ids: [req_route]
             depends_on: []
@@ -105,10 +113,8 @@ definition:
             operation:
               kind: output
               value:
-                escalation:
-                  $ref: $.nodes.escalate.output
-                standard_response:
-                  $ref: $.nodes.standard_response.output
+                routed_priority:
+                  $ref: $.input.priority
             compensation: null
             retry:
               max_attempts: 1

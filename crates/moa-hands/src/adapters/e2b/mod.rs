@@ -7,6 +7,7 @@ mod workspace;
 #[cfg(test)]
 mod tests;
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -43,6 +44,7 @@ use moa_core::{
     types::hands::SandboxTierCapabilities,
     types::hands::validate_sandbox_file_path,
     types::identifiers::HandProvisioningOperationId,
+    types::resource::ResourceBudget,
     types::tools::ToolOutput,
 };
 use reqwest::header::CONTENT_TYPE;
@@ -67,6 +69,7 @@ use crate::tools::{bash, file_outline, file_read, grep};
 use crate::core::provider_credentials::{
     ProviderCredentialSource, ProviderEndpoint, ProviderHttpAttempt, ProviderSandboxAttempt,
 };
+use crate::core::sandbox_workspace::capacity::PostgresWorkspaceCapacityRepository;
 use crate::core::sandbox_workspace::checkpoint::revision::{
     next_workspace_revision, required_current_revision,
 };
@@ -77,7 +80,7 @@ const E2B_SUPPORTED_CAPABILITIES: &[SandboxToolCapability] = &SandboxToolCapabil
 const DEFAULT_E2B_DOMAIN: &str = "e2b.app";
 const DEFAULT_E2B_TEMPLATE: &str = "base";
 const DEFAULT_ENVD_PORT: u16 = 49983;
-const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_COMMAND_TIMEOUT: Duration = crate::tools::bash::DEFAULT_BASH_TIMEOUT;
 const CONNECT_PROTOCOL_VERSION: &str = "1";
 const E2B_PROVISIONING_OPERATION_METADATA_KEY: &str = "moa_provisioning_operation_id";
 const E2B_PROVISIONING_SPEC_METADATA_KEY: &str = "moa_provisioning_spec_sha256";
@@ -115,6 +118,7 @@ pub struct E2BHandProvider {
     credentials: Arc<dyn ProviderCredentialSource>,
     sandbox_base_url_override: Option<String>,
     checkpoint_store: Option<Arc<CheckpointObjectStore>>,
+    checkpoint_capacity: Option<Arc<PostgresWorkspaceCapacityRepository>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +148,7 @@ impl E2BHandProvider {
             credentials,
             sandbox_base_url_override: None,
             checkpoint_store: None,
+            checkpoint_capacity: None,
         }
     }
 
@@ -151,6 +156,16 @@ impl E2BHandProvider {
     #[must_use]
     pub fn with_checkpoint_store(mut self, checkpoint_store: Arc<CheckpointObjectStore>) -> Self {
         self.checkpoint_store = Some(checkpoint_store);
+        self
+    }
+
+    /// Installs provider-neutral pre-publication checkpoint admission.
+    #[must_use]
+    pub fn with_checkpoint_capacity(
+        mut self,
+        capacity: Arc<PostgresWorkspaceCapacityRepository>,
+    ) -> Self {
+        self.checkpoint_capacity = Some(capacity);
         self
     }
 
@@ -762,6 +777,22 @@ fn sandbox_id(handle: &HandHandle) -> Result<&str> {
     }
 }
 
+fn bounded_execution_input<'a>(
+    tool: &str,
+    input: &'a str,
+    timeout: Duration,
+) -> Result<Cow<'a, str>> {
+    if tool != "bash" {
+        return Ok(Cow::Borrowed(input));
+    }
+    let mut payload: Value = serde_json::from_str(input)?;
+    let object = payload.as_object_mut().ok_or_else(|| {
+        MoaError::ValidationError("bash tool input must be a JSON object".to_string())
+    })?;
+    object.insert("timeout_secs".to_string(), json!(timeout.as_secs()));
+    Ok(Cow::Owned(payload.to_string()))
+}
+
 fn cloud_account(
     handle: &HandHandle,
 ) -> Result<(moa_core::types::identifiers::ProviderAccountId, u64)> {
@@ -1165,6 +1196,33 @@ impl HandProvider for E2BHandProvider {
         }
     }
 
+    async fn execute_within(
+        &self,
+        handle: &HandHandle,
+        tool: &str,
+        input: &str,
+        budget: ResourceBudget,
+    ) -> Result<ToolOutput> {
+        let execution_timeout = bash::effective_synchronous_timeout(
+            tool,
+            input,
+            DEFAULT_COMMAND_TIMEOUT,
+            budget.time_remaining(chrono::Utc::now()),
+        )?;
+        let bounded_input = bounded_execution_input(tool, input, execution_timeout)?;
+        tokio::time::timeout(
+            execution_timeout,
+            self.execute(handle, tool, &bounded_input),
+        )
+        .await
+        .map_err(|_| {
+            MoaError::ToolError(format!(
+                "E2B tool execution timed out after {}s",
+                execution_timeout.as_secs()
+            ))
+        })?
+    }
+
     async fn install_files(&self, handle: &HandHandle, files: &[SandboxFile]) -> Result<()> {
         let sandbox_id = sandbox_id(handle)?;
         let (account_id, account_generation) = cloud_account(handle)?;
@@ -1251,9 +1309,17 @@ impl HandProvider for E2BHandProvider {
         )
     }
 
-    async fn pause(&self, _handle: &HandHandle) -> Result<()> {
+    /// Refuses compute suspension: MOA deliberately opts E2B out of auto-pause.
+    ///
+    /// Sandbox creation sets `autoPause: false` and `autoResume.enabled: false`
+    /// so a sandbox's durable state lives in MOA-owned portable checkpoints
+    /// rather than in a provider-side paused snapshot MOA cannot fence or
+    /// account for. Pausing here would reintroduce exactly that hidden state, so
+    /// the continuation boundary uses the checkpoint path instead.
+    async fn suspend(&self, _handle: &HandHandle) -> Result<()> {
         Err(MoaError::Unsupported(
-            "E2B pause retains process memory and is not a filesystem persistence primitive"
+            "E2B pause is deliberately disabled (autoPause/autoResume off); MOA carries sandbox \
+             state in portable checkpoints instead"
                 .to_string(),
         ))
     }

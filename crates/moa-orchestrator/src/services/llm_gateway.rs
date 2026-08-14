@@ -58,8 +58,8 @@ pub(crate) enum LLMCompletionOwnerKind {
     RootTurn,
     /// A worker turn workflow.
     WorkerTurn,
-    /// A durable execution run and every task it owns.
-    ExecutionRun,
+    /// One immutable bounded execution-task attempt.
+    ExecutionTaskAttempt,
 }
 
 impl LLMCompletionOwnerKind {
@@ -67,7 +67,7 @@ impl LLMCompletionOwnerKind {
         match self {
             Self::RootTurn => "root_turn",
             Self::WorkerTurn => "worker_turn",
-            Self::ExecutionRun => "execution_run",
+            Self::ExecutionTaskAttempt => "execution_task_attempt",
         }
     }
 }
@@ -96,11 +96,11 @@ impl LLMCompletionOwner {
         }
     }
 
-    /// Creates the owner for one durable execution run and all of its task workflows.
-    pub(crate) fn execution_run(workflow_key: impl Into<String>) -> Self {
+    /// Creates the owner for one immutable bounded execution-task attempt.
+    pub(crate) fn execution_task_attempt(dispatch_uid: uuid::Uuid) -> Self {
         Self {
-            kind: LLMCompletionOwnerKind::ExecutionRun,
-            workflow_key: workflow_key.into(),
+            kind: LLMCompletionOwnerKind::ExecutionTaskAttempt,
+            workflow_key: dispatch_uid.to_string(),
         }
     }
 
@@ -329,6 +329,15 @@ pub(crate) enum LLMCompletionAction {
     ExecutionRouting { attempt: usize },
     /// One initial durable-plan generation or repair attempt.
     InitialPlanning { attempt: usize },
+    /// One plan-amendment generation or repair attempt for a parked run revision.
+    ExecutionAmendment {
+        /// Run whose plan is being amended.
+        run_uid: Uuid,
+        /// Active plan revision the amendment fences.
+        plan_revision: u64,
+        /// Sequential attempt within the same planning slice.
+        attempt: usize,
+    },
     /// The single root-turn input guardrail evaluation.
     RootInputGuardrail,
     /// One root model-loop turn.
@@ -339,12 +348,6 @@ pub(crate) enum LLMCompletionAction {
     WorkerModel { turn: usize },
     /// One execution-task generation and model-loop turn.
     ExecutionTaskModel { generation: u64, turn: u32 },
-    /// One execution amendment generation or repair attempt.
-    ExecutionAmendment {
-        run_uid: Uuid,
-        plan_revision: u64,
-        attempt: usize,
-    },
     /// One behavior-lab simulator turn.
     ExperimentSimulator { trial_uid: Uuid, turn: u32 },
 }
@@ -354,6 +357,11 @@ impl LLMCompletionAction {
         match self {
             Self::ExecutionRouting { attempt } => format!("execution-routing:{attempt}"),
             Self::InitialPlanning { attempt } => format!("initial-planning:{attempt}"),
+            Self::ExecutionAmendment {
+                run_uid,
+                plan_revision,
+                attempt,
+            } => format!("execution-amendment:{run_uid}:{plan_revision}:{attempt}"),
             Self::RootInputGuardrail => "root-input-guardrail".to_string(),
             Self::RootModel { turn } => format!("root-model:{turn}"),
             Self::RootOutputGuardrail { turn } => format!("root-output-guardrail:{turn}"),
@@ -361,11 +369,6 @@ impl LLMCompletionAction {
             Self::ExecutionTaskModel { generation, turn } => {
                 format!("execution-task-model:{generation}:{turn}")
             }
-            Self::ExecutionAmendment {
-                run_uid,
-                plan_revision,
-                attempt,
-            } => format!("execution-amendment:{run_uid}:{plan_revision}:{attempt}"),
             Self::ExperimentSimulator { trial_uid, turn } => {
                 format!("experiment-simulator:{trial_uid}:{turn}")
             }
@@ -407,34 +410,6 @@ fn take_completion_owner(
 /// Durably fences all provider I/O owned by one workflow.
 pub(crate) async fn cancel_completion_owner(
     ctx: &SharedWorkflowContext<'_>,
-    owner: LLMCompletionOwner,
-) -> Result<(), HandlerError> {
-    crate::restate_identity::replay_safe_request(
-        ctx.service_client::<LLMGatewayClient>()
-            .cancel_owner(Json::from(owner)),
-    )
-    .call()
-    .await?;
-    Ok(())
-}
-
-/// Durably fences an owner from an ordinary Restate service handler.
-pub(crate) async fn cancel_completion_owner_from_service(
-    ctx: &Context<'_>,
-    owner: LLMCompletionOwner,
-) -> Result<(), HandlerError> {
-    crate::restate_identity::replay_safe_request(
-        ctx.service_client::<LLMGatewayClient>()
-            .cancel_owner(Json::from(owner)),
-    )
-    .call()
-    .await?;
-    Ok(())
-}
-
-/// Durably fences an owner from its keyed execution-run workflow.
-pub(crate) async fn cancel_completion_owner_from_workflow(
-    ctx: &WorkflowContext<'_>,
     owner: LLMCompletionOwner,
 ) -> Result<(), HandlerError> {
     crate::restate_identity::replay_safe_request(
@@ -978,7 +953,7 @@ mod tests {
     fn completion_owner_is_typed_stripped_and_zero_usage_offline() {
         // Pins: the internal workflow owner never leaks into a provider request,
         // and a fenced completion cannot contribute content or billable usage.
-        let owner = LLMCompletionOwner::execution_run(uuid::Uuid::from_u128(41).to_string());
+        let owner = LLMCompletionOwner::execution_task_attempt(uuid::Uuid::from_u128(41));
         let mut request = CompletionRequest::new("cancel me");
         attach_completion_owner(&mut request, &owner);
 
@@ -1011,16 +986,20 @@ mod tests {
         let worker = LLMCompletionOwner::worker_turn(raw_key)
             .cancellation_key()
             .expect("worker owner should produce a cache key");
-        let run = LLMCompletionOwner::execution_run(raw_key)
+        let attempt_one = LLMCompletionOwner::execution_task_attempt(uuid::Uuid::from_u128(41))
             .cancellation_key()
-            .expect("execution run owner should produce a cache key");
+            .expect("first task-attempt owner should produce a cache key");
+        let attempt_two = LLMCompletionOwner::execution_task_attempt(uuid::Uuid::from_u128(42))
+            .cancellation_key()
+            .expect("second task-attempt owner should produce a cache key");
 
         assert_ne!(root, worker);
-        assert_ne!(worker, run);
-        assert_ne!(root, run);
+        assert_ne!(attempt_one, attempt_two);
+        assert_ne!(attempt_one, root);
+        assert_ne!(attempt_one, worker);
         assert!(!root.contains(raw_key));
         assert!(!worker.contains(raw_key));
-        assert!(!run.contains(raw_key));
+        assert!(!attempt_one.contains(&uuid::Uuid::from_u128(41).to_string()));
     }
 
     #[test]

@@ -4,13 +4,13 @@ use super::*;
 
 pub(super) fn apply_amendment(
     amendment: &PlanAmendment,
-    projection: &ExecutionProjection,
+    projection: &ExecutionAmendmentProjection,
     active: &ExecutionPlanDefinition,
     definition: &mut ExecutionPlanDefinition,
     report: &mut ExecutionValidationReport,
 ) {
     let waiting_replan_nodes = projection
-        .tasks
+        .replan_tasks
         .iter()
         .filter(|task| task.status == ExecutionTaskStatus::WaitingReplan)
         .map(|task| task.node_id.as_str())
@@ -205,15 +205,12 @@ pub(super) fn apply_amendment(
     }
 }
 
-pub(super) fn node_has_started(node_id: &str, projection: &ExecutionProjection) -> bool {
+pub(super) fn node_has_started(node_id: &str, projection: &ExecutionAmendmentProjection) -> bool {
     projection
         .node_statuses
         .get(node_id)
         .is_some_and(|status| *status != ExecutionNodeStatus::Pending)
-        || projection
-            .tasks
-            .iter()
-            .any(|task| task.node_id == node_id && task.status != ExecutionTaskStatus::Pending)
+        || projection.started_node_ids.contains(node_id)
 }
 
 pub(super) fn validate_budget_narrowing(
@@ -358,7 +355,7 @@ pub(super) fn map_items_are_equal_or_narrower(
 
 pub(super) fn node_is_replaceable(
     node_id: &str,
-    projection: &ExecutionProjection,
+    projection: &ExecutionAmendmentProjection,
     allow_waiting_replan: bool,
 ) -> bool {
     let status = projection
@@ -366,22 +363,18 @@ pub(super) fn node_is_replaceable(
         .get(node_id)
         .copied()
         .unwrap_or(ExecutionNodeStatus::Pending);
-    let task_evidence_is_replaceable = projection
-        .tasks
-        .iter()
-        .filter(|task| task.node_id == node_id)
-        .all(|task| {
-            task.status == ExecutionTaskStatus::Pending
-                || (allow_waiting_replan && task.status == ExecutionTaskStatus::WaitingReplan)
-        });
-    task_evidence_is_replaceable
-        && (status == ExecutionNodeStatus::Pending
-            || (allow_waiting_replan && status == ExecutionNodeStatus::Waiting))
+    let started = projection.started_node_ids.contains(node_id);
+    (!started && status == ExecutionNodeStatus::Pending)
+        || (allow_waiting_replan
+            && status == ExecutionNodeStatus::Waiting
+            && projection.replan_tasks.iter().any(|task| {
+                task.node_id == node_id && task.status == ExecutionTaskStatus::WaitingReplan
+            }))
 }
 
 pub(super) fn is_downstream_of_completed(
     node: &ExecutionNode,
-    projection: &ExecutionProjection,
+    projection: &ExecutionAmendmentProjection,
     active: &ExecutionPlanDefinition,
 ) -> bool {
     if node.depends_on.iter().any(|dependency| {

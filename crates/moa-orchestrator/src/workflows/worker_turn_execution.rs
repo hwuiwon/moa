@@ -55,6 +55,10 @@ use crate::services::{
         cancel_completion_owner, completion_idempotency_key,
     },
     session_store::RestateSessionStoreClient,
+    tool_executor::{
+        CaptureWorkerHandReleaseFenceRequest, CheckpointAndReleaseWorkerHandRequest,
+        ToolExecutorClient,
+    },
 };
 use crate::tool_invocation::governed::completion_tool_catalog_pin;
 use crate::tool_invocation::governed::{
@@ -721,6 +725,7 @@ async fn handle_tool_call(
                 turn_id: tool_context.turn_id,
                 generation: tool_context.generation,
                 worker_id,
+                meta,
                 parent_session: session_id,
                 tool_id,
                 tool_call,
@@ -837,7 +842,8 @@ async fn handle_tool_call(
             )
             .await?;
         }
-        GovernedInvocationOutcome::UnknownOutcome { .. }
+        GovernedInvocationOutcome::ExternalJob { .. }
+        | GovernedInvocationOutcome::UnknownOutcome { .. }
         | GovernedInvocationOutcome::NotDispatched { .. } => {
             return Err(TerminalError::new(
                 "worker-origin governed invocation returned an execution-only outcome",
@@ -849,15 +855,15 @@ async fn handle_tool_call(
         // Reuse the existing request_input round-trip rather than inventing a
         // second suspension mechanism: it already emits one `NeedsInput` signal,
         // registers the awakeable on the Worker VO before emitting so a reply can
-        // never race ahead of it, and clears the mapping on timeout.
+        // never race ahead of it, and clears the mapping on cancellation.
         if let ChildInputWaitOutcome::Cancelled(reason) = request_input_from_parent(
-            workflow,
             ctx,
             ChildInputRequestOwner {
                 worker_id,
                 turn_id: tool_context.turn_id,
                 generation: tool_context.generation,
                 parent_session: session_id,
+                meta,
             },
             &moa_core::types::worker::commands::RequestInputInput {
                 question: WORKER_SECURITY_INPUT_QUESTION.to_string(),
@@ -1023,6 +1029,7 @@ struct ChildReportToolRequest<'a> {
     /// it raises so a reply or clear can name exactly this owner.
     generation: u64,
     worker_id: &'a str,
+    meta: &'a SessionMeta,
     parent_session: SessionId,
     tool_id: ToolCallId,
     tool_call: &'a ToolCallContent,
@@ -1035,8 +1042,7 @@ struct ChildReportToolRequest<'a> {
 /// tool result, evidence) so the child's conversation stays consistent, but the work is a
 /// control-plane emit to the owning coordinator rather than a managed-child operation.
 /// `report_to_parent` returns immediately; `request_input` blocks the child turn on a
-/// Restate awakeable until the coordinator answers (`ProvideInput`) or the long timeout
-/// elapses.
+/// Restate awakeable until the coordinator answers (`ProvideInput`) or cancels the turn.
 async fn handle_child_report_tool(
     workflow: &WorkerTurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
@@ -1047,6 +1053,7 @@ async fn handle_child_report_tool(
         turn_id,
         generation,
         worker_id,
+        meta,
         parent_session,
         tool_id,
         tool_call,
@@ -1068,19 +1075,19 @@ async fn handle_child_report_tool(
         }
         ChildReportTool::RequestInput(input) => {
             match request_input_from_parent(
-                workflow,
                 ctx,
                 ChildInputRequestOwner {
                     worker_id,
                     turn_id,
                     generation,
                     parent_session,
+                    meta,
                 },
                 &input,
             )
             .await?
             {
-                ChildInputWaitOutcome::Output { output, .. } => *output,
+                ChildInputWaitOutcome::Output(output) => *output,
                 ChildInputWaitOutcome::Cancelled(reason) => {
                     return Ok(WorkerToolCallDisposition::Cancelled(reason));
                 }
@@ -1141,18 +1148,16 @@ async fn report_to_parent(
     ))
 }
 
-/// Runs the child `request_input` awakeable round-trip and returns the answer (or a
-/// timeout result).
+/// Runs the child `request_input` awakeable round-trip and returns the answer.
 ///
 /// Mirrors the `wait_worker` awakeable pattern with the roles reversed: the child turn
 /// workflow registers an awakeable, stores `(input_request_id → awakeable_id)` on its own
 /// `Worker` VO, emits a `NeedsInput` signal (which arms an idle-coordinator resume), then
-/// `select!`s the awakeable against a long timeout. A later
+/// awaits the awakeable without an expiry. A later
 /// `Worker::post_message(ProvideInput)` resolves the awakeable from the coordinator's
-/// answer. On timeout the mapping is cleared so a late `ProvideInput` is an idempotent
-/// no-op, and the child receives a "no input" result so it can proceed or report blocked.
+/// answer. Cancellation clears the exact mapping so a late `ProvideInput` is an
+/// idempotent no-op.
 async fn request_input_from_parent(
-    workflow: &WorkerTurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
     owner: ChildInputRequestOwner<'_>,
     input: &RequestInputInput,
@@ -1162,6 +1167,7 @@ async fn request_input_from_parent(
         turn_id,
         generation,
         parent_session,
+        meta,
     } = owner;
     let input_request_id = ctx
         .run(|| async { Ok::<_, HandlerError>(Json::from(uuid::Uuid::now_v7().to_string())) })
@@ -1187,6 +1193,19 @@ async fn request_input_from_parent(
         generation,
         input_request_id: input_request_id.clone(),
     };
+    // Capture the exact workspace, instance, and lease generation before publishing
+    // the pending-input registration. Restate journals this read at the workflow call
+    // position, so replay after a later resume keeps the original fence.
+    let expected_hand = crate::restate_identity::replay_safe_request(
+        ctx.service_client::<ToolExecutorClient>()
+            .capture_worker_hand_release_fence(Json::from(CaptureWorkerHandReleaseFenceRequest {
+                session: meta.clone(),
+                worker_id: worker_id.to_string(),
+            })),
+    )
+    .call()
+    .await?
+    .into_inner();
     moa_core::coordination_counters::record_worker_vo_call();
     crate::restate_identity::replay_safe_request(
         ctx.object_client::<WorkerClient>(worker_id.to_string())
@@ -1197,6 +1216,23 @@ async fn request_input_from_parent(
                 awakeable_id,
                 waiting_workflow_id: turn_id.to_string(),
             })),
+    )
+    .call()
+    .await?;
+
+    // Only after the exact input mapping is durable may the hand stop. The captured
+    // fence makes this idempotent without allowing a replay to destroy replacement
+    // compute provisioned after the human answered.
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<ToolExecutorClient>()
+            .checkpoint_and_release_worker_hand(Json::from(
+                CheckpointAndReleaseWorkerHandRequest {
+                    session: meta.clone(),
+                    worker_id: worker_id.to_string(),
+                    input_target: target.clone(),
+                    expected: expected_hand,
+                },
+            )),
     )
     .call()
     .await?;
@@ -1220,38 +1256,18 @@ async fn request_input_from_parent(
     .call()
     .await?;
 
-    let timeout_ms = workflow.session_limits.worker_input_timeout_ms;
     let output = restate_sdk::select! {
         answer = answer_future => {
-            ChildInputWaitOutcome::Output {
-                output: Box::new(ToolOutput::text(
+            ChildInputWaitOutcome::Output(Box::new(ToolOutput::text(
                     format!("Input received: {}", answer?),
                     Duration::ZERO,
-                )),
-                clear_registration: false,
-            }
+                )))
         },
         reason = ctx.promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE) => {
             ChildInputWaitOutcome::Cancelled(reason?)
-        },
-        _ = ctx.sleep(Duration::from_millis(timeout_ms)) => {
-            ChildInputWaitOutcome::Output {
-                output: Box::new(ToolOutput::text(
-                    "No input was received in time. Proceed with your best judgment or report that you are blocked."
-                        .to_string(),
-                    Duration::ZERO,
-                )),
-                clear_registration: true,
-            }
         }
     };
-    let clear_registration = match &output {
-        ChildInputWaitOutcome::Output {
-            clear_registration, ..
-        } => *clear_registration,
-        ChildInputWaitOutcome::Cancelled(_) => true,
-    };
-    if clear_registration {
+    if matches!(output, ChildInputWaitOutcome::Cancelled(_)) {
         moa_core::coordination_counters::record_worker_vo_call();
         crate::restate_identity::replay_safe_request(
             ctx.object_client::<WorkerClient>(worker_id.to_string())
@@ -1267,10 +1283,7 @@ async fn request_input_from_parent(
 }
 
 enum ChildInputWaitOutcome {
-    Output {
-        output: Box<ToolOutput>,
-        clear_registration: bool,
-    },
+    Output(Box<ToolOutput>),
     Cancelled(String),
 }
 
@@ -1322,6 +1335,7 @@ struct ChildInputRequestOwner<'a> {
     turn_id: &'a str,
     generation: u64,
     parent_session: SessionId,
+    meta: &'a SessionMeta,
 }
 
 /// Builds the `NeedsInput` control-plane signal for a child `request_input` round-trip.

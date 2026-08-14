@@ -221,6 +221,7 @@ CREATE TABLE moa.sandbox_workspace_operations (
     reconcile_not_before TIMESTAMPTZ NOT NULL,
     outcome_class TEXT NOT NULL DEFAULT 'not_sent'
         CHECK (outcome_class IN ('not_sent', 'unknown', 'confirmed')),
+    direct_confirmation_pending BOOLEAN NOT NULL DEFAULT FALSE,
     confirmed_disposition TEXT CHECK (
         confirmed_disposition IN ('resource_present', 'resource_absent')
     ),
@@ -266,6 +267,10 @@ CREATE TABLE moa.sandbox_workspace_operations (
     ),
     CONSTRAINT sandbox_workspace_operations_outcome_disposition_pair_check CHECK (
         (outcome_class = 'confirmed') = (confirmed_disposition IS NOT NULL)
+    ),
+    CONSTRAINT sandbox_workspace_operations_direct_confirmation_check CHECK (
+        NOT direct_confirmation_pending
+        OR (outcome_class = 'unknown' AND claim_token IS NULL)
     ),
     CONSTRAINT sandbox_workspace_operations_absence_proof_shape_check CHECK (
         (
@@ -336,7 +341,9 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    IF OLD.outcome_class = 'not_sent' AND NEW.operation_kind <> 'delete' THEN
+    IF OLD.outcome_class = 'unknown'
+       AND OLD.direct_confirmation_pending
+       AND NEW.operation_kind <> 'delete' THEN
         -- A synchronous non-delete provider operation may authoritatively
         -- report that it created or retained no external resource.
         RETURN NEW;
@@ -402,8 +409,6 @@ CREATE TABLE moa.sandbox_workspace_checkpoints (
         UNIQUE (checkpoint_id, workspace_id, tenant_id),
     CONSTRAINT sandbox_workspace_checkpoints_identity_generation_key
         UNIQUE (checkpoint_id, workspace_id, tenant_id, generation),
-    CONSTRAINT sandbox_workspace_checkpoints_generation_key
-        UNIQUE (tenant_id, workspace_id, generation),
     CONSTRAINT sandbox_workspace_checkpoints_workspace_fk
         FOREIGN KEY (workspace_id, tenant_id)
         REFERENCES moa.sandbox_workspaces (workspace_id, tenant_id) ON DELETE RESTRICT,
@@ -486,6 +491,12 @@ CREATE TABLE moa.sandbox_workspace_checkpoints (
     )
 );
 
+-- Failed attempts remain immutable audit rows but do not consume the next
+-- committed revision number forever.
+CREATE UNIQUE INDEX sandbox_workspace_checkpoints_generation_key
+    ON moa.sandbox_workspace_checkpoints (tenant_id, workspace_id, generation)
+    WHERE lifecycle_state IN ('creating', 'available', 'deleting', 'deleted');
+
 CREATE INDEX sandbox_workspace_checkpoints_gc_candidates_idx
     ON moa.sandbox_workspace_checkpoints (
         tenant_id, retention_state, gc_retry_not_before, created_at, generation
@@ -566,6 +577,10 @@ BEGIN
 
     IF OLD.lifecycle_state = 'deleted' AND NEW IS DISTINCT FROM OLD THEN
         RAISE EXCEPTION 'sandbox checkpoint tombstone is immutable'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    IF OLD.lifecycle_state = 'failed' AND NEW IS DISTINCT FROM OLD THEN
+        RAISE EXCEPTION 'failed sandbox checkpoint audit is immutable'
             USING ERRCODE = 'check_violation';
     END IF;
     RETURN NEW;

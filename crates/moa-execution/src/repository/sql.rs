@@ -86,11 +86,12 @@ pub(super) const INSERT_PLANNER_AUDIT_SQL: &str = r#"
         audit_uid, tenant_id, contact_id, session_id, originating_sequence,
         run_uid, plan_revision, call_kind, call_ordinal, outcome,
         provider_model, prompt_version, candidate_hash, candidate_json,
-        compiler_report, duration_micros, created_at
+        compiler_report, input_tokens_uncached, input_tokens_cache_write,
+        input_tokens_cache_read, output_tokens, cost_microusd, duration_micros, created_at
     )
     VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-        $11, $12, $13, $14::JSON, $15::JSON, $16, $17
+        $11, $12, $13, $14::JSON, $15::JSON, $16, $17, $18, $19, $20, $21, $22
     )
     ON CONFLICT DO NOTHING
     RETURNING
@@ -98,7 +99,8 @@ pub(super) const INSERT_PLANNER_AUDIT_SQL: &str = r#"
         provider_model, prompt_version, candidate_hash,
         candidate_json::TEXT AS candidate_json,
         compiler_report::TEXT AS compiler_report,
-        duration_micros
+        input_tokens_uncached, input_tokens_cache_write, input_tokens_cache_read,
+        output_tokens, cost_microusd, duration_micros
 "#;
 
 pub(super) const LOAD_PLANNER_AUDIT_SQL: &str = r#"
@@ -107,7 +109,8 @@ pub(super) const LOAD_PLANNER_AUDIT_SQL: &str = r#"
         provider_model, prompt_version, candidate_hash,
         candidate_json::TEXT AS candidate_json,
         compiler_report::TEXT AS compiler_report,
-        duration_micros
+        input_tokens_uncached, input_tokens_cache_write, input_tokens_cache_read,
+        output_tokens, cost_microusd, duration_micros
     FROM moa.execution_planner_call_audit
     WHERE tenant_id = $1
       AND contact_id IS NOT DISTINCT FROM $2
@@ -175,19 +178,20 @@ pub(super) const LOAD_PLANNING_CONTEXT_BY_ORIGIN_SQL: &str = r#"
 pub(super) const CREATE_RUN_SQL: &str = r#"
     INSERT INTO moa.execution_run (
         run_uid, tenant_id, contact_id, session_id, originating_user_sequence_num,
-        planning_context_uid, planning_context_hash, owner_user_id,
+        planning_context_uid, planning_context_hash, owner_user_id, admitted_identity,
         goal_contract, initial_plan, active_plan, initial_plan_hash, active_plan_hash,
         capability_catalog, authorization_envelope, pinned_instruction_skills,
         source_provenance, source_kind, skill_template_ref,
         skill_template_revision_uid, input, status,
         budget_max_cost_microusd, budget_max_tokens, budget_max_tasks,
         budget_max_tool_calls, budget_max_retrieved_bytes, budget_deadline_at,
-        progress_total_tasks, idempotency_key
+        progress_total_tasks, idempotency_key, activation_state,
+        schedule_uid, schedule_incarnation, schedule_occurrence_sequence
     )
     VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
         $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
-        $24, $25, $26, $27, $28, $29, $30
+        $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35
     )
     ON CONFLICT (
         tenant_id,
@@ -230,9 +234,38 @@ pub(super) const LOAD_RUN_FOR_UPDATE_SQL: &str = r#"
     FOR UPDATE
 "#;
 
+pub(super) const CLAIM_RUN_ACTIVATION_SQL: &str = r#"
+    UPDATE moa.execution_run
+    SET activation_state = 'advancing',
+        last_progress_at = NOW(),
+        updated_at = NOW()
+    WHERE run_uid = $1
+      AND controller_generation = $2
+      AND activation_state = 'queued'
+      AND status NOT IN ('completed', 'partial', 'blocked', 'unsupported', 'failed', 'cancelled')
+    RETURNING *
+"#;
+
+pub(super) const CHECKPOINT_RUN_ACTIVATION_SQL: &str = r#"
+    UPDATE moa.execution_run
+    SET status = $3,
+        activation_state = $4,
+        next_wake_at = $5,
+        waiting_since = $6,
+        ready_task_count = $7,
+        active_task_count = $8,
+        last_progress_at = NOW(),
+        updated_at = NOW()
+    WHERE run_uid = $1
+      AND controller_generation = $2
+      AND activation_state = 'advancing'
+    RETURNING *
+"#;
+
 pub(super) const CONFIRM_RUN_SQL: &str = r#"
     UPDATE moa.execution_run
     SET status = 'queued',
+        activation_state = 'queued',
         queued_at = COALESCE(queued_at, NOW()),
         budget_max_cost_microusd = $3,
         budget_max_tokens = $4,
@@ -242,7 +275,7 @@ pub(super) const CONFIRM_RUN_SQL: &str = r#"
         budget_deadline_at = $8,
         confirmed_plan_hash = $2,
         confirmed_at = NOW(),
-        wake_epoch = wake_epoch + 1,
+        last_progress_at = NOW(),
         updated_at = NOW()
     WHERE run_uid = $1
       AND status = 'awaiting_confirmation'
@@ -291,6 +324,7 @@ pub(super) const INSERT_TASK_BATCH_SQL: &str = r#"
     INSERT INTO moa.execution_task (
         task_id, run_uid, tenant_id, contact_id, node_id, item_key,
         requirement_ids, plan_revision, status, attempt, generation,
+        attempt_generation, attempt_state,
         input, task_kind, compensation_contract, retry_policy,
         estimate_cost_microusd, estimate_tokens, estimate_tasks,
         estimate_tool_calls, estimate_retrieved_bytes, generation_history
@@ -298,6 +332,7 @@ pub(super) const INSERT_TASK_BATCH_SQL: &str = r#"
     SELECT
         input.task_id, $2, $3, $4, input.node_id, input.item_key,
         input.requirement_ids, $5, 'pending', 1, input.generation,
+        input.generation, 'idle',
         input.input, input.task_kind, input.compensation_contract, input.retry_policy,
         input.estimate_cost_microusd, input.estimate_tokens,
         input.estimate_tasks, input.estimate_tool_calls,
@@ -330,8 +365,11 @@ pub(super) const LOAD_TASK_BATCH_SQL: &str = r#"
         task.actual_cost_microusd, task.actual_tokens, task.actual_tasks,
         task.actual_tool_calls, task.actual_retrieved_bytes,
         task.current_outcome, task.output, task.error, task.citations,
-        task.generation_history, task.outcome_audit, task.created_at,
-        task.updated_at, task.reserved_at, task.started_at, task.completed_at
+        task.generation_history, task.outcome_audit, task.attempt_generation, task.attempt_state, task.attempt_started_at,
+        task.last_progress_at, task.progress_step_bound_seconds, task.attempt_deadline_at, task.waiting_since, task.ready_at,
+        task.external_job_uid, task.active_dispatch_uid, task.dispatch_sequence,
+        task.created_at, task.updated_at, task.reserved_at,
+        task.started_at, task.completed_at
     FROM input
     JOIN moa.execution_task AS task
       ON task.run_uid = $2
@@ -353,6 +391,9 @@ pub(super) const LOAD_TASK_FOR_UPDATE_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
+        attempt_deadline_at, waiting_since, ready_at, external_job_uid,
+        active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
     FROM moa.execution_task
     WHERE run_uid = $1 AND task_id = $2
@@ -371,6 +412,9 @@ pub(super) const LOAD_TASK_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
+        attempt_deadline_at, waiting_since, ready_at, external_job_uid,
+        active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
     FROM moa.execution_task
     WHERE run_uid = $1 AND task_id = $2
@@ -431,7 +475,8 @@ pub(super) const RESERVE_TASK_SQL: &str = r#"
         reserved_retrieved_bytes = $8,
         reserved_at = NOW(),
         updated_at = NOW()
-    WHERE run_uid = $1 AND task_id = $2 AND generation = $3 AND status = 'pending'
+    WHERE run_uid = $1 AND task_id = $2
+      AND generation = $3 AND attempt_generation = $3 AND status = 'pending'
     RETURNING
         task_id, run_uid, tenant_id, contact_id, node_id, item_key,
         requirement_ids, plan_revision, status, attempt, generation,
@@ -443,13 +488,23 @@ pub(super) const RESERVE_TASK_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
+        attempt_deadline_at, waiting_since, ready_at, external_job_uid,
+        active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
 "#;
 
 pub(super) const MARK_TASK_RUNNING_SQL: &str = r#"
     UPDATE moa.execution_task
-    SET status = 'running', started_at = COALESCE(started_at, NOW()), updated_at = NOW()
-    WHERE run_uid = $1 AND task_id = $2 AND generation = $3 AND status = 'reserved'
+    SET status = 'running',
+        attempt_state = 'running',
+        attempt_started_at = NOW(),
+        last_progress_at = NOW(),
+        waiting_since = NULL,
+        started_at = COALESCE(started_at, NOW()),
+        updated_at = NOW()
+    WHERE run_uid = $1 AND task_id = $2
+      AND generation = $3 AND attempt_generation = $3 AND status = 'reserved'
     RETURNING
         task_id, run_uid, tenant_id, contact_id, node_id, item_key,
         requirement_ids, plan_revision, status, attempt, generation,
@@ -461,14 +516,25 @@ pub(super) const MARK_TASK_RUNNING_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
+        attempt_deadline_at, waiting_since, ready_at, external_job_uid,
+        active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
 "#;
 
 pub(super) const RESUME_TASK_SQL: &str = r#"
     UPDATE moa.execution_task
-    SET status = 'running',
+    SET status = 'ready',
         attempt = $5,
         generation = $6,
+        attempt_generation = $9,
+        attempt_state = 'idle',
+        attempt_started_at = NULL,
+        attempt_deadline_at = NULL,
+        active_dispatch_uid = NULL,
+        waiting_since = NULL,
+        ready_at = $10,
+        last_progress_at = $10,
         generation_history = generation_history || jsonb_build_array($7::JSONB),
         resume_input_history = CASE
             WHEN $8::JSONB IS NULL THEN resume_input_history
@@ -478,8 +544,9 @@ pub(super) const RESUME_TASK_SQL: &str = r#"
             WHEN $8::JSONB IS NULL THEN current_outcome
             ELSE NULL
         END,
-        updated_at = NOW()
-    WHERE run_uid = $1 AND task_id = $2 AND status = $3 AND generation = $4
+        updated_at = $10
+    WHERE run_uid = $1 AND task_id = $2 AND status = $3
+      AND generation = $4 AND attempt_generation = $4
     RETURNING
         task_id, run_uid, tenant_id, contact_id, node_id, item_key,
         requirement_ids, plan_revision, status, attempt, generation,
@@ -491,6 +558,9 @@ pub(super) const RESUME_TASK_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
+        attempt_deadline_at, waiting_since, ready_at, external_job_uid,
+        active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
 "#;
 
@@ -506,6 +576,9 @@ pub(super) const LIST_TASKS_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
+        attempt_deadline_at, waiting_since, ready_at, external_job_uid,
+        active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
     FROM moa.execution_task
     WHERE run_uid = $1
@@ -515,24 +588,6 @@ pub(super) const LIST_TASKS_SQL: &str = r#"
       )
     ORDER BY node_id, item_key, task_id
     LIMIT $5
-"#;
-
-pub(super) const LIST_ALL_TASKS_SQL: &str = r#"
-    SELECT
-        task_id, run_uid, tenant_id, contact_id, node_id, item_key,
-        requirement_ids, plan_revision, status, attempt, generation,
-        input, resume_input_history, task_kind, compensation_contract, retry_policy,
-        estimate_cost_microusd, estimate_tokens, estimate_tasks,
-        estimate_tool_calls, estimate_retrieved_bytes,
-        reserved_cost_microusd, reserved_tokens, reserved_tasks,
-        reserved_tool_calls, reserved_retrieved_bytes,
-        actual_cost_microusd, actual_tokens, actual_tasks,
-        actual_tool_calls, actual_retrieved_bytes,
-        current_outcome, output, error, citations, generation_history, outcome_audit,
-        created_at, updated_at, reserved_at, started_at, completed_at
-    FROM moa.execution_task
-    WHERE run_uid = $1
-    ORDER BY node_id, item_key, task_id
 "#;
 
 pub(super) const RECONCILE_RUN_OUTCOME_SQL: &str = r#"
@@ -561,6 +616,24 @@ pub(super) const RECONCILE_RUN_OUTCOME_SQL: &str = r#"
 pub(super) const RECORD_TASK_OUTCOME_SQL: &str = r#"
     UPDATE moa.execution_task
     SET status = $4,
+        attempt_state = CASE
+            WHEN $4 IN ('waiting_input', 'waiting_review', 'waiting_signal',
+                        'waiting_timer', 'waiting_external', 'waiting_replan') THEN 'waiting'
+            WHEN $4 = 'unknown_outcome' THEN 'unknown_outcome'
+            WHEN $4 IN ('completed', 'skipped', 'failed', 'cancelled') THEN 'terminal'
+            WHEN $4 = 'running' THEN attempt_state
+            ELSE attempt_state
+        END,
+        waiting_since = CASE
+            WHEN $4 IN ('waiting_input', 'waiting_review', 'waiting_signal',
+                        'waiting_timer', 'waiting_external', 'waiting_replan')
+                THEN COALESCE(waiting_since, NOW())
+            ELSE NULL
+        END,
+        attempt_deadline_at = CASE WHEN $4 = 'running' THEN attempt_deadline_at ELSE NULL END,
+        progress_step_bound_seconds = CASE WHEN $4 = 'running'
+                                           THEN progress_step_bound_seconds ELSE NULL END,
+        last_progress_at = GREATEST(last_progress_at, NOW()),
         reserved_cost_microusd = $5,
         reserved_tokens = $6,
         reserved_tasks = $7,
@@ -577,9 +650,11 @@ pub(super) const RECORD_TASK_OUTCOME_SQL: &str = r#"
         citations = $18,
         outcome_audit = outcome_audit || jsonb_build_array($19::JSONB),
         completed_at = CASE WHEN $20 THEN COALESCE(completed_at, NOW()) ELSE NULL END,
+        failure_fingerprint = $21,
         updated_at = NOW()
-    WHERE run_uid = $1 AND task_id = $2 AND generation = $3
-      AND status NOT IN ('completed', 'skipped', 'failed', 'cancelled')
+    WHERE run_uid = $1 AND task_id = $2
+      AND generation = $3
+      AND status NOT IN ('completed', 'skipped', 'failed', 'cancelled', 'unknown_outcome')
     RETURNING
         task_id, run_uid, tenant_id, contact_id, node_id, item_key,
         requirement_ids, plan_revision, status, attempt, generation,
@@ -591,12 +666,19 @@ pub(super) const RECORD_TASK_OUTCOME_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
+        attempt_deadline_at, waiting_since, ready_at, external_job_uid,
+        active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
 "#;
 
 pub(super) const RECORD_RESERVATION_REJECTION_SQL: &str = r#"
     UPDATE moa.execution_task
     SET status = 'failed',
+        attempt_state = 'terminal',
+        attempt_deadline_at = NULL,
+        waiting_since = NULL,
+        last_progress_at = NOW(),
         reserved_cost_microusd = 0,
         reserved_tokens = 0,
         reserved_tasks = 0,
@@ -612,9 +694,11 @@ pub(super) const RECORD_RESERVATION_REJECTION_SQL: &str = r#"
         error = $9,
         citations = $10,
         outcome_audit = outcome_audit || jsonb_build_array($11::JSONB),
+        failure_fingerprint = $12,
         completed_at = NOW(),
         updated_at = NOW()
-    WHERE run_uid = $1 AND task_id = $2 AND generation = $3 AND status = 'running'
+    WHERE run_uid = $1 AND task_id = $2
+      AND generation = $3 AND attempt_generation = $3 AND status = 'running'
     RETURNING
         task_id, run_uid, tenant_id, contact_id, node_id, item_key,
         requirement_ids, plan_revision, status, attempt, generation,
@@ -626,6 +710,9 @@ pub(super) const RECORD_RESERVATION_REJECTION_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
+        attempt_deadline_at, waiting_since, ready_at, external_job_uid,
+        active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
 "#;
 
@@ -645,12 +732,19 @@ pub(super) const APPEND_TASK_OUTCOME_AUDIT_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
+        attempt_deadline_at, waiting_since, ready_at, external_job_uid,
+        active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
 "#;
 
 pub(super) const SUPERSEDE_REPLAN_TASK_SQL: &str = r#"
     UPDATE moa.execution_task
     SET status = 'cancelled',
+        attempt_state = 'terminal',
+        attempt_deadline_at = NULL,
+        waiting_since = NULL,
+        last_progress_at = NOW(),
         current_outcome = $4,
         reserved_cost_microusd = 0,
         reserved_tokens = 0,
@@ -677,16 +771,40 @@ pub(super) const SUPERSEDE_REPLAN_TASK_SQL: &str = r#"
         actual_cost_microusd, actual_tokens, actual_tasks,
         actual_tool_calls, actual_retrieved_bytes,
         current_outcome, output, error, citations, generation_history, outcome_audit,
+        attempt_generation, attempt_state, attempt_started_at, last_progress_at, progress_step_bound_seconds,
+        attempt_deadline_at, waiting_since, ready_at, external_job_uid,
+        active_dispatch_uid, dispatch_sequence,
         created_at, updated_at, reserved_at, started_at, completed_at
 "#;
 
 pub(super) const APPEND_AMENDMENT_SQL: &str = r#"
+    WITH remaining_wait AS (
+        SELECT MIN(waiting_since) AS waiting_since
+        FROM moa.execution_task
+        WHERE run_uid=$1 AND task_id<>$14
+          AND status IN ('waiting_input','waiting_review','waiting_signal',
+                         'waiting_timer','waiting_external','waiting_replan')
+    ), remaining_reasons AS (
+        SELECT COALESCE(jsonb_agg(reason ORDER BY ordinal), '[]'::JSONB) AS reasons
+        FROM moa.execution_run AS source,
+             jsonb_array_elements(source.waiting_reasons)
+                 WITH ORDINALITY AS item(reason, ordinal)
+        WHERE source.run_uid=$1 AND COALESCE(reason->>'task_id','')<>$14::TEXT
+    )
     UPDATE moa.execution_run
     SET active_plan = $4,
         active_plan_hash = $5,
         plan_revision = $3,
         plan_history = plan_history || jsonb_build_array($6::JSONB),
-        status = 'running',
+        status = CASE
+            WHEN waiting_input_task_count > 0 THEN 'waiting_input'
+            WHEN waiting_review_task_count > 0 THEN 'waiting_review'
+            WHEN waiting_signal_task_count > 0 THEN 'waiting_signal'
+            WHEN waiting_timer_task_count > 0 THEN 'waiting_timer'
+            WHEN waiting_external_task_count > 0 THEN 'waiting_external'
+            WHEN waiting_replan_task_count - 1 > 0 THEN 'waiting_replan'
+            ELSE 'running'
+        END,
         reserved_cost_microusd = $7,
         reserved_tokens = $8,
         reserved_tasks = $9,
@@ -695,45 +813,26 @@ pub(super) const APPEND_AMENDMENT_SQL: &str = r#"
         consumed_tasks = $12,
         budget_overrun = $13,
         progress_cancelled_tasks = progress_cancelled_tasks + 1,
-        wake_epoch = wake_epoch + 1,
+        waiting_task_count = waiting_task_count - 1,
+        waiting_replan_task_count = waiting_replan_task_count - 1,
+        waiting_reasons = remaining_reasons.reasons,
+        waiting_reasons_truncated = jsonb_array_length(remaining_reasons.reasons)
+            < waiting_task_count - 1,
+        waiting_since = remaining_wait.waiting_since,
         updated_at = NOW()
+    FROM remaining_wait, remaining_reasons
     WHERE run_uid = $1 AND plan_revision = $2 AND status = 'waiting_replan'
+      AND waiting_task_count > 0 AND waiting_replan_task_count = 1
     RETURNING *
-"#;
-
-pub(super) const LOAD_NONTERMINAL_TASKS_FOR_UPDATE_SQL: &str = r#"
-    SELECT
-        task_id, run_uid, tenant_id, contact_id, node_id, item_key,
-        requirement_ids, plan_revision, status, attempt, generation,
-        input, resume_input_history, task_kind, compensation_contract, retry_policy,
-        estimate_cost_microusd, estimate_tokens, estimate_tasks,
-        estimate_tool_calls, estimate_retrieved_bytes,
-        reserved_cost_microusd, reserved_tokens, reserved_tasks,
-        reserved_tool_calls, reserved_retrieved_bytes,
-        actual_cost_microusd, actual_tokens, actual_tasks,
-        actual_tool_calls, actual_retrieved_bytes,
-        current_outcome, output, error, citations, generation_history, outcome_audit,
-        created_at, updated_at, reserved_at, started_at, completed_at
-    FROM moa.execution_task
-    WHERE run_uid = $1
-      AND status IN ('pending', 'reserved', 'running', 'waiting_input', 'waiting_replan')
-    ORDER BY task_id
-    FOR UPDATE
-"#;
-
-pub(super) const LIST_COMPENSATIONS_SQL: &str = r#"
-    SELECT compensation_id, run_uid, forward_task_id, registered_sequence,
-           forward_generation, compensator, mapped_input, status, attempt,
-           generation, outcome, error, created_at, updated_at, started_at, completed_at
-    FROM moa.execution_compensation
-    WHERE run_uid = $1
-    ORDER BY registered_sequence DESC
 "#;
 
 pub(super) const LOAD_COMPENSATION_FOR_UPDATE_SQL: &str = r#"
     SELECT compensation_id, run_uid, forward_task_id, registered_sequence,
            forward_generation, compensator, mapped_input, status, attempt,
-           generation, outcome, error, created_at, updated_at, started_at, completed_at
+           generation, outcome, error, created_at, updated_at, started_at, completed_at,
+           attempt_generation, attempt_state, attempt_started_at, last_progress_at,
+           attempt_deadline_at, waiting_since, active_dispatch_uid, external_job_uid,
+           release_intent, dispatch_sequence
     FROM moa.execution_compensation
     WHERE run_uid = $1 AND compensation_id = $2
     FOR UPDATE
@@ -761,60 +860,4 @@ pub(super) const INSERT_COMPENSATION_SQL: &str = r#"
     WHERE run.run_uid = $2
     ON CONFLICT (forward_task_id) DO NOTHING
     RETURNING compensation_id
-"#;
-
-pub(super) const FENCE_RUN_FOR_COMPENSATION_SQL: &str = r#"
-    UPDATE moa.execution_run
-    SET pending_terminal_status = $4,
-        pending_terminal_reason = $5,
-        pending_terminal_cause = $6,
-        pending_terminal_output = $7,
-        cancellation_reason = $8,
-        waiting_reasons = '[]'::JSONB,
-        wake_epoch = wake_epoch + 1,
-        updated_at = NOW()
-    WHERE run_uid = $1
-      AND plan_revision = $2
-      AND wake_epoch = $3
-      AND pending_terminal_status IS NULL
-      AND status NOT IN ('completed', 'partial', 'blocked', 'unsupported', 'failed', 'cancelled', 'compensating')
-    RETURNING *
-"#;
-
-pub(super) const BEGIN_COMPENSATION_SQL: &str = r#"
-    UPDATE moa.execution_run
-    SET status = 'compensating',
-        waiting_reasons = '[]'::JSONB,
-        wake_epoch = wake_epoch + 1,
-        updated_at = NOW()
-    WHERE run_uid = $1
-      AND plan_revision = $2
-      AND wake_epoch = $3
-      AND pending_terminal_status IS NOT NULL
-      AND status NOT IN ('completed', 'partial', 'blocked', 'unsupported', 'failed', 'cancelled', 'compensating')
-      AND NOT EXISTS (
-          SELECT 1 FROM moa.execution_task
-          WHERE run_uid = $1
-            AND status NOT IN ('completed', 'skipped', 'failed', 'cancelled')
-      )
-    RETURNING *
-"#;
-
-pub(super) const CLAIM_COMPENSATION_SQL: &str = r#"
-    UPDATE moa.execution_compensation
-    SET status = 'running',
-        started_at = COALESCE(started_at, NOW()),
-        updated_at = NOW()
-    WHERE run_uid = $1
-      AND compensation_id = $2
-      AND generation = $3
-      AND status = 'pending'
-      AND registered_sequence = (
-          SELECT MAX(registered_sequence)
-          FROM moa.execution_compensation
-          WHERE run_uid = $1 AND status <> 'completed'
-      )
-    RETURNING compensation_id, run_uid, forward_task_id, registered_sequence,
-              forward_generation, compensator, mapped_input, status, attempt,
-              generation, outcome, error, created_at, updated_at, started_at, completed_at
 "#;

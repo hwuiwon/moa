@@ -24,7 +24,8 @@ use moa_orchestrator::services::{
         ExecutionActionReviewSettlement, SettleExecutionActionReviewRequest,
         settle_execution_action_review,
     },
-    action_reviews_reaper::ActionReviewReaper,
+    action_reviews_reaper::{ActionReviewReaper, ActionReviewTimeoutDelivery},
+    durable_timeout::ActionReviewTimeout,
 };
 use moa_test_support::postgres::TestDb;
 use sqlx::PgPool;
@@ -222,6 +223,92 @@ async fn unexpired_pending_review_survives_sweep_db() {
             .await
             .expect("review row should remain readable");
     assert_eq!(status, "pending", "unexpired review stays pending");
+}
+
+#[tokio::test]
+async fn durable_timeout_requires_the_exact_action_review_generation_db() {
+    // Pins: a delayed timeout from an older owner generation is a successful
+    // no-op; only the exact persisted owner incarnation may fail the review closed.
+    let test_db = test_pool().await;
+    let pool = test_db.store().pool().clone();
+    let review_id = insert_review(&pool, "command_execution", "high", ReviewClock::Expired).await;
+    let envelope: ActionEnvelope = serde_json::from_value(
+        sqlx::query_scalar("SELECT envelope FROM tenant_action_reviews WHERE id = $1")
+            .bind(review_id)
+            .fetch_one(&pool)
+            .await
+            .expect("review envelope should load"),
+    )
+    .expect("review envelope should decode");
+    let ActionReviewOwner::Coordinator {
+        session_id,
+        turn_id,
+        generation,
+    } = envelope.owner.clone()
+    else {
+        panic!("fixture should create a coordinator review");
+    };
+    let stale = ActionReviewTimeout {
+        tenant_id: envelope.tenant_id,
+        review_id,
+        owner: ActionReviewOwner::Coordinator {
+            session_id,
+            turn_id: turn_id.clone(),
+            generation: generation + 1,
+        },
+    };
+    let reaper = ActionReviewReaper::new(pool.clone());
+
+    assert_eq!(
+        reaper
+            .apply_timeout(&stale)
+            .await
+            .expect("stale timeout should be a no-op"),
+        moa_orchestrator::services::action_reviews_reaper::ActionReviewTimeoutDelivery::Stale
+    );
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM tenant_action_reviews WHERE id = $1")
+            .bind(review_id)
+            .fetch_one(&pool)
+            .await
+            .expect("review status should load");
+    assert_eq!(status, "pending", "stale generation must not fail closed");
+
+    let expected_owner = envelope.owner.clone();
+    let exact = ActionReviewTimeout {
+        tenant_id: envelope.tenant_id,
+        review_id,
+        owner: envelope.owner,
+    };
+    let delivery = reaper
+        .apply_timeout(&exact)
+        .await
+        .expect("exact timeout should apply");
+    let ActionReviewTimeoutDelivery::Conversational {
+        timed_out_at,
+        release,
+    } = delivery
+    else {
+        panic!("exact conversational timeout should return its owner release");
+    };
+    assert_eq!(release.review_id, review_id);
+    assert_eq!(release.owner, expected_owner);
+    assert!(
+        !release.resume_queued,
+        "the exact delayed delivery releases only its current owner hold"
+    );
+    let (status, decided_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as("SELECT status, decided_at FROM tenant_action_reviews WHERE id = $1")
+            .bind(review_id)
+            .fetch_one(&pool)
+            .await
+            .expect("review status should load");
+    assert_eq!(status, "timeout", "exact generation must fail closed");
+    assert_eq!(
+        decided_at,
+        Some(timed_out_at),
+        "the delivery must expose the timestamp committed by the timeout transition"
+    );
 }
 
 #[tokio::test]
@@ -855,12 +942,21 @@ async fn insert_execution_task(pool: &PgPool, tenant_id: TenantId) -> ExecutionT
         r#"
         INSERT INTO moa.execution_run (
             run_uid, tenant_id, session_id, originating_user_sequence_num,
-            planning_context_uid, planning_context_hash, owner_user_id, goal_contract,
+            planning_context_uid, planning_context_hash, owner_user_id, admitted_identity,
+            goal_contract,
             initial_plan, active_plan, initial_plan_hash, active_plan_hash,
             capability_catalog, authorization_envelope, pinned_instruction_skills,
             source_provenance, source_kind,
             input, status, queued_at
-        ) VALUES ($1, $2, $3, 1, $4, $5, 'test-owner', '{}'::JSONB, $6,
+        ) VALUES ($1, $2, $3, 1, $4, $5, 'test-owner',
+                  jsonb_build_object(
+                      'identity_type', 'service',
+                      'id', $2::TEXT,
+                      'tenant_id', $2::TEXT,
+                      'api_key_id', NULL,
+                      'acting_on_behalf_of', NULL
+                  ),
+                  '{}'::JSONB, $6,
                   $6, $5, $5, '{}'::JSONB, '{}'::JSONB, '[]'::JSONB,
                   '{"kind":"generated_plan"}'::JSONB,
                   'generated_plan', '{}'::JSONB, 'queued', NOW())
@@ -901,6 +997,7 @@ async fn insert_execution_task(pool: &PgPool, tenant_id: TenantId) -> ExecutionT
         run_uid,
         task_uid,
         generation: 1,
+        attempt_generation: 1,
     }
 }
 
@@ -935,6 +1032,7 @@ async fn insert_execution_compensation(
         run_uid: task_origin.run_uid,
         compensation_id,
         generation: 1,
+        attempt_generation: 1,
     }
 }
 

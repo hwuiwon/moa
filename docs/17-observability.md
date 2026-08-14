@@ -97,12 +97,32 @@ in-process helper plumbing, not as the hosted observation source of truth.
 ## Execution Runs
 
 Durable execution is observed through `moa.execution_run` and
-`moa.execution_task`, Restate invocation state, compact session events, and
-bounded trace attributes. A plan fully materializes its approved logical work,
-while `execution.max_in_flight_tasks` bounds the attached calls and live task
-runtimes owned by one run; pending rows are storage-only. Provider
-concurrency/rate pacing and governed tool or hand capacity add independent
-physical limits without changing logical coverage.
+its node/task/attempt/compensation/trigger/outbox/external-job projections,
+bounded Restate activation state, compact session events, and trace attributes.
+Pending and every waiting phase are storage-only; only admitted attempts may
+own active capacity or hands.
+
+Fleet health uses bounded labels only. Alert-driving series cover oldest-ready age,
+overdue deadlines, trigger/outbox lag and dead letters, oldest active-attempt and
+external-job age, admission utilization by resource and fleet/tenant-peak scope,
+durable reconciliation and retention last-success ages, and parked tasks retaining
+hands. Bounded aggregate diagnostics such as the per-phase run census and tenant
+maximum share remain available to operational dashboards even when they do not
+have a dedicated alert. None carry a tenant, run, task, deployment, or provider
+account identifier. IDs belong in traces and Postgres drilldown.
+
+`k8s/scripts/validate-observability.sh` enforces the invariant directly: every
+`pub fn record_*` in `runtime_metrics.rs` must have a caller outside that file and
+outside `tests/`, so a recorder can never again be declared without a production
+producer. Alert and dashboard inventories separately pin the operational consumers.
+
+Reconciliation and retention expose separate durable health receipts. Trigger/outbox
+repair drives `moa_execution_maintenance_*`; terminal-evidence retention drives
+`moa_execution_retention_*`. A missing receipt exports as unready with infinite age.
+Retention normally completes a bounded pass at least once per hour, so
+`MOAExecutionRetentionStale` warns when the receipt is absent, unready, or older than
+two hours. No retention backlog series is exported until the repository can provide a
+bounded, authoritative backlog snapshot.
 
 ### Replay-Safe Trace Correlation
 
@@ -119,13 +139,12 @@ The operational path remains:
 ```text
 session turn
   -> route / planner / compiler
-  -> ExecutionRun
-  -> ExecutionTask
+  -> ExecutionRunController activation
+  -> ExecutionTaskAttempt activation
   -> model call or governed capability/tool call
   -> ActionPolicy and optional action review
-  -> action-review resolution outbox retry
-  -> resumed ExecutionTask
-  -> ExecutionRun fan-in
+  -> persisted wait/trigger or action-review dispatch
+  -> later bounded attempt/controller activation
   -> terminal synthesis turn
 ```
 
@@ -137,8 +156,8 @@ than reconstructed from the current handler attempt. Action reviews preserve
 two distinct contexts. Review creation stores the
 original execution-task context as the future link target. Terminal resolution
 stores the resolver's current context as the retry callback's remote parent.
-The reaper reinjects the resolution parent; `ExecutionTask/resolve_action_review`
-adopts it and links the separately stored original task context. Replay and
+The maintenance delivery reinjects the resolution parent; the bounded task
+resolution activation adopts it and links the separately stored original task context. Replay and
 claim retry preserve both byte-for-byte. Invalid `traceparent` is treated as
 absent; invalid `tracestate` is dropped while a valid parent remains.
 Non-empty `tracestate` follows W3C Level 2 limits and MOA's 512-byte cap.

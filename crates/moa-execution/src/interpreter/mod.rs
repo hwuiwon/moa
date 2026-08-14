@@ -1,26 +1,29 @@
-//! Pure execution-plan scheduling and logical-task materialization.
+//! Pure bounded logical-task materialization for execution-plan nodes.
 
-mod aggregate;
+mod catalog;
 mod compensation;
 mod materialize;
-mod projection;
 mod reservation;
-mod terminal;
 
-use aggregate::*;
+use catalog::*;
 pub use compensation::resolve_compensation_input;
-use materialize::*;
-use projection::*;
 use reservation::*;
-use terminal::*;
+
+/// Derives the bounded reservation for one persisted completion verifier.
+pub(crate) fn verifier_turn_reservation(
+    config: &ExecutionConfig,
+    max_turns: u32,
+) -> Result<ExecutionEstimate> {
+    turn_reservation(config, max_turns, 1, true)
+}
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use moa_artifacts::execution_plan::{
-    CapabilityReference, CompletionCheckKind, ExecutionFailureClass, ExecutionGoalContract,
-    ExecutionNode, ExecutionOperation, ExecutionReducer, ExecutionTaskOutcome, ExecutionTaskResult,
-    MapTask, RetryPolicy,
+    CapabilityReference, ExecutionFailureClass, ExecutionGoalContract, ExecutionNode,
+    ExecutionOperation, ExecutionReducer, ExecutionTaskOutcome, ExecutionTaskResult,
+    ExecutionTemporalTarget, MapTask,
 };
 
 use moa_config::ExecutionConfig;
@@ -34,19 +37,10 @@ use crate::{
     budget::BudgetLedger,
     capability::{
         ExecutionCapability, ExecutionCapabilityCatalog, ExecutionEstimate, canonical_sort_key,
-        catalog_hash, task_output_hash,
     },
     compiler::CanonicalExecutionPlan,
-    completion::{
-        CompletionEvaluationRequest, CompletionStatus, completed_output, evaluate_completion,
-        map_output, node_outputs, terminal_projection_from_evaluation,
-    },
     schema::validate_instance,
-    state::{
-        ExecutionNodeStatus, ExecutionProjection, ExecutionTaskFailure, ExecutionTaskId,
-        ExecutionTaskStatus, LogicalTask, LogicalTaskKind, ScheduleDecision, TerminalProjection,
-        VerifierTaskSummary, WaitingReason, task_status_from_outcome,
-    },
+    state::{ExecutionProjection, ExecutionTaskId, LogicalTask, LogicalTaskKind},
 };
 
 /// Validates a completed task outcome against its concrete plan-node output contract.
@@ -106,11 +100,12 @@ fn task_output_schema(node: &ExecutionNode) -> &Value {
         | ExecutionOperation::Reduce { .. }
         | ExecutionOperation::Review { .. }
         | ExecutionOperation::WaitSignal { .. }
+        | ExecutionOperation::WaitUntil { .. }
         | ExecutionOperation::Output { .. } => &node.output_schema,
     }
 }
 
-/// Complete pure input to one scheduler evaluation.
+/// Complete pure input to one bounded materialization evaluation.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScheduleRequest {
@@ -130,207 +125,193 @@ pub struct ScheduleRequest {
     pub config: ExecutionConfig,
     /// Current pure run-level budget ledger.
     pub budget_ledger: BudgetLedger,
-    /// Deterministic scheduler time.
+    /// Deterministic materialization time.
     pub now: DateTime<Utc>,
 }
 
-/// One scheduler decision paired with the exact effective projection it evaluated.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScheduleOutcome {
-    /// Ready, waiting, terminal, or no-progress scheduler decision.
-    pub decision: ScheduleDecision,
-    /// Projection after deterministic conditions and aggregate nodes were derived.
-    pub effective_projection: ExecutionProjection,
+/// One bounded deterministic logical-task page for a single eligible node.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodeMaterializationPage {
+    /// Stable logical tasks for this source cursor page.
+    pub tasks: Vec<LogicalTask>,
+    /// Cursor immediately after this page.
+    pub next_cursor: u64,
+    /// Whether the deterministic materialization source is exhausted.
+    pub source_exhausted: bool,
+    /// Exact reduce-round source fence used for this page, when this is a reduce node.
+    pub reduce_cursor: Option<ReduceMaterializationCursor>,
+    /// Aggregate output for a source that completes without creating a logical task.
+    pub terminal_output: Option<Value>,
+    /// Whether the node's declared condition evaluated false and the node must be skipped.
+    pub condition_skipped: bool,
 }
 
-/// Returns map nodes whose first deterministic materialization contains zero items.
-///
-/// The repository uses these node IDs to persist a zero-fan-out marker even though
-/// the scheduler has no logical task row to return for an empty map.
-pub fn ready_empty_map_nodes(request: &ScheduleRequest) -> Result<Vec<String>> {
-    validate_projection(request)?;
-    let mut outputs = node_outputs(&request.plan, &request.projection)?;
-    let mut statuses = request.projection.node_statuses.clone();
-    apply_false_conditions(request, &mut statuses, &mut outputs)?;
-    derive_aggregate_nodes(request, &mut statuses, &mut outputs)?;
-    apply_false_conditions(request, &mut statuses, &mut outputs)?;
+/// Exact reduce-round source position used to derive one materialization page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReduceMaterializationCursor {
+    /// One-based reduction round.
+    pub round: u64,
+    /// Number of batches committed before this page.
+    pub batch_cursor: u64,
+    /// Total input values consumed by this round.
+    pub round_input_count: u64,
+}
 
-    let mut node_ids = Vec::new();
-    for node in &request.plan.definition.nodes {
-        let ExecutionOperation::Map {
-            items, max_items, ..
-        } = &node.operation
-        else {
-            continue;
-        };
-        if effective_status(&statuses, &node.id) != Some(ExecutionNodeStatus::Completed)
-            || request
-                .projection
-                .tasks
-                .iter()
-                .any(|task| task.node_id == node.id)
-        {
-            continue;
-        }
-        let dependencies = node.depends_on.iter().cloned().collect::<BTreeSet<_>>();
-        let resolved = resolve_bindings(
-            items,
-            &BindingContext {
-                run_input: &request.run_input,
-                node_outputs: &outputs,
-                dependencies: &dependencies,
-                item: None,
-                item_key: None,
-            },
-        )?;
-        let values = resolved.as_array().ok_or_else(|| Error::Binding {
-            path: format!("node.{}.operation.items", node.id),
-            message: "map items must resolve to an array".to_string(),
-        })?;
-        let count = u64::try_from(values.len()).map_err(|_| Error::ArithmeticOverflow {
-            context: format!("map {} item count", node.id),
-        })?;
-        if count > *max_items {
-            return Err(Error::InvalidProjection {
-                message: format!("map {} exceeds max_items", node.id),
-            });
-        }
-        if values.is_empty() {
-            node_ids.push(node.id.clone());
-        }
+/// Bounded source slice and persisted cursor for one reduce round.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReduceMaterializationPageInput {
+    /// One-based reduction round.
+    pub round: u64,
+    /// Number of batches already materialized in this round.
+    pub batch_cursor: u64,
+    /// Persisted input count, or `None` only while round one resolves immutable plan items.
+    pub round_input_count: Option<u64>,
+    /// Exact contiguous input values for this page; empty in round one, whose source is the plan.
+    pub page_inputs: Vec<Value>,
+}
+
+/// Materializes only one bounded eligible-node page without a full task projection.
+pub fn materialize_node_page(
+    request: &ScheduleRequest,
+    node_id: &str,
+    referenced_outputs: &BTreeMap<String, Value>,
+    cursor: u64,
+    limit: u32,
+    reduce: Option<&ReduceMaterializationPageInput>,
+) -> Result<NodeMaterializationPage> {
+    if limit == 0 || limit > 1_000 {
+        return Err(Error::InvalidProjection {
+            message: "node materialization page limit must be 1..=1000".to_string(),
+        });
     }
-    node_ids.sort();
-    Ok(node_ids)
-}
-
-/// Returns one decision together with the exact effective projection it evaluated.
-pub fn schedule(mut request: ScheduleRequest) -> Result<ScheduleOutcome> {
-    validate_projection(&request)?;
-    let mut outputs = node_outputs(&request.plan, &request.projection)?;
-    let mut statuses = request.projection.node_statuses.clone();
-    apply_false_conditions(&request, &mut statuses, &mut outputs)?;
-    derive_aggregate_nodes(&request, &mut statuses, &mut outputs)?;
-    apply_false_conditions(&request, &mut statuses, &mut outputs)?;
-    request.projection.node_statuses = statuses.clone();
-
-    let ordinary_terminal = request
+    validate_scheduler_catalog(&request.catalog)?;
+    let node = request
         .plan
         .definition
         .nodes
         .iter()
-        .all(|node| effective_status(&statuses, &node.id).is_some_and(is_terminal_node_status));
-    if ordinary_terminal {
-        let effective_projection = request.projection.clone();
-        return schedule_verifiers_or_complete(request).map(|decision| ScheduleOutcome {
-            decision,
-            effective_projection,
-        });
-    }
-
-    if request
-        .budget_ledger
-        .limit
-        .deadline_at
-        .is_some_and(|deadline| request.now > deadline)
+        .find(|node| node.id == node_id)
+        .ok_or_else(|| Error::InvalidProjection {
+            message: format!("active plan has no node `{node_id}`"),
+        })?;
+    if node
+        .depends_on
+        .iter()
+        .any(|dependency| !referenced_outputs.contains_key(dependency))
     {
-        let decision = completion_terminal(
-            &request,
-            terminal_output(&request.plan, &request.projection),
-        )?;
-        return Ok(ScheduleOutcome {
-            decision,
-            effective_projection: request.projection,
+        return Err(Error::InvalidProjection {
+            message: format!("node `{node_id}` is missing a direct dependency output"),
         });
     }
-
-    let mut ready = Vec::new();
-    let mut dependency_waits = BTreeSet::new();
-    for node in &request.plan.definition.nodes {
-        if effective_status(&statuses, &node.id) != Some(ExecutionNodeStatus::Pending) {
-            continue;
-        }
-        let dependency_statuses = node
-            .depends_on
-            .iter()
-            .map(|id| (id, effective_status(&statuses, id)))
-            .collect::<Vec<_>>();
-        if dependency_statuses.iter().any(|(_, status)| {
-            matches!(
-                status,
-                Some(ExecutionNodeStatus::Failed | ExecutionNodeStatus::Cancelled)
-            )
-        }) {
-            return Ok(ScheduleOutcome {
-                decision: ScheduleDecision::Terminal(TerminalProjection::Failed {
-                    failure: ExecutionTaskFailure {
-                        class: ExecutionFailureClass::DependencyFailed,
-                        message: format!("node {} has a terminal failed dependency", node.id),
-                        capability_ref: operation_capability(&node.operation),
-                    },
-                }),
-                effective_projection: request.projection,
+    // The condition is evaluated here, in the wrapper, so a false branch never enters
+    // map or reduce paging at all: no items are resolved, no reduce round is opened,
+    // and the node's whole source is declared exhausted in one empty page. It is
+    // evaluated only at cursor zero because a condition that has already admitted its
+    // first page must not be re-litigated mid-source; every input it can read is
+    // immutable for the life of the node.
+    if cursor == 0
+        && let Some(condition) = &node.when
+    {
+        let dependencies = node.depends_on.iter().cloned().collect::<BTreeSet<_>>();
+        let context = BindingContext {
+            run_input: &request.run_input,
+            node_outputs: referenced_outputs,
+            dependencies: &dependencies,
+            item: None,
+            item_key: None,
+        };
+        if !evaluate_condition(condition, &context)? {
+            return Ok(NodeMaterializationPage {
+                tasks: Vec::new(),
+                next_cursor: 0,
+                source_exhausted: true,
+                reduce_cursor: None,
+                terminal_output: None,
+                condition_skipped: true,
             });
         }
-        if !dependency_statuses.iter().all(|(_, status)| {
-            matches!(
-                status,
-                Some(ExecutionNodeStatus::Completed | ExecutionNodeStatus::Skipped)
-            )
-        }) {
-            dependency_waits.insert(node.id.clone());
-            continue;
-        }
-
-        let mut materialized = materialize_node(&request, node, &outputs)?;
-        ready.append(&mut materialized);
     }
+    materialize::materialize_node_page(request, node, referenced_outputs, cursor, limit, reduce)
+}
 
-    if !ready.is_empty() {
-        ready.sort_by(|left, right| {
-            (&left.node_id, &left.item_key, left.task_id).cmp(&(
-                &right.node_id,
-                &right.item_key,
-                right.task_id,
-            ))
-        });
-        let mut ledger = request.budget_ledger.clone();
-        for task in &ready {
-            if ledger.try_reserve(task.reservation).is_err() {
-                return Ok(ScheduleOutcome {
-                    decision: budget_terminal(terminal_output(&request.plan, &request.projection)),
-                    effective_projection: request.projection,
+/// Outcome of fencing one resolved temporal target against the run deadline.
+///
+/// A relative target is resolved against wait entry, not compile time, so a delay that was
+/// legal when the plan compiled can land past the deadline by the time the wait is entered.
+/// That is a normal product outcome for a long-horizon run, not an invalid plan, so it is
+/// reported as a value rather than an error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TemporalTargetResolution {
+    /// The target resolves strictly before the run deadline.
+    Due(DateTime<Utc>),
+    /// The target resolves at or after the run deadline and cannot be waited on.
+    DeadlineExceeded {
+        /// Instant the wait would have become due.
+        due_at: DateTime<Utc>,
+        /// Absolute deadline of the owning run.
+        run_deadline_at: DateTime<Utc>,
+    },
+}
+
+/// Resolves an exact or wait-entry-relative temporal target and fences it by the run deadline.
+///
+/// Fails only on impossible input; a target past the run deadline is returned as
+/// [`TemporalTargetResolution::DeadlineExceeded`] for the caller to project as a typed failure.
+pub fn resolve_temporal_target_within_deadline(
+    target: &ExecutionTemporalTarget,
+    wait_entered_at: DateTime<Utc>,
+    run_deadline_at: DateTime<Utc>,
+) -> Result<TemporalTargetResolution> {
+    let due_at = match target {
+        ExecutionTemporalTarget::At { at } => *at,
+        ExecutionTemporalTarget::After { delay_seconds } => {
+            if *delay_seconds == 0 {
+                return Err(Error::InvalidProjection {
+                    message: "relative temporal delay must be greater than zero".to_string(),
                 });
             }
+            let seconds = i64::try_from(*delay_seconds).map_err(|_| Error::InvalidProjection {
+                message: "relative temporal delay exceeds supported timestamp range".to_string(),
+            })?;
+            let delay = chrono::TimeDelta::try_seconds(seconds).ok_or_else(|| {
+                Error::InvalidProjection {
+                    message: "relative temporal delay exceeds supported timestamp range"
+                        .to_string(),
+                }
+            })?;
+            wait_entered_at
+                .checked_add_signed(delay)
+                .ok_or_else(|| Error::InvalidProjection {
+                    message: "relative temporal target overflows supported timestamp range"
+                        .to_string(),
+                })?
         }
-        return Ok(ScheduleOutcome {
-            decision: ScheduleDecision::Ready(ready),
-            effective_projection: request.projection,
-        });
-    }
-
-    let waiting = waiting_reasons(&request, dependency_waits);
-    if !waiting.is_empty() {
-        return Ok(ScheduleOutcome {
-            decision: ScheduleDecision::Waiting(waiting),
-            effective_projection: request.projection,
-        });
-    }
-
-    let mut pending_node_ids = request
-        .plan
-        .definition
-        .nodes
-        .iter()
-        .filter(|node| !effective_status(&statuses, &node.id).is_some_and(is_terminal_node_status))
-        .map(|node| node.id.clone())
-        .collect::<Vec<_>>();
-    pending_node_ids.sort();
-    pending_node_ids.dedup();
-    Ok(ScheduleOutcome {
-        decision: ScheduleDecision::NoProgress { pending_node_ids },
-        effective_projection: request.projection,
+    };
+    Ok(if due_at >= run_deadline_at {
+        TemporalTargetResolution::DeadlineExceeded {
+            due_at,
+            run_deadline_at,
+        }
+    } else {
+        TemporalTargetResolution::Due(due_at)
     })
+}
+
+/// Resolves a temporal target that must already be strictly before the run deadline.
+///
+/// Callers settling an entered wait use this: the target was fenced at wait entry, so a
+/// deadline violation here is a corrupted projection rather than a product outcome.
+pub fn resolve_temporal_target(
+    target: &ExecutionTemporalTarget,
+    wait_entered_at: DateTime<Utc>,
+    run_deadline_at: DateTime<Utc>,
+) -> Result<DateTime<Utc>> {
+    match resolve_temporal_target_within_deadline(target, wait_entered_at, run_deadline_at)? {
+        TemporalTargetResolution::Due(due_at) => Ok(due_at),
+        TemporalTargetResolution::DeadlineExceeded { .. } => Err(Error::InvalidProjection {
+            message: "temporal target must be earlier than the run deadline".to_string(),
+        }),
+    }
 }
 
 #[cfg(test)]

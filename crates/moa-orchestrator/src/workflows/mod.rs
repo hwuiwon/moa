@@ -4,12 +4,12 @@ use chrono::{DateTime, Utc};
 use restate_sdk::prelude::*;
 
 pub mod artifact_release_evaluation;
+pub(crate) mod attempt_slice;
 pub(crate) mod child_invocation;
 pub mod consolidate;
 pub(crate) mod errors;
-pub mod execution_compensation;
-pub mod execution_run;
-pub mod execution_task;
+pub mod execution_compensation_attempt;
+pub mod execution_task_attempt;
 pub(crate) mod experiment_cancel;
 pub(crate) mod experiment_errors;
 pub mod experiment_run;

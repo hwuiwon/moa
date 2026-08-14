@@ -180,6 +180,38 @@ impl OrchestratorRestartConfig {
     pub(super) fn deployment_uri(&self) -> String {
         format!("http://host.docker.internal:{}", self.port)
     }
+
+    /// Spawns the maintenance owner against the same durable fixture dependencies.
+    pub(super) fn spawn_maintenance(&self, health_port: u16) -> Result<ChildGuard> {
+        self.spawn_maintenance_with_env(health_port, &self.extra_env)
+    }
+
+    /// Spawns the maintenance owner with one exact merged fixture environment.
+    pub(super) fn spawn_maintenance_with_env(
+        &self,
+        health_port: u16,
+        extra_env: &[(String, String)],
+    ) -> Result<ChildGuard> {
+        spawn_maintenance(
+            OrchestratorSpawnConfig {
+                binary: &self.binary,
+                port: self.port,
+                health_port,
+                scim_port: self.scim_port,
+                credential_port: self.credential_port,
+                postgres_url: &self.postgres_url,
+                ingress_url: &self.ingress_url,
+                redis_url: &self.redis_url,
+                script_path: self.script_path.as_deref(),
+                journal_path: self.journal_path.as_deref(),
+                fga_config: &self.fga_config,
+                extra_env,
+                otlp_endpoint: &self.otlp_endpoint,
+                observability_service_name: &self.observability_service_name,
+            },
+            health_port,
+        )
+    }
 }
 
 /// Four distinct TCP ports used by one orchestrator child.
@@ -266,7 +298,23 @@ pub(super) fn hard_kill_child(mut child: Child) -> Result<()> {
     Ok(())
 }
 
+/// Spawns one normal Restate handler runtime for the fixture.
 pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<ChildGuard> {
+    spawn_orchestrator_process(config, None)
+}
+
+/// Spawns the real singleton maintenance role on a dedicated health port.
+pub(super) fn spawn_maintenance(
+    config: OrchestratorSpawnConfig<'_>,
+    health_port: u16,
+) -> Result<ChildGuard> {
+    spawn_orchestrator_process(config, Some(health_port))
+}
+
+fn spawn_orchestrator_process(
+    config: OrchestratorSpawnConfig<'_>,
+    maintenance_health_port: Option<u16>,
+) -> Result<ChildGuard> {
     let mut command = Command::new(config.binary);
     command
         .env_remove("MOA_MCP_SERVERS_JSON")
@@ -287,14 +335,6 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
         // hermetic child depend on external availability and load.
         .env_remove("MOA_PII_SERVICE_URL")
         .env_remove("OTEL_METRIC_EXPORT_INTERVAL")
-        .arg("--port")
-        .arg(config.port.to_string())
-        .arg("--health-port")
-        .arg(config.health_port.to_string())
-        .arg("--scim-port")
-        .arg(config.scim_port.to_string())
-        .arg("--credential-port")
-        .arg(config.credential_port.to_string())
         .env("MOA_DATABASE_URL", config.postgres_url)
         .env("MOA_RESTATE_INGRESS_URL", config.ingress_url)
         .env("MOA_RUNTIME_CACHE_BACKEND", "redis")
@@ -319,6 +359,25 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
             // the quiet default keeps ordinary runs readable.
             std::env::var("MOA_FIXTURE_RUST_LOG").unwrap_or_else(|_| "warn".to_string()),
         );
+    match maintenance_health_port {
+        Some(health_port) => {
+            command
+                .arg("--health-port")
+                .arg(health_port.to_string())
+                .arg("maintenance");
+        }
+        None => {
+            command
+                .arg("--port")
+                .arg(config.port.to_string())
+                .arg("--health-port")
+                .arg(config.health_port.to_string())
+                .arg("--scim-port")
+                .arg(config.scim_port.to_string())
+                .arg("--credential-port")
+                .arg(config.credential_port.to_string());
+        }
+    }
     if let Some(script_path) = config.script_path {
         command.env(
             "MOA_PROVIDERS_OVERRIDE",
@@ -361,7 +420,17 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
         .stderr(Stdio::inherit())
         .spawn()
         .map(ChildGuard::new)
-        .with_context(|| format!("spawn orchestrator binary {}", config.binary.display()))
+        .with_context(|| {
+            let role = if maintenance_health_port.is_some() {
+                "maintenance"
+            } else {
+                "runtime"
+            };
+            format!(
+                "spawn orchestrator {role} binary {}",
+                config.binary.display()
+            )
+        })
 }
 
 pub(super) async fn wait_for_orchestrator_health(

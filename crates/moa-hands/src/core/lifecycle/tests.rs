@@ -181,12 +181,56 @@ impl HandLeaseStore for BarrierHandLeaseStore {
             .await
     }
 
-    async fn list_session(
+    async fn get_exact_generation(
         &self,
         tenant_id: TenantId,
         session_id: moa_core::types::identifiers::SessionId,
+        worker_id: &str,
+        provisioning_operation_id: moa_core::types::identifiers::HandProvisioningOperationId,
+        generation: i64,
+    ) -> Result<Option<HandLease>> {
+        self.inner
+            .get_exact_generation(
+                tenant_id,
+                session_id,
+                worker_id,
+                provisioning_operation_id,
+                generation,
+            )
+            .await
+    }
+
+    async fn list_live_owner_candidates(
+        &self,
+        tenant_id: TenantId,
+        session_id: moa_core::types::identifiers::SessionId,
+        worker_id: &str,
     ) -> Result<Vec<HandLease>> {
-        self.inner.list_session(tenant_id, session_id).await
+        self.inner
+            .list_live_owner_candidates(tenant_id, session_id, worker_id)
+            .await
+    }
+
+    async fn has_live_owner(
+        &self,
+        tenant_id: TenantId,
+        session_id: moa_core::types::identifiers::SessionId,
+        worker_id: &str,
+    ) -> Result<bool> {
+        self.inner
+            .has_live_owner(tenant_id, session_id, worker_id)
+            .await
+    }
+
+    async fn list_live_session_page(
+        &self,
+        tenant_id: TenantId,
+        session_id: moa_core::types::identifiers::SessionId,
+        cursor: Option<&crate::core::leases::HandLeaseSessionCursor>,
+    ) -> Result<crate::core::leases::HandLeaseSessionPage> {
+        self.inner
+            .list_live_session_page(tenant_id, session_id, cursor)
+            .await
     }
 
     async fn activate(&self, request: HandLeaseActivateRequest<'_>) -> Result<bool> {
@@ -463,10 +507,6 @@ impl HandProvider for CountingProvider {
 
     async fn status(&self, _handle: &HandHandle) -> Result<HandStatus> {
         Ok(HandStatus::Running)
-    }
-
-    async fn pause(&self, _handle: &HandHandle) -> Result<()> {
-        Ok(())
     }
 
     async fn resume(&self, _handle: &HandHandle) -> Result<()> {
@@ -1108,13 +1148,13 @@ async fn stale_manifest_install_completion_cannot_replace_new_hand_marker() {
         .expect("the first install task should join")
         .expect_err("the stale hand A install must lose its active-binding fence");
 
-    let scope = manifest_scope_key(&session, Some(TEST_WORKER_ID));
+    let marker_scope = manifest_scope_key(&session, Some(TEST_WORKER_ID));
     let marker = router
         .hands
         .installed_files
         .read()
         .await
-        .get(&scope)
+        .get(&marker_scope)
         .and_then(|providers| providers.get("manifest-race"))
         .cloned()
         .expect("replacement hand B has an installed marker");
@@ -1384,6 +1424,54 @@ async fn lifecycle_destroy_session_reads_durable_leases_not_only_cache() {
         .await;
 
     assert_eq!(provider.destroy_calls(), 1);
+}
+
+#[tokio::test]
+async fn lifecycle_session_cleanup_reports_incomplete_until_every_cache_page_is_destroyed() {
+    // Pins: terminal session cleanup processes at most one non-empty 64-entry cache page per
+    // activation, reports incomplete while another page remains, and reaches exact completion
+    // without leaking the final short page.
+    let lease_store = MemoryHandLeaseStore::shared();
+    let provider = Arc::new(CountingProvider::new("paged-session-cleanup"));
+    let session = session();
+    let router = router(provider.clone(), lease_store);
+    let count = crate::core::HAND_LEASE_SESSION_PAGE_SIZE + 7;
+
+    for index in 0..count {
+        let scope = HandScopeKey::new(
+            session.tenant_id,
+            session.id,
+            format!("session-owner-{index:03}"),
+        );
+        router.hands.active_hands.write().await.insert(
+            crate::core::HandProviderCacheKey::new(scope, provider.provider_name()),
+            ActiveHand {
+                handle: HandHandle::local(std::path::PathBuf::from(format!(
+                    "/tmp/session-cleanup-{index}"
+                ))),
+                generation: None,
+            },
+        );
+    }
+
+    assert!(
+        !router
+            .reclaim_hands(session.tenant_id, &session.id, None)
+            .await,
+        "the first bounded page must request a durable continuation"
+    );
+    assert_eq!(
+        provider.destroy_calls(),
+        crate::core::HAND_LEASE_SESSION_PAGE_SIZE
+    );
+    assert!(
+        router
+            .reclaim_hands(session.tenant_id, &session.id, None)
+            .await,
+        "the final short page must prove complete cleanup"
+    );
+    assert_eq!(provider.destroy_calls(), count);
+    assert!(router.hands.active_hands.read().await.is_empty());
 }
 
 #[tokio::test]

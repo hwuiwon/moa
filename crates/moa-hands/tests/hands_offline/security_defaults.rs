@@ -33,6 +33,7 @@ use opentelemetry_sdk::trace::{
     InMemorySpanExporter, Sampler, SdkTracerProvider, SimpleSpanProcessor, SpanData,
 };
 use serde_json::json;
+use sqlx::postgres::PgPoolOptions;
 use tempfile::tempdir;
 use tracing::instrument::WithSubscriber;
 use tracing_subscriber::layer::SubscriberExt;
@@ -41,6 +42,12 @@ const INPUT_SECRET: &str = "sk-test-input-secret-9a7b";
 const ERROR_SECRET: &str = "stderr-secret-71d2";
 const TOOL_ERROR_OUTPUT_STATUS: &str = "tool returned error output";
 const TOOL_EXECUTION_FAILED_STATUS: &str = "tool execution failed";
+
+fn lazy_workspace_pool() -> sqlx::PgPool {
+    PgPoolOptions::new()
+        .connect_lazy("postgresql://moa:moa@127.0.0.1:1/moa")
+        .expect("offline cloud construction should accept a lazy workspace pool")
+}
 
 fn session() -> SessionMeta {
     SessionMeta {
@@ -468,7 +475,7 @@ async fn cloud_profile_constructs_with_deny_default_owner_and_credentialed_backe
         None,
         Some(cloud_rule_store()),
         Some(test_checkpoint_store()),
-        None,
+        Some(lazy_workspace_pool()),
         None,
         true,
     )

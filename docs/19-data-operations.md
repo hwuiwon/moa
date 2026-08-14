@@ -62,11 +62,10 @@ runner; operators should not use a hard-coded version probe as a schema check.
 
 ### Capacity And Backpressure
 
-Execution plans have no application active-worker, plan-node, map-item, or task
-fan-out ceiling below the approved run budget. `max_tasks` bounds logical work;
-the other four resource dimensions and the deadline bound what that work may
-consume. Do not add an application fan-out constant to mitigate provider or
-tool pressure.
+`max_tasks` bounds logical work; cost, tokens, tool calls, retrieved bytes, and
+the absolute deadline bound what that work may consume. Physical execution is
+admitted separately so a valid large plan cannot monopolize compute or durable
+queues.
 
 Physical backpressure is supplied independently:
 
@@ -88,6 +87,12 @@ Physical backpressure is supplied independently:
   `ActionPolicy`/`ToolExecutor`/`HandProvider`. Tool, MCP, sandbox, and external
   service quotas queue, retry, or return typed failures at that boundary; they
   do not reduce logical map coverage.
+- Postgres capacity buckets enforce tenant and fleet ceilings for active runs,
+  active attempts, parked runs, scheduled triggers, and external jobs. The
+  controller dispatch batch and activation-step limit bound each activation;
+  weighted tenant dispatch prevents a hot tenant from consuming all ready
+  slots. Saturation parks durable work without holding a Restate invocation or
+  sandbox.
 
 ### Budgets And Terminal Semantics
 
@@ -123,26 +128,27 @@ reasons.
 Inspect sources in this order. Do not skip directly to logs or traces:
 
 1. Inspect the durable run through `Execution/status` and
-   `moa.execution_run`: `status`, `wake_epoch`, `processed_wake_epoch`,
+   `moa.execution_run`: `status`, controller generation/activation state,
+   `next_wake_at`,
    immutable goal contract, active plan hash/revision, typed terminal reason,
    completion-check evidence, budget/reservation totals, waiting reasons, and
-   timestamps. A greater `wake_epoch` means the latest scheduling mutation is
-   not yet acknowledged. Do not infer the execution path from a constant mode
-   field; use the persisted typed route source and planning audit.
-2. Inspect active `moa.execution_task` rows: state, `task_id`, attempt,
-   generation fence, reservation/actual values, and
+   timestamps. Do not infer the execution path from a constant mode field; use
+   the persisted typed route source and planning audit.
+2. Inspect active `moa.execution_task` rows: state, `task_id`, attempt dispatch,
+   generation/lease fence, reservation/actual values, and
    `reserved_at`/`started_at`/`completed_at`. A stale generation must never
    overwrite the current one.
-3. Inspect the exact waiting input, review, or signal state in the run's
-   waiting reasons and the owning task generation. Resolve it through
+3. Inspect the exact input, review, signal, timer, external-job, or pause state,
+   its persisted `due_at`, immutable trigger, and owning task generation.
+   Resolve user-owned waits through
    `Execution/deliver_input`, `Execution/decide_review`, or
    `Execution/deliver_signal`; do not edit the task.
-4. For action reviews, inspect `moa.execution_action_review_outbox`:
-   `attempt_count`, `next_attempt_at`, `claimed_at`, `delivered_at`, and
-   `last_error`, plus the matching tenant action-review row.
-5. Inspect Restate invocation and journal state for the keyed `ExecutionRun`
-   and `ExecutionTask` workflows, including retries and scoped-concurrency
-   admission.
+4. Inspect `moa.execution_dispatch_outbox` and `moa.execution_trigger` claim,
+   delivery, retry, dead-letter, generation, and error fields. For external
+   jobs also inspect callback disposition and last reconciliation.
+5. Inspect only the current bounded `ExecutionRunController`,
+   `ExecutionTaskAttempt`, or `ExecutionTrigger` invocation. A parked run should
+   have none; if it does, treat that as a resource-leak incident.
 6. Query spans by stable session/run/task/action-review attributes, then inspect
    any persisted W3C parent/link contexts on durable callbacks. Do not infer
    causality from an attempt-local header embedded in a Restate journal command.
@@ -155,10 +161,11 @@ Use the parent-scoped product cancellation mutation:
 - MCP: `execution_run_cancel`;
 - internal Restate: `Execution/cancel`.
 
-The terminal cancellation transaction fences new reservations, replaces every
-active task outcome with cancellation, releases all five reservation
-dimensions, preserves completed task evidence, writes the typed cancellation
-cause/reason, and wakes terminal delivery. Confirm the result through
+The cancellation transaction fences new reservations, advances active attempt
+generations, releases their active-capacity and budget reservations, preserves
+completed task evidence, writes the typed cause/reason, and enqueues controller
+activation. `compensate_committed` remains nonterminal until bounded reverse
+compensation settles. Confirm the result through
 `Execution/status` or `execution_run_status`.
 
 Restate admin cancellation is only a hard stop for a stuck invocation. It is
@@ -192,6 +199,36 @@ its case, and old cases are never deleted or weakened to improve aggregate
 scores. A superseding case may replace one only when it exercises the same
 production path and strictly contains the old failure condition; record that
 relationship in the scenario comment.
+
+### Long-Horizon Maintenance And Retention
+
+The singleton `moa-orchestrator maintenance` deployment is the only fleet
+owner for trigger/outbox repair, execution retention, action-review/authz
+reconciliation, workspace/hand reaping, and provider inventory. Serving
+Restate revisions do not run these scans. Due trigger delivery remains frequent;
+full inventory and retention use separate adaptive cadences, account-sharded
+leases, and exponential idle backoff.
+
+Page on overdue deadlines, oldest-ready age, stuck attempt leases, trigger or
+outbox dead letters, stale durable maintenance reconciliation, parked tasks retaining
+hands, and old deployment drain age. Capacity saturation is normally a warning:
+inspect tenant maximum share and fairness before raising fleet ceilings.
+
+Retention archives and page-deletes terminal run details, tasks, triggers,
+outbox rows, external jobs, and compensation evidence only after tenant
+retention/legal-hold policy permits it. Active, waiting, paused, compensating,
+or unknown-outcome state is never selected. The maintenance owner must prove a
+terminal generation and preserve compact run/session/audit evidence before
+deletion.
+
+The one-time V59/V60 hard cut is executed only with
+`scripts/cutover-long-horizon-execution.sh`. It always prints the Postgres
+nonterminal-run inventory and exact old Restate deployment invocations before
+mutation, requires explicit targets and confirmation, archives terminal
+execution tables, applies the repository migration runner, clears only the
+three retired execution services, and verifies the bounded service inventory.
+Admission remains gated until maintenance readiness and archive durability are
+independently confirmed.
 
 ## Sandbox Workspace Operations
 

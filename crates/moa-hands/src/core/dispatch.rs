@@ -13,14 +13,17 @@ use moa_core::{
     types::completion::ToolInvocation,
     types::hands::HandHandle,
     types::hands::HandStatus,
-    types::identifiers::ToolCallId,
+    types::identifiers::{
+        ExecutionRunScopeId, HandProvisioningOperationId, SandboxWorkspaceId, ToolCallId,
+    },
     types::resource::DeadlineGuard,
-    types::sandbox_workspace::{SandboxWorkspaceScope, WorkspaceEffect},
+    types::sandbox_workspace::{ExecutionHandReleaseOwner, SandboxWorkspaceScope, WorkspaceEffect},
     types::security::ToolCapabilityId,
     types::session::SessionMeta,
     types::tools::SecuredToolOutput,
     types::tools::ToolDefinition,
     types::tools::ToolOutput,
+    types::worker::state::WorkerInputTarget,
 };
 use moa_observability::current_turn_root_span;
 use moa_security::{OutputClassification, classify_tool_output};
@@ -110,6 +113,54 @@ pub struct JournaledWorkspaceCommit<'a> {
     pub tool_call_id: ToolCallId,
     /// Fresh bounded budget owned by the durable commit step.
     pub scope: ToolCallScope<'a>,
+}
+
+/// One idempotent request to release an execution attempt's exact sandbox hand.
+#[derive(Clone, Copy)]
+pub struct ExecutionHandReleaseRequest<'a> {
+    /// Session whose tenant owns the execution workspace and hand lease.
+    pub session: &'a SessionMeta,
+    /// Verified durable execution run.
+    pub run_id: ExecutionRunScopeId,
+    /// Verified durable execution owner and logical generation.
+    pub owner: ExecutionHandReleaseOwner,
+    /// Exact bounded attempt generation yielding its resources.
+    pub attempt_generation: u64,
+    /// Fresh bounded budget for checkpoint publication and verified destroy.
+    pub scope: ToolCallScope<'a>,
+}
+
+/// One idempotent request to park a worker's sandbox for a human-input wait.
+#[derive(Clone, Copy)]
+pub struct WorkerHandReleaseRequest<'a> {
+    /// Session whose tenant owns the worker workspace and hand lease.
+    pub session: &'a SessionMeta,
+    /// Exact worker scope entering the durable wait.
+    pub worker_id: &'a str,
+    /// Turn, admission generation, and input request that own this wait.
+    pub input_target: &'a WorkerInputTarget,
+    /// Exact compute attachment captured before the input wait was registered.
+    pub expected: Option<&'a WorkerHandReleaseFence>,
+    /// Fresh bounded budget for checkpoint publication and verified destroy.
+    pub scope: ToolCallScope<'a>,
+}
+
+/// Exact durable workspace and lease generation a worker is allowed to park.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerHandReleaseFence {
+    /// Workspace attached to the worker when the wait began.
+    pub workspace_id: SandboxWorkspaceId,
+    /// Single-writer epoch that owned the working copy.
+    pub writer_epoch: u64,
+    /// Compute instance generation that owned the working copy.
+    pub instance_generation: u64,
+    /// Provider route pinned on the workspace.
+    pub provider: String,
+    /// Provisioning operation that created the exact compute instance.
+    pub provisioning_operation_id: HandProvisioningOperationId,
+    /// Durable hand-lease generation attached to the workspace.
+    pub hand_lease_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -845,12 +896,15 @@ impl ToolRouter {
             && workspace_commit_mode == WorkspaceCommitMode::Inline
             && let Err(error) = self
                 .commit_workspace_after_tool(
-                    request.session,
-                    workspace_scope,
-                    request.tool_call_id,
-                    provider,
-                    hand,
-                    request.scope,
+                    super::sandbox_workspace::lifecycle::WorkspaceCommitExecution {
+                        session: request.session,
+                        workspace_scope,
+                        tool_call_id: request.tool_call_id,
+                        provider_name: provider,
+                        hand,
+                        call_scope: request.scope,
+                        release_compute: false,
+                    },
                 )
                 .await
         {
@@ -1398,6 +1452,7 @@ mod egress_dispatch_tests {
                 diff_strategy: ToolDiffStrategy::None,
             },
             idempotency_class: IdempotencyClass::NonIdempotent,
+            async_mode: moa_core::types::tools::ToolAsyncMode::SynchronousOnly,
             rollback: None,
             max_output_tokens: 4096,
         }

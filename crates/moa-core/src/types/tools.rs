@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -324,6 +325,123 @@ pub enum IdempotencyClass {
     /// Unsafe to retry automatically because repeated execution may duplicate side effects.
     /// Automatic retry and route fallback are blocked once execution has begun.
     NonIdempotent,
+}
+
+/// Catalog-pinned provider completion mode for one governed tool contract.
+///
+/// External-job capacity is reserved before provider dispatch only for tools
+/// that explicitly opt into asynchronous completion. Returning an external job
+/// from a synchronous-only contract is an invariant violation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolAsyncMode {
+    /// Every admitted invocation completes within the bounded provider call.
+    SynchronousOnly,
+    /// An admitted invocation may commit a provider-owned asynchronous job.
+    MayReturnExternalJob {
+        /// Registered adapter/provider key that owns start recovery and callbacks.
+        provider: String,
+    },
+}
+
+/// Exact pre-provider identity an asynchronous-capable tool must use for start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalJobStartContext {
+    /// MOA-owned job identity reserved before any provider network call.
+    pub external_job_uid: uuid::Uuid,
+    /// Catalog-pinned adapter/provider key.
+    pub provider: String,
+    /// Deterministic provider idempotency key used by start and recovery.
+    pub idempotency_key: String,
+}
+
+/// Provider-owned asynchronous job returned after a capability has committed its start.
+///
+/// MOA assigns its own durable external-job UID when this outcome is persisted.
+/// These fields are the immutable provider identity and recovery contract needed
+/// to authenticate callbacks, reconcile sparsely, and cancel without keeping a
+/// workflow or sandbox active.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AsyncToolJob {
+    /// Stable provider implementation name.
+    pub provider: String,
+    /// Provider-issued external job identity.
+    pub provider_job_id: String,
+    /// Stable provider idempotency key used for start, reconciliation, and cancel.
+    pub idempotency_key: String,
+    /// Vault or connection reference used to authenticate provider callbacks.
+    pub callback_auth_reference: String,
+    /// Latest bounded provider progress phase.
+    pub progress_phase: String,
+    /// Whether the provider exposes definitive cancellation.
+    pub cancel_supported: bool,
+    /// Earliest time at which sparse provider reconciliation may run.
+    pub next_reconcile_at: DateTime<Utc>,
+}
+
+/// Terminal provider outcome carried by an authenticated asynchronous callback.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AsyncToolJobTerminalOutcome {
+    /// Provider work completed with structured output.
+    Completed {
+        /// Provider result validated by the capability adapter.
+        output: Value,
+    },
+    /// Provider work failed definitively.
+    Failed {
+        /// Structured provider failure evidence.
+        error: Value,
+    },
+    /// Provider work was cancelled definitively.
+    Cancelled,
+    /// The provider effect may have committed but cannot be determined safely.
+    UnknownOutcome {
+        /// Structured ambiguity evidence for operator resolution.
+        error: Value,
+    },
+}
+
+/// Authenticated provider event accepted for one exact asynchronous-job generation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AsyncToolJobCallbackOutcome {
+    /// The provider reports durable nonterminal progress.
+    Progress {
+        /// Latest bounded provider progress phase.
+        progress_phase: String,
+        /// Earliest time at which sparse provider reconciliation may run.
+        next_reconcile_at: DateTime<Utc>,
+    },
+    /// The provider reports a definitive or explicitly ambiguous terminal outcome.
+    Terminal {
+        /// Typed terminal provider outcome.
+        outcome: AsyncToolJobTerminalOutcome,
+    },
+}
+
+/// Result of requesting cancellation for one exact provider-job generation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AsyncToolJobCancelOutcome {
+    /// Provider confirmed terminal cancellation.
+    Cancelled,
+    /// Provider accepted cancellation and requires later callback or reconciliation.
+    Accepted {
+        /// Earliest sparse reconciliation time.
+        next_reconcile_at: DateTime<Utc>,
+        /// Latest provider progress phase.
+        progress_phase: String,
+    },
+    /// Provider does not support cancellation for this job.
+    Unsupported,
+    /// Cancellation transport completed ambiguously.
+    UnknownOutcome {
+        /// Structured ambiguity evidence for operator resolution.
+        error: Value,
+    },
 }
 
 /// Static action-policy metadata for a tool.
@@ -992,6 +1110,8 @@ pub struct ToolDefinition {
     pub policy: ToolPolicySpec,
     /// Declared retry/idempotency semantics for the tool implementation.
     pub idempotency_class: IdempotencyClass,
+    /// Declared synchronous or asynchronous provider completion contract.
+    pub async_mode: ToolAsyncMode,
     /// Exact source-owned declaration of the governed tool that reverses this effect.
     pub rollback: Option<ToolRollbackDefinition>,
     /// Approximate maximum output tokens persisted for one successful call.

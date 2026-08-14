@@ -8,6 +8,7 @@ use moa_core::{
     traits::{HandProvider, SandboxStorageProvider},
     types::hands::{HandHandle, SandboxProfile, SandboxTier},
     types::identifiers::{WorkspaceCheckpointId, WorkspaceOperationId},
+    types::resource::ResourceBudget,
     types::sandbox_workspace::{
         WorkspaceCheckpointPublishRequest, WorkspaceOperationKind, WorkspaceRevisionRef,
         WorkspaceStorageOperation,
@@ -19,7 +20,7 @@ use tokio::net::{TcpListener, TcpStream};
 use super::{
     DEFAULT_DAYTONA_IMAGE, DaytonaHandProvider, DaytonaProvisioningIdentity,
     PROVISIONING_OPERATION_LABEL, PROVISIONING_SPEC_LABEL, ProviderEndpoint,
-    daytona_auto_stop_minutes, daytona_sandbox_name, volume,
+    daytona_auto_stop_minutes, daytona_hand_status, daytona_sandbox_name, volume,
 };
 
 async fn read_request(socket: &mut TcpStream) -> String {
@@ -74,6 +75,8 @@ async fn provisions_executes_and_destroys_workspace() {
     let created_server = created.clone();
     let deleted = Arc::new(AtomicBool::new(false));
     let deleted_server = deleted.clone();
+    let running = Arc::new(AtomicBool::new(false));
+    let running_server = running.clone();
     let sandbox_name_server = sandbox_name.clone();
     let spec_fingerprint_server = spec_fingerprint.clone();
     tokio::spawn(async move {
@@ -84,6 +87,7 @@ async fn provisions_executes_and_destroys_workspace() {
             let seen = seen_server.clone();
             let created = created_server.clone();
             let deleted = deleted_server.clone();
+            let running = running_server.clone();
             let sandbox_name = sandbox_name_server.clone();
             let spec_fingerprint = spec_fingerprint_server.clone();
             tokio::spawn(async move {
@@ -139,14 +143,30 @@ async fn provisions_executes_and_destroys_workspace() {
                         (
                             "200 OK",
                             format!(
-                                r#"{{"id":"sbx-123","name":"{sandbox_name}","state":"stopped"}}"#
+                                r#"{{"id":"sbx-123","name":"{sandbox_name}","state":"{}"}}"#,
+                                if running.load(Ordering::SeqCst) {
+                                    "started"
+                                } else {
+                                    "stopped"
+                                }
                             ),
                         )
                     }
                 } else if first_line.starts_with("POST /api/sandbox/sbx-123/start ") {
+                    running.store(true, Ordering::SeqCst);
+                    ("200 OK", r#"{"ok":true}"#.to_string())
+                } else if first_line.starts_with("POST /api/sandbox/sbx-123/stop ") {
+                    running.store(false, Ordering::SeqCst);
                     ("200 OK", r#"{"ok":true}"#.to_string())
                 } else if first_line.starts_with("POST /toolbox/sbx-123/process/execute ") {
-                    ("200 OK", r#"{"exitCode":0,"result":"hello\n"}"#.to_string())
+                    if running.load(Ordering::SeqCst) {
+                        ("200 OK", r#"{"exitCode":0,"result":"hello\n"}"#.to_string())
+                    } else {
+                        (
+                            "409 Conflict",
+                            r#"{"error":"sandbox is stopped"}"#.to_string(),
+                        )
+                    }
                 } else if first_line.starts_with("DELETE /api/sandbox/sbx-123 ") {
                     deleted.store(true, Ordering::SeqCst);
                     ("200 OK", r#"{"ok":true}"#.to_string())
@@ -204,6 +224,23 @@ async fn provisions_executes_and_destroys_workspace() {
         .unwrap();
     assert_eq!(output.process_stdout(), Some("hello\n"));
 
+    // Pins: Daytona suspend does not return until the real provider state is
+    // stopped, and the next dispatch waits for an exact running state.
+    provider.suspend(&handle).await.unwrap();
+    assert_eq!(
+        provider.status(&handle).await.unwrap(),
+        moa_core::types::hands::HandStatus::Stopped
+    );
+    let resumed = provider
+        .execute(&handle, "bash", r#"{"cmd":"echo hello"}"#)
+        .await
+        .unwrap();
+    assert_eq!(resumed.process_stdout(), Some("hello\n"));
+    assert_eq!(
+        provider.status(&handle).await.unwrap(),
+        moa_core::types::hands::HandStatus::Running
+    );
+
     provider.destroy(&handle).await.unwrap();
 
     let seen = seen.lock().await.join("\n");
@@ -218,6 +255,71 @@ async fn provisions_executes_and_destroys_workspace() {
             .filter(|line| line.starts_with("POST /api/sandbox "))
             .count(),
         1
+    );
+}
+
+#[test]
+fn daytona_transitional_states_never_report_running() {
+    // Pins: asynchronous stop/start states cannot be mistaken for executable
+    // or capacity-free terminal states.
+    assert_eq!(
+        daytona_hand_status("starting"),
+        moa_core::types::hands::HandStatus::Provisioning
+    );
+    assert_eq!(
+        daytona_hand_status("resuming"),
+        moa_core::types::hands::HandStatus::Provisioning
+    );
+    assert_eq!(
+        daytona_hand_status("stopping"),
+        moa_core::types::hands::HandStatus::Paused
+    );
+    assert_eq!(
+        daytona_hand_status("pausing"),
+        moa_core::types::hands::HandStatus::Paused
+    );
+    assert_eq!(
+        daytona_hand_status("stopped"),
+        moa_core::types::hands::HandStatus::Stopped
+    );
+    assert_eq!(
+        daytona_hand_status("unexpected"),
+        moa_core::types::hands::HandStatus::Failed
+    );
+}
+
+#[test]
+fn daytona_effective_timeout_never_exceeds_default_or_run_budget() {
+    // Pins: the value declared to the watchdog is also the largest wall-clock
+    // duration the provider can spend, for bash and non-bash calls alike.
+    assert_eq!(
+        crate::tools::bash::effective_synchronous_timeout(
+            "bash",
+            r#"{"cmd":"true"}"#,
+            crate::tools::bash::DEFAULT_BASH_TIMEOUT,
+            ResourceBudget::UNBOUNDED.time_remaining(chrono::Utc::now()),
+        )
+        .expect("default bash timeout resolves"),
+        crate::tools::bash::DEFAULT_BASH_TIMEOUT
+    );
+    let bounded = crate::tools::bash::effective_synchronous_timeout(
+        "file_read",
+        r#"{"path":"marker.txt"}"#,
+        crate::tools::bash::DEFAULT_BASH_TIMEOUT,
+        ResourceBudget::until(chrono::Utc::now() + chrono::Duration::seconds(10))
+            .time_remaining(chrono::Utc::now()),
+    )
+    .expect("bounded file timeout resolves");
+    assert!(bounded <= std::time::Duration::from_secs(10));
+    assert!(
+        crate::tools::bash::effective_synchronous_timeout(
+            "file_read",
+            r#"{"path":"marker.txt"}"#,
+            crate::tools::bash::DEFAULT_BASH_TIMEOUT,
+            ResourceBudget::until(chrono::Utc::now() - chrono::Duration::seconds(1))
+                .time_remaining(chrono::Utc::now()),
+        )
+        .is_err()
     );
 }
 
@@ -295,6 +397,7 @@ async fn daytona_commit_rejects_a_parent_at_generation_zero_before_provider_io()
             operation,
             hand,
             parent_revision: Some(parent),
+            release_compute: false,
         })
         .await
         .expect_err("generation-zero parent must fail before provider I/O");

@@ -26,10 +26,12 @@ mod orchestrator_fixture;
 
 #[cfg(feature = "orchestrator-fixture")]
 pub use orchestrator_fixture::{
-    ConversationOptions, FixtureCapabilityAttempt, FixtureCapabilityCall,
-    FixtureCapabilityController, FixtureCapabilityOptions, FixtureCapabilityOutcome,
-    FixtureCapabilityTool, IsolatedTest, OrchestratorTestFixture, RustFsFixture,
-    SandboxWorkspaceCrashBarrier, SandboxWorkspaceCrashControl, SandboxWorkspaceFixture,
-    TestApiClient, TestSessionHandle, WorkspaceRestartProbe, drive_conversation,
-    provision_workspace_maintenance_login,
+    ConversationOptions, FIXTURE_EXTERNAL_JOB_CALLBACK_TOKEN, FIXTURE_EXTERNAL_JOB_PROVIDER,
+    FixtureCapabilityAttempt, FixtureCapabilityCall, FixtureCapabilityController,
+    FixtureCapabilityOptions, FixtureCapabilityOutcome, FixtureCapabilityTool,
+    FixtureExternalJobAfterBind, FixtureExternalJobController, FixtureExternalJobReconciliation,
+    FixtureExternalJobRecovery, FixtureExternalJobStart, FixtureHandlerRevision, IsolatedTest,
+    OrchestratorTestFixture, RustFsFixture, SandboxWorkspaceCrashBarrier,
+    SandboxWorkspaceCrashControl, SandboxWorkspaceFixture, TestApiClient, TestSessionHandle,
+    WorkspaceRestartProbe, drive_conversation, provision_workspace_maintenance_login,
 };

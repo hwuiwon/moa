@@ -85,7 +85,17 @@ impl PostgresWorkspaceRepository {
         .bind(request.provider_account_generation)
         .bind(request.durability_class.as_str())
         .bind(request.retention_deadline_at)
-        .fetch_one(conn)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(map_sqlx_error)?;
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT moa.reserve_sandbox_workspace_capacity($1, $2, $3, $4, 0)",
+        )
+        .bind(request.tenant_id)
+        .bind(request.workspace_id)
+        .bind(request.provider_account_id)
+        .bind(request.provider_account_generation)
+        .fetch_one(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
         workspace_from_row(&row)

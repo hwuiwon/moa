@@ -29,6 +29,9 @@ pub fn resolve_bindings(value: &Value, context: &BindingContext<'_>) -> Result<V
 }
 
 /// Evaluates an execution condition against run input and direct dependencies.
+///
+/// Both forms compare whole values: an absent reference is false rather than an
+/// error, so a condition may name an optional field without the plan failing.
 pub fn evaluate_condition(
     condition: &ExecutionCondition,
     context: &BindingContext<'_>,

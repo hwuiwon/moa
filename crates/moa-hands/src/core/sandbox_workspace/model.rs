@@ -4,7 +4,11 @@ use chrono::{DateTime, Utc};
 use moa_core::{
     error::{MoaError, Result},
     types::{
-        identifiers::{ProviderAccountId, SandboxWorkspaceId, TenantId, WorkspaceCheckpointId},
+        contact::ContactId,
+        identifiers::{
+            HandProvisioningOperationId, ProviderAccountId, SandboxWorkspaceId, TenantId,
+            WorkspaceCheckpointId,
+        },
         sandbox_workspace::{
             DurabilityClass, SandboxWorkspaceScope, SandboxWorkspaceState, WorkspaceBinding,
         },
@@ -14,6 +18,111 @@ use uuid::Uuid;
 
 use super::checkpoint::archive::CHECKPOINT_ARCHIVE_FORMAT_VERSION;
 use crate::core::leases::{HandLease, LeaseHandle};
+
+/// Exact durable identity claimed before an execution task releases its hand.
+pub struct TaskHandReleaseIntent<'a> {
+    /// Deterministic receipt identity.
+    pub receipt_id: Uuid,
+    /// Contact whose RLS scope owns the execution, when contact-scoped.
+    pub contact_id: Option<ContactId>,
+    /// Owning execution run.
+    pub run_id: moa_core::types::identifiers::ExecutionRunScopeId,
+    /// Stable task identity within the run.
+    pub task_id: moa_core::types::identifiers::ExecutionTaskScopeId,
+    /// Exact logical task generation being suspended.
+    pub logical_generation: u64,
+    /// Exact attempt generation being suspended.
+    pub attempt_generation: u64,
+    /// Absolute recovery deadline for this release operation.
+    pub deadline_at: DateTime<Utc>,
+    /// Short database claim expiry used for storage-only finalization retries.
+    pub recovery_claim_expires_at: DateTime<Utc>,
+    /// Exact workspace generation being checkpointed.
+    pub workspace: &'a SandboxWorkspace,
+    /// Exact hand generation that must be destroyed.
+    pub lease: &'a HandLease,
+}
+
+/// Exact task attempt whose sandbox absence must be durably proven.
+pub struct AbsentTaskHandReleaseIntent {
+    /// Deterministic receipt identity.
+    pub receipt_id: Uuid,
+    /// Tenant owning the execution.
+    pub tenant_id: TenantId,
+    /// Contact whose RLS scope owns the execution, when contact-scoped.
+    pub contact_id: Option<ContactId>,
+    /// Owning execution run.
+    pub run_id: moa_core::types::identifiers::ExecutionRunScopeId,
+    /// Stable task identity.
+    pub task_id: moa_core::types::identifiers::ExecutionTaskScopeId,
+    /// Exact logical task generation.
+    pub logical_generation: u64,
+    /// Exact bounded attempt generation.
+    pub attempt_generation: u64,
+    /// Time at which the database absence proof was established.
+    pub verified_at: DateTime<Utc>,
+}
+
+/// Exact durable identity claimed before a compensation releases its scoped hand.
+pub struct CompensationHandReleaseIntent<'a> {
+    /// Deterministic receipt identity.
+    pub receipt_id: Uuid,
+    /// Tenant owning the execution.
+    pub tenant_id: TenantId,
+    /// Contact whose RLS scope owns the execution, when contact-scoped.
+    pub contact_id: Option<ContactId>,
+    /// Parent session whose hand scope is inspected.
+    pub session_id: moa_core::types::identifiers::SessionId,
+    /// Owning execution run.
+    pub run_id: moa_core::types::identifiers::ExecutionRunScopeId,
+    /// Stable compensation identity.
+    pub compensation_id: moa_core::types::identifiers::ExecutionCompensationScopeId,
+    /// Exact logical compensation generation.
+    pub logical_generation: u64,
+    /// Exact bounded attempt generation.
+    pub attempt_generation: u64,
+    /// Opaque deterministic hand scope for this compensation.
+    pub hand_scope: &'a str,
+    /// Exact durable lease claimed before destroy, or `None` for verified absence.
+    pub lease: Option<&'a HandLease>,
+    /// Absolute recovery deadline for this release operation.
+    pub deadline_at: DateTime<Utc>,
+    /// Short database claim expiry used for storage-only finalization retries.
+    pub recovery_claim_expires_at: DateTime<Utc>,
+}
+
+/// Exact pending compensation release whose expired storage claim is renewed.
+pub struct CompensationHandReleaseClaimIntent {
+    /// Tenant owning the execution.
+    pub tenant_id: TenantId,
+    /// Contact whose RLS scope owns the execution, when contact-scoped.
+    pub contact_id: Option<ContactId>,
+    /// Owning execution run.
+    pub run_id: moa_core::types::identifiers::ExecutionRunScopeId,
+    /// Stable compensation identity.
+    pub compensation_id: moa_core::types::identifiers::ExecutionCompensationScopeId,
+    /// Exact logical compensation generation.
+    pub logical_generation: u64,
+    /// Exact bounded attempt generation.
+    pub attempt_generation: u64,
+    /// Short database claim expiry used for storage-only finalization retries.
+    pub recovery_claim_expires_at: DateTime<Utc>,
+}
+
+/// Renewed recovery authority for one already-persisted compensation release.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompensationHandReleaseClaim {
+    /// Deterministic receipt identity selected before provider teardown.
+    pub receipt_id: Uuid,
+    /// Exact short-lived database claim that may finalize this receipt.
+    pub claim_token: Uuid,
+    /// Original release request time preserved across recovery.
+    pub requested_at: DateTime<Utc>,
+    /// Persisted provider create identity, absent only for a proven no-hand attempt.
+    pub hand_provisioning_operation_id: Option<HandProvisioningOperationId>,
+    /// Persisted lease generation paired with the provider create identity.
+    pub hand_lease_generation: Option<i64>,
+}
 
 /// One durable logical workspace row.
 #[derive(Debug, Clone, PartialEq, Eq)]

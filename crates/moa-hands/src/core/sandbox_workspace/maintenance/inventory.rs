@@ -3,60 +3,199 @@
 use super::*;
 
 impl WorkspaceMaintenanceCoordinator {
-    /// Reconciles every persisted provider-account generation and persists drift.
-    pub async fn reconcile_provider_inventory_once(&self) -> Result<WorkspaceInventoryPass> {
-        let accounts = self.provider_accounts().await?;
-        let mut observed_keys = HashSet::new();
-        let mut observed_accounts = HashSet::new();
-        let mut pass = WorkspaceInventoryPass::default();
-        let mut counts: BTreeMap<(String, InventoryFindingKind), u64> = BTreeMap::new();
+    /// Claims and reconciles one bounded shard of provider-account generations.
+    pub async fn reconcile_claimed_provider_inventory_once(
+        &self,
+        batch_size: usize,
+    ) -> Result<WorkspaceInventoryPass> {
+        let accounts = self.claim_provider_accounts(batch_size).await?;
+        let mut pass = WorkspaceInventoryPass {
+            accounts: accounts.len() as u64,
+            ..WorkspaceInventoryPass::default()
+        };
+        let mut first_error = None;
         for account in accounts {
-            let provider = self.storage_provider(&account.provider)?;
-            let inventory = provider
-                .enumerate_account_storage(account.id, account.generation)
-                .await?;
-            validate_inventory_identity(&account, &inventory)?;
-            observed_accounts.insert((account.id, account.generation));
-            let durable = self.durable_inventory(&account).await?;
-            pass.accounts += 1;
-            pass.resources += inventory.resources.len() as u64;
-            let findings = compare_inventory(&account, &inventory, &durable);
-            for finding in findings {
-                observed_keys.insert(finding.key());
-                *counts
-                    .entry((
-                        provider_metric_label(&account.provider).to_string(),
-                        finding.kind,
-                    ))
-                    .or_default() += 1;
-                self.upsert_inventory_finding(&finding).await?;
+            let result = self.reconcile_claimed_provider_account(&account).await;
+            match result {
+                Ok((resources, account_counts)) => {
+                    pass.resources += resources;
+                    pass.unresolved_findings += account_counts.values().sum::<u64>();
+                    if !self.complete_provider_inventory_claim(&account).await? {
+                        first_error.get_or_insert_with(|| MoaError::ExternalEffectUnknownOutcome {
+                            operation_id: format!(
+                                "provider-inventory-claim:{}:{}:{}",
+                                account.id, account.generation, account.claim_generation
+                            ),
+                        });
+                    }
+                }
+                Err(error) => {
+                    let released = self
+                        .fail_provider_inventory_claim(&account, &error.to_string())
+                        .await?;
+                    if !released {
+                        first_error.get_or_insert_with(|| MoaError::ExternalEffectUnknownOutcome {
+                            operation_id: format!(
+                                "provider-inventory-claim:{}:{}:{}",
+                                account.id, account.generation, account.claim_generation
+                            ),
+                        });
+                    } else if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
             }
         }
-        self.resolve_unseen_findings(&observed_keys, &observed_accounts)
-            .await?;
-        pass.unresolved_findings = counts.values().sum();
-        emit_complete_inventory_metrics(&counts);
+        let fleet_counts = self.unresolved_inventory_counts().await?;
+        emit_complete_inventory_metrics(&fleet_counts);
+        if let Some(error) = first_error {
+            return Err(error);
+        }
         Ok(pass)
     }
 
-    /// Fences access, removes all external sandbox state, and returns exact absence evidence.
-    ///
-    /// Relational metadata is deliberately untouched after the access fence. A
-    /// provider outage therefore leaves every ownership and reconciliation row
-    /// available for the next Restate replay.
-    async fn provider_accounts(&self) -> Result<Vec<ProviderAccount>> {
+    async fn unresolved_inventory_counts(
+        &self,
+    ) -> Result<BTreeMap<(String, InventoryFindingKind), u64>> {
         let mut conn = maintenance_conn(&self.pool).await?;
         let rows = sqlx::query(
-            "SELECT provider_account_id, generation, provider FROM moa.sandbox_provider_accounts WHERE health <> 'disabled' ORDER BY provider, provider_account_id",
+            r#"
+            SELECT account.provider, finding.finding_kind, count(*)::BIGINT AS count
+            FROM moa.sandbox_provider_inventory_findings AS finding
+            JOIN moa.sandbox_provider_accounts AS account
+              ON account.provider_account_id = finding.provider_account_id
+             AND account.generation = finding.provider_account_generation
+            WHERE finding.quarantine_state <> 'resolved'
+            GROUP BY account.provider, finding.finding_kind
+            "#,
         )
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx)?;
+        let mut counts = BTreeMap::new();
+        for row in rows {
+            let provider: String = row.try_get("provider").map_err(map_sqlx)?;
+            let kind = InventoryFindingKind::from_label(
+                &row.try_get::<String, _>("finding_kind").map_err(map_sqlx)?,
+            )?;
+            let count: i64 = row.try_get("count").map_err(map_sqlx)?;
+            counts.insert(
+                (provider_metric_label(&provider).to_string(), kind),
+                u64::try_from(count).map_err(|_| {
+                    MoaError::StorageError("inventory finding count is negative".to_string())
+                })?,
+            );
+        }
+        conn.commit().await?;
+        Ok(counts)
+    }
+
+    async fn reconcile_claimed_provider_account(
+        &self,
+        claimed: &ClaimedProviderAccount,
+    ) -> Result<(u64, BTreeMap<(String, InventoryFindingKind), u64>)> {
+        let account = claimed.account();
+        let provider = self.storage_provider(&account.provider)?;
+        let inventory = provider
+            .enumerate_account_storage(account.id, account.generation)
+            .await?;
+        validate_inventory_identity(&account, &inventory)?;
+        let durable = self.durable_inventory(&account).await?;
+        let findings = compare_inventory(&account, &inventory, &durable);
+        let mut observed_keys = HashSet::new();
+        let mut counts = BTreeMap::new();
+        for finding in findings {
+            observed_keys.insert(finding.key());
+            *counts
+                .entry((
+                    provider_metric_label(&account.provider).to_string(),
+                    finding.kind,
+                ))
+                .or_default() += 1;
+            self.upsert_inventory_finding(&finding).await?;
+        }
+        self.resolve_unseen_findings(&observed_keys, account.id, account.generation)
+            .await?;
+        Ok((inventory.resources.len() as u64, counts))
+    }
+
+    async fn claim_provider_accounts(
+        &self,
+        batch_size: usize,
+    ) -> Result<Vec<ClaimedProviderAccount>> {
+        if batch_size == 0 {
+            return Err(MoaError::ValidationError(
+                "provider inventory claim batch must be positive".to_string(),
+            ));
+        }
+        let batch_size = i64::try_from(batch_size).map_err(|_| {
+            MoaError::ValidationError("provider inventory batch overflows bigint".to_string())
+        })?;
+        let ttl_seconds = i64::try_from(self.reconciliation_claim_ttl.as_secs()).map_err(|_| {
+            MoaError::ValidationError("provider inventory claim TTL overflows bigint".to_string())
+        })?;
+        let claim_token = Uuid::now_v7();
+        let mut conn = maintenance_conn(&self.pool).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO moa.sandbox_provider_inventory_claims AS claim (
+                provider_account_id, provider_account_generation, provider
+            )
+            SELECT provider_account_id, generation, provider
+            FROM moa.sandbox_provider_accounts
+            WHERE health <> 'disabled'
+            ON CONFLICT (provider_account_id, provider_account_generation)
+            DO UPDATE SET provider = EXCLUDED.provider
+            WHERE claim.provider IS DISTINCT FROM EXCLUDED.provider
+            "#,
+        )
+        .execute(conn.as_mut())
+        .await
+        .map_err(map_sqlx)?;
+        let rows = sqlx::query(
+            r#"
+            WITH candidates AS (
+                SELECT claim.provider_account_id, claim.provider_account_generation
+                FROM moa.sandbox_provider_inventory_claims AS claim
+                JOIN moa.sandbox_provider_accounts AS account
+                  ON account.provider_account_id = claim.provider_account_id
+                 AND account.generation = claim.provider_account_generation
+                WHERE account.health <> 'disabled'
+                  AND (claim.claim_token IS NULL OR claim.claim_expires_at <= now())
+                ORDER BY claim.last_succeeded_at NULLS FIRST,
+                         claim.provider, claim.provider_account_id,
+                         claim.provider_account_generation
+                LIMIT $1
+                FOR UPDATE OF claim SKIP LOCKED
+            )
+            UPDATE moa.sandbox_provider_inventory_claims AS claim
+            SET claim_generation = claim.claim_generation + 1,
+                claim_owner = $2, claim_token = $3,
+                claimed_at = now(),
+                claim_expires_at = now() + make_interval(secs => $4),
+                updated_at = now()
+            FROM candidates
+            WHERE claim.provider_account_id = candidates.provider_account_id
+              AND claim.provider_account_generation = candidates.provider_account_generation
+            RETURNING claim.provider_account_id, claim.provider_account_generation,
+                      claim.provider, claim.claim_generation, claim.claim_token
+            "#,
+        )
+        .bind(batch_size)
+        .bind(self.inventory_claim_owner)
+        .bind(claim_token)
+        .bind(ttl_seconds)
         .fetch_all(conn.as_mut())
         .await
         .map_err(map_sqlx)?;
         let accounts = rows
             .iter()
             .map(|row| {
-                let generation: i64 = row.try_get("generation").map_err(map_sqlx)?;
-                Ok(ProviderAccount {
+                let generation: i64 = row
+                    .try_get("provider_account_generation")
+                    .map_err(map_sqlx)?;
+                let claim_generation: i64 = row.try_get("claim_generation").map_err(map_sqlx)?;
+                Ok(ClaimedProviderAccount {
                     id: row.try_get("provider_account_id").map_err(map_sqlx)?,
                     generation: u64::try_from(generation).map_err(|_| {
                         MoaError::StorageError(
@@ -64,11 +203,97 @@ impl WorkspaceMaintenanceCoordinator {
                         )
                     })?,
                     provider: row.try_get("provider").map_err(map_sqlx)?,
+                    claim_generation: u64::try_from(claim_generation).map_err(|_| {
+                        MoaError::StorageError(
+                            "provider inventory claim generation is invalid".to_string(),
+                        )
+                    })?,
+                    claim_token: row.try_get("claim_token").map_err(map_sqlx)?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
         conn.commit().await?;
         Ok(accounts)
+    }
+
+    async fn complete_provider_inventory_claim(
+        &self,
+        claim: &ClaimedProviderAccount,
+    ) -> Result<bool> {
+        self.finish_provider_inventory_claim(claim, None).await
+    }
+
+    async fn fail_provider_inventory_claim(
+        &self,
+        claim: &ClaimedProviderAccount,
+        error: &str,
+    ) -> Result<bool> {
+        self.finish_provider_inventory_claim(claim, Some(error))
+            .await
+    }
+
+    async fn finish_provider_inventory_claim(
+        &self,
+        claim: &ClaimedProviderAccount,
+        error: Option<&str>,
+    ) -> Result<bool> {
+        let mut conn = maintenance_conn(&self.pool).await?;
+        let affected = if let Some(error) = error {
+            let error = truncate_inventory_error(error);
+            sqlx::query(
+                r#"
+                UPDATE moa.sandbox_provider_inventory_claims
+                SET claim_owner = NULL, claim_token = NULL,
+                    claimed_at = NULL, claim_expires_at = NULL,
+                    last_error = $6, last_error_at = now(), updated_at = now()
+                WHERE provider_account_id = $1 AND provider_account_generation = $2
+                  AND claim_generation = $3 AND claim_owner = $4 AND claim_token = $5
+                  AND claim_expires_at > now()
+                "#,
+            )
+            .bind(claim.id)
+            .bind(i64::try_from(claim.generation).map_err(|_| {
+                MoaError::StorageError("provider account generation overflows bigint".to_string())
+            })?)
+            .bind(i64::try_from(claim.claim_generation).map_err(|_| {
+                MoaError::StorageError("inventory claim generation overflows bigint".to_string())
+            })?)
+            .bind(self.inventory_claim_owner)
+            .bind(claim.claim_token)
+            .bind(error)
+            .execute(conn.as_mut())
+            .await
+            .map_err(map_sqlx)?
+            .rows_affected()
+        } else {
+            sqlx::query(
+                r#"
+                UPDATE moa.sandbox_provider_inventory_claims
+                SET claim_owner = NULL, claim_token = NULL,
+                    claimed_at = NULL, claim_expires_at = NULL,
+                    last_succeeded_at = now(), last_error = NULL,
+                    last_error_at = NULL, updated_at = now()
+                WHERE provider_account_id = $1 AND provider_account_generation = $2
+                  AND claim_generation = $3 AND claim_owner = $4 AND claim_token = $5
+                  AND claim_expires_at > now()
+                "#,
+            )
+            .bind(claim.id)
+            .bind(i64::try_from(claim.generation).map_err(|_| {
+                MoaError::StorageError("provider account generation overflows bigint".to_string())
+            })?)
+            .bind(i64::try_from(claim.claim_generation).map_err(|_| {
+                MoaError::StorageError("inventory claim generation overflows bigint".to_string())
+            })?)
+            .bind(self.inventory_claim_owner)
+            .bind(claim.claim_token)
+            .execute(conn.as_mut())
+            .await
+            .map_err(map_sqlx)?
+            .rows_affected()
+        };
+        conn.commit().await?;
+        Ok(affected == 1)
     }
 
     /// Lists exact provider-account generations referenced by one tenant.
@@ -142,9 +367,14 @@ impl WorkspaceMaintenanceCoordinator {
             SELECT workspace_id, tenant_id, writer_epoch, instance_generation,
                    provider_account_id, provider_account_generation
             FROM moa.sandbox_workspaces
-            WHERE lifecycle_state <> 'deleted'
+            WHERE provider_account_id = $1 AND provider_account_generation = $2
+              AND lifecycle_state <> 'deleted'
             "#,
         )
+        .bind(account.id)
+        .bind(i64::try_from(account.generation).map_err(|_| {
+            MoaError::StorageError("provider account generation overflows Postgres".to_string())
+        })?)
         .fetch_all(conn.as_mut())
         .await
         .map_err(map_sqlx)?;
@@ -253,43 +483,42 @@ impl WorkspaceMaintenanceCoordinator {
         Ok(())
     }
 
+    /// Resolves every unresolved finding of one scanned account generation that
+    /// the completed scan did not observe again.
     async fn resolve_unseen_findings(
         &self,
         observed: &HashSet<InventoryFindingKey>,
-        observed_accounts: &HashSet<(ProviderAccountId, u64)>,
+        account_id: ProviderAccountId,
+        account_generation: u64,
     ) -> Result<()> {
+        let scanned_generation = i64::try_from(account_generation).map_err(|_| {
+            MoaError::StorageError("provider account generation overflows Postgres".to_string())
+        })?;
         let mut conn = maintenance_conn(&self.pool).await?;
         let rows = sqlx::query(
             r#"
-            SELECT provider_account_id, provider_account_generation,
-                   resource_fingerprint, finding_kind
+            SELECT resource_fingerprint, finding_kind
             FROM moa.sandbox_provider_inventory_findings
             WHERE quarantine_state <> 'resolved'
+              AND provider_account_id = $1
+              AND provider_account_generation = $2
             "#,
         )
+        .bind(account_id)
+        .bind(scanned_generation)
         .fetch_all(conn.as_mut())
         .await
         .map_err(map_sqlx)?;
         for row in rows {
             let key = InventoryFindingKey {
-                account_id: row.try_get("provider_account_id").map_err(map_sqlx)?,
-                account_generation: u64::try_from(
-                    row.try_get::<i64, _>("provider_account_generation")
-                        .map_err(map_sqlx)?,
-                )
-                .map_err(|_| {
-                    MoaError::StorageError(
-                        "inventory finding account generation is invalid".to_string(),
-                    )
-                })?,
+                account_id,
+                account_generation,
                 resource_fingerprint: row.try_get("resource_fingerprint").map_err(map_sqlx)?,
                 kind: InventoryFindingKind::from_label(
                     &row.try_get::<String, _>("finding_kind").map_err(map_sqlx)?,
                 )?,
             };
-            if !observed_accounts.contains(&(key.account_id, key.account_generation))
-                || observed.contains(&key)
-            {
+            if observed.contains(&key) {
                 continue;
             }
             let digest = format!(
@@ -315,10 +544,8 @@ impl WorkspaceMaintenanceCoordinator {
                   AND quarantine_state <> 'resolved'
                 "#,
             )
-            .bind(key.account_id)
-            .bind(i64::try_from(key.account_generation).map_err(|_| {
-                MoaError::StorageError("provider account generation overflows Postgres".to_string())
-            })?)
+            .bind(account_id)
+            .bind(scanned_generation)
             .bind(&key.resource_fingerprint)
             .bind(key.kind.as_str())
             .bind(digest)
@@ -338,6 +565,30 @@ pub(super) struct ProviderAccount {
     pub(super) generation: u64,
     /// Provider adapter name.
     pub(super) provider: String,
+}
+
+#[derive(Debug, Clone)]
+struct ClaimedProviderAccount {
+    id: ProviderAccountId,
+    generation: u64,
+    provider: String,
+    claim_generation: u64,
+    claim_token: Uuid,
+}
+
+impl ClaimedProviderAccount {
+    fn account(&self) -> ProviderAccount {
+        ProviderAccount {
+            id: self.id,
+            generation: self.generation,
+            provider: self.provider.clone(),
+        }
+    }
+}
+
+fn truncate_inventory_error(error: &str) -> String {
+    const LIMIT: usize = 2_048;
+    error.chars().take(LIMIT).collect()
 }
 
 #[derive(Debug, Clone)]

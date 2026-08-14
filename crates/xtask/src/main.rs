@@ -39,6 +39,7 @@ mod record_memory_merges;
 mod run_external_memory_eval;
 #[cfg(feature = "eval-tools")]
 mod run_memory_retrieval_eval;
+mod subsystem_map;
 #[cfg(feature = "eval-tools")]
 mod wixqa_rag_eval;
 
@@ -96,6 +97,8 @@ fn main() -> Result<()> {
         Some("audit-paths") => cmd_audit_paths(),
         Some("check-architecture-boundaries") => check_architecture_boundaries::run(),
         Some("check-migrations") => cmd_check_migrations(),
+        Some("check-subsystems") => subsystem_map::check(),
+        Some("plan-subsystem-audit") => subsystem_map::plan(args),
         #[cfg(feature = "eval-tools")]
         Some("check-eval-budgets") => check_eval_budgets::run(args),
         #[cfg(feature = "eval-tools")]
@@ -130,7 +133,7 @@ fn main() -> Result<()> {
             "xtask command `{command}` requires `cargo run -p xtask --features eval-tools -- {command}`"
         ),
         Some(command) => bail!("unknown xtask command: {command}"),
-        None => bail!("missing xtask command; try `cargo xtask audit-paths`"),
+        None => bail!("missing xtask command; try `cargo xtask check-subsystems`"),
     }
 }
 

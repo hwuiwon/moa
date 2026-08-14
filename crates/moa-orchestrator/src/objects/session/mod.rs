@@ -132,6 +132,10 @@ struct SessionPendingState {
     turn_waiters: Vec<SessionTurnWaiter>,
     #[serde(default)]
     admission_heartbeat_generation: u64,
+    /// Exact coordinator turn durably parked for human input and therefore owning
+    /// no shared fleet or tenant admission lease.
+    #[serde(default)]
+    turn_admission_parked: Option<ParkedCoordinatorAdmission>,
     /// Cancellation requested for a turn that has not yet reported its outcome.
     ///
     /// The scope decides queue disposition when the matching `Cancelled` callback
@@ -159,7 +163,49 @@ struct PendingCancellation {
     scope: CancelScope,
 }
 
+/// Exact active coordinator whose shared admission was released for human input.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct ParkedCoordinatorAdmission {
+    turn_id: String,
+    generation: u64,
+}
+
 impl SessionPendingState {
+    /// Returns whether the active coordinator currently owns shared turn admission.
+    fn turn_admission_is_live(&self) -> bool {
+        self.active_turn_id.is_some() && self.turn_admission_parked.is_none()
+    }
+
+    /// Parks shared admission for one exact active coordinator generation.
+    fn park_turn_admission(&mut self, turn_id: &str, generation: u64) -> bool {
+        if self.active_turn_id.as_deref() != Some(turn_id) || self.turn_admission_parked.is_some() {
+            return false;
+        }
+        self.turn_admission_parked = Some(ParkedCoordinatorAdmission {
+            turn_id: turn_id.to_string(),
+            generation,
+        });
+        // Invalidate the already-scheduled heartbeat. Its handler observes this
+        // generation before it can renew the released lease.
+        self.admission_heartbeat_generation = self.admission_heartbeat_generation.saturating_add(1);
+        true
+    }
+
+    /// Marks shared admission live again for one exact parked coordinator generation.
+    fn resume_turn_admission(&mut self, turn_id: &str, generation: u64) -> bool {
+        if self.active_turn_id.as_deref() != Some(turn_id)
+            || self.turn_admission_parked.as_ref()
+                != Some(&ParkedCoordinatorAdmission {
+                    turn_id: turn_id.to_string(),
+                    generation,
+                })
+        {
+            return false;
+        }
+        self.turn_admission_parked = None;
+        true
+    }
+
     /// Returns whether a new turn may be admitted right now.
     ///
     /// A whole-task-tree cancellation fences admission for the window between the
@@ -713,6 +759,31 @@ mod tests {
 
         assert!(coordinator_only.dispatches_next_after(&cancelled));
         assert!(!task_tree.dispatches_next_after(&cancelled));
+    }
+
+    #[test]
+    fn coordinator_human_wait_releases_and_exact_resume_reacquires_turn_admission() {
+        // Pins: a coordinator parked on durable human input owns no shared active-turn
+        // lease, stale registrations cannot change that state, and only the exact active
+        // turn can make admission live again before its awakeable is resolved.
+        let mut state = SessionPendingState {
+            active_turn_id: Some("turn-1".to_string()),
+            admission_heartbeat_generation: 7,
+            ..SessionPendingState::default()
+        };
+
+        state.turn_generation = 3;
+        assert!(!state.park_turn_admission("stale-turn", 3));
+        assert!(state.turn_admission_is_live());
+        assert!(state.park_turn_admission("turn-1", 3));
+        assert!(!state.turn_admission_is_live());
+        assert_eq!(state.admission_heartbeat_generation, 8);
+        assert!(!state.park_turn_admission("turn-1", 3));
+        assert!(!state.resume_turn_admission("stale-turn", 3));
+        assert!(!state.resume_turn_admission("turn-1", 2));
+        assert!(state.resume_turn_admission("turn-1", 3));
+        assert!(state.turn_admission_is_live());
+        assert!(!state.resume_turn_admission("turn-1", 3));
     }
 
     #[test]

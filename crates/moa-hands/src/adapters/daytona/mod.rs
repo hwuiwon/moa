@@ -34,6 +34,7 @@ use moa_core::{
     types::hands::SandboxTierCapabilities,
     types::hands::validate_sandbox_file_path,
     types::identifiers::{HandProvisioningOperationId, WorkspaceCheckpointId},
+    types::resource::ResourceBudget,
     types::sandbox_workspace::{
         ProviderAccountStorageInventory, ProviderInventoryResource, ProviderInventoryResourceKind,
         ProviderStorageRef, TenantStoragePurgeRequest, WorkspaceAttachRequest,
@@ -70,7 +71,9 @@ use crate::tools::{bash, file_outline, file_read, grep};
 
 const DAYTONA_SUPPORTED_CAPABILITIES: &[SandboxToolCapability] = &SandboxToolCapability::ALL;
 const DEFAULT_DAYTONA_IMAGE: &str = "daytonaio/workspace:latest";
-const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_COMMAND_TIMEOUT: Duration = crate::tools::bash::DEFAULT_BASH_TIMEOUT;
+const LIFECYCLE_TRANSITION_TIMEOUT: Duration = Duration::from_secs(60);
+const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const DESTROY_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
 const DESTROY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const PROVISION_RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -574,43 +577,52 @@ impl DaytonaHandProvider {
         workspace_id: &str,
         command: &str,
         cwd: Option<&str>,
-        timeout: Option<Duration>,
+        command_timeout: Option<Duration>,
     ) -> Result<ToolOutput> {
-        let timeout_secs = timeout.map(|timeout| timeout.as_secs());
+        let command_timeout = command_timeout.unwrap_or(DEFAULT_COMMAND_TIMEOUT);
         let started_at = Instant::now();
-        let response = attempt
-            .client()
-            .post(format!(
-                "{}/toolbox/{}/process/execute",
-                attempt.origin(),
-                workspace_id
+        timeout(command_timeout, async {
+            let response = attempt
+                .client()
+                .post(format!(
+                    "{}/toolbox/{}/process/execute",
+                    attempt.origin(),
+                    workspace_id
+                ))
+                .bearer_auth(attempt.credential())
+                .json(&json!({
+                    "command": command,
+                    "cwd": cwd,
+                    "timeout": command_timeout.as_secs(),
+                }))
+                .send()
+                .await
+                .map_err(|error| {
+                    MoaError::ProviderError(format!("failed to execute Daytona command: {error}"))
+                })?;
+            let value = expect_success_json(response, "Daytona").await?;
+            Ok(ToolOutput::from_process(
+                value
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                String::new(),
+                value
+                    .get("exitCode")
+                    .or_else(|| value.get("code"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default() as i32,
+                started_at.elapsed(),
             ))
-            .bearer_auth(attempt.credential())
-            .json(&json!({
-                "command": command,
-                "cwd": cwd,
-                "timeout": timeout_secs.unwrap_or(DEFAULT_COMMAND_TIMEOUT.as_secs()),
-            }))
-            .send()
-            .await
-            .map_err(|error| {
-                MoaError::ProviderError(format!("failed to execute Daytona command: {error}"))
-            })?;
-        let value = expect_success_json(response, "Daytona").await?;
-        Ok(ToolOutput::from_process(
-            value
-                .get("result")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            String::new(),
-            value
-                .get("exitCode")
-                .or_else(|| value.get("code"))
-                .and_then(Value::as_i64)
-                .unwrap_or_default() as i32,
-            started_at.elapsed(),
-        ))
+        })
+        .await
+        .map_err(|_| {
+            MoaError::ToolError(format!(
+                "Daytona command timed out after {}s",
+                command_timeout.as_secs()
+            ))
+        })?
     }
 
     async fn prepare_mutable_root(&self, handle: &HandHandle) -> Result<()> {
@@ -824,6 +836,7 @@ impl DaytonaHandProvider {
         tool: &str,
         input: &str,
         payload: &Value,
+        execution_timeout: Duration,
     ) -> Result<ToolOutput> {
         match supported_capability_for_tool(tool, DAYTONA_SUPPORTED_CAPABILITIES) {
             Some(SandboxToolCapability::Bash) => {
@@ -842,7 +855,7 @@ impl DaytonaHandProvider {
                         workspace_id,
                         &command,
                         None,
-                        params.timeout_secs.map(|timeout| timeout.duration()),
+                        Some(execution_timeout),
                     )
                     .await?;
                 if let Some(command) = trusted {
@@ -852,8 +865,14 @@ impl DaytonaHandProvider {
             }
             Some(SandboxToolCapability::Grep) => {
                 let command = grep::remote_shell_command(input, "/")?;
-                self.execute_command(attempt, workspace_id, &command, None, None)
-                    .await
+                self.execute_command(
+                    attempt,
+                    workspace_id,
+                    &command,
+                    None,
+                    Some(execution_timeout),
+                )
+                .await
             }
             Some(SandboxToolCapability::FileOutline) => {
                 let path = required_string_field(payload, "path")?;
@@ -905,6 +924,108 @@ impl DaytonaHandProvider {
             }
             None => Err(unsupported_tool("Daytona", tool)),
         }
+    }
+
+    async fn execute_bounded(
+        &self,
+        handle: &HandHandle,
+        tool: &str,
+        input: &str,
+        budget: ResourceBudget,
+    ) -> Result<ToolOutput> {
+        let execution_timeout = bash::effective_synchronous_timeout(
+            tool,
+            input,
+            DEFAULT_COMMAND_TIMEOUT,
+            budget.time_remaining(chrono::Utc::now()),
+        )?;
+        timeout(execution_timeout, async {
+            let workspace_id = handle.daytona_id()?;
+            let (account_id, account_generation) = cloud_account(handle, "Daytona")?;
+            let attempt = self
+                .attempt(account_id, account_generation, ProviderEndpoint::Toolbox)
+                .await?;
+            let payload: Value = serde_json::from_str(input)?;
+            match self
+                .dispatch_tool(
+                    &attempt,
+                    workspace_id,
+                    tool,
+                    input,
+                    &payload,
+                    execution_timeout,
+                )
+                .await
+            {
+                Ok(output) => Ok(output),
+                Err(error) => match self.status(handle).await {
+                    Ok(HandStatus::Stopped | HandStatus::Paused | HandStatus::Provisioning) => {
+                        self.resume(handle).await?;
+                        let attempt = self
+                            .attempt(account_id, account_generation, ProviderEndpoint::Toolbox)
+                            .await?;
+                        self.dispatch_tool(
+                            &attempt,
+                            workspace_id,
+                            tool,
+                            input,
+                            &payload,
+                            execution_timeout,
+                        )
+                        .await
+                    }
+                    _ => Err(error),
+                },
+            }
+        })
+        .await
+        .map_err(|_| {
+            MoaError::ToolError(format!(
+                "Daytona tool execution timed out after {}s",
+                execution_timeout.as_secs()
+            ))
+        })?
+    }
+
+    async fn wait_for_status(
+        &self,
+        handle: &HandHandle,
+        expected: HandStatus,
+        operation: &'static str,
+    ) -> Result<()> {
+        let started_at = Instant::now();
+        loop {
+            let status = self.status(handle).await?;
+            if status == expected {
+                return Ok(());
+            }
+            if matches!(status, HandStatus::Destroyed | HandStatus::Failed) {
+                return Err(MoaError::ProviderError(format!(
+                    "Daytona sandbox entered {status:?} while waiting to {operation}"
+                )));
+            }
+            if started_at.elapsed() >= LIFECYCLE_TRANSITION_TIMEOUT {
+                return Err(MoaError::ProviderError(format!(
+                    "timed out waiting for Daytona sandbox to {operation}; last status was {status:?}"
+                )));
+            }
+            sleep(LIFECYCLE_POLL_INTERVAL).await;
+        }
+    }
+}
+
+fn daytona_hand_status(state: &str) -> HandStatus {
+    match state.to_ascii_lowercase().as_str() {
+        "creating" | "pending" | "starting" | "resuming" | "restoring" | "pending_build"
+        | "building_snapshot" | "pulling_snapshot" | "resizing" | "snapshotting" | "forking" => {
+            HandStatus::Provisioning
+        }
+        "started" | "running" => HandStatus::Running,
+        "stopping" | "pausing" => HandStatus::Paused,
+        "paused" | "stopped" => HandStatus::Stopped,
+        "archived" | "archiving" | "deleted" | "destroying" => HandStatus::Destroyed,
+        "error" | "failed" | "build_failed" => HandStatus::Failed,
+        _ => HandStatus::Failed,
     }
 }
 
@@ -1096,34 +1217,18 @@ impl HandProvider for DaytonaHandProvider {
     }
 
     async fn execute(&self, handle: &HandHandle, tool: &str, input: &str) -> Result<ToolOutput> {
-        let workspace_id = handle.daytona_id()?;
-        let (account_id, account_generation) = cloud_account(handle, "Daytona")?;
-        let attempt = self
-            .attempt(account_id, account_generation, ProviderEndpoint::Toolbox)
-            .await?;
-        let payload: Value = serde_json::from_str(input)?;
-        // Attempt the tool directly rather than resuming on every call. The
-        // sandbox is only probed and resumed after a failure, and only when it is
-        // genuinely not running (so the tool never started); this keeps the happy
-        // path free of a status()+resume() round trip while still recovering a
-        // sandbox that auto-stopped between calls without risking a double run.
-        match self
-            .dispatch_tool(&attempt, workspace_id, tool, input, &payload)
+        self.execute_bounded(handle, tool, input, ResourceBudget::UNBOUNDED)
             .await
-        {
-            Ok(output) => Ok(output),
-            Err(error) => match self.status(handle).await {
-                Ok(HandStatus::Stopped | HandStatus::Paused) => {
-                    self.resume(handle).await?;
-                    let attempt = self
-                        .attempt(account_id, account_generation, ProviderEndpoint::Toolbox)
-                        .await?;
-                    self.dispatch_tool(&attempt, workspace_id, tool, input, &payload)
-                        .await
-                }
-                _ => Err(error),
-            },
-        }
+    }
+
+    async fn execute_within(
+        &self,
+        handle: &HandHandle,
+        tool: &str,
+        input: &str,
+        budget: ResourceBudget,
+    ) -> Result<ToolOutput> {
+        self.execute_bounded(handle, tool, input, budget).await
     }
 
     async fn install_files(&self, handle: &HandHandle, files: &[SandboxFile]) -> Result<()> {
@@ -1199,20 +1304,41 @@ impl HandProvider for DaytonaHandProvider {
         let state = value
             .get("state")
             .and_then(Value::as_str)
-            .unwrap_or("started")
-            .to_ascii_lowercase();
-        Ok(match state.as_str() {
-            "creating" | "pending" | "starting" => HandStatus::Provisioning,
-            "started" | "running" => HandStatus::Running,
-            "stopped" => HandStatus::Stopped,
-            "archived" | "deleted" => HandStatus::Destroyed,
-            "error" | "failed" => HandStatus::Failed,
-            _ => HandStatus::Running,
-        })
+            .unwrap_or("unknown");
+        Ok(daytona_hand_status(state))
     }
 
-    async fn pause(&self, handle: &HandHandle) -> Result<()> {
+    fn supports_suspend(&self) -> bool {
+        true
+    }
+
+    /// Stops the sandbox, releasing its CPU and memory while keeping the filesystem.
+    ///
+    /// `POST /api/sandbox/{id}/stop` is a real compute release on Daytona's
+    /// billing model, not a freeze: the sandbox moves to `stopped` (which
+    /// [`DaytonaHandProvider::status`] maps to [`HandStatus::Stopped`]) and
+    /// [`DaytonaHandProvider::resume`] brings it back with `/start`. This is the
+    /// only genuine compute-release-with-filesystem-retention primitive MOA has.
+    async fn suspend(&self, handle: &HandHandle) -> Result<()> {
         let workspace_id = handle.daytona_id()?;
+        match self.status(handle).await? {
+            HandStatus::Stopped => return Ok(()),
+            HandStatus::Paused => {
+                return self
+                    .wait_for_status(handle, HandStatus::Stopped, "finish stopping")
+                    .await;
+            }
+            HandStatus::Provisioning => {
+                self.wait_for_status(handle, HandStatus::Running, "become ready before stopping")
+                    .await?;
+            }
+            HandStatus::Running => {}
+            status @ (HandStatus::Destroyed | HandStatus::Failed) => {
+                return Err(MoaError::ProviderError(format!(
+                    "cannot suspend Daytona sandbox from {status:?}"
+                )));
+            }
+        }
         let (account_id, account_generation) = cloud_account(handle, "Daytona")?;
         let attempt = self
             .attempt(account_id, account_generation, ProviderEndpoint::Api)
@@ -1230,14 +1356,29 @@ impl HandProvider for DaytonaHandProvider {
                 MoaError::ProviderError(format!("failed to stop Daytona sandbox: {error}"))
             })?;
         expect_success(response).await?;
-        Ok(())
+        self.wait_for_status(handle, HandStatus::Stopped, "stop")
+            .await
     }
 
     async fn resume(&self, handle: &HandHandle) -> Result<()> {
         let workspace_id = handle.daytona_id()?;
         let status = self.status(handle).await?;
-        if matches!(status, HandStatus::Running | HandStatus::Provisioning) {
+        if status == HandStatus::Running {
             return Ok(());
+        }
+        if status == HandStatus::Provisioning {
+            return self
+                .wait_for_status(handle, HandStatus::Running, "become ready")
+                .await;
+        }
+        if status == HandStatus::Paused {
+            self.wait_for_status(handle, HandStatus::Stopped, "finish stopping")
+                .await?;
+        }
+        if matches!(status, HandStatus::Destroyed | HandStatus::Failed) {
+            return Err(MoaError::ProviderError(format!(
+                "cannot resume Daytona sandbox from {status:?}"
+            )));
         }
         let (account_id, account_generation) = cloud_account(handle, "Daytona")?;
         let attempt = self
@@ -1256,7 +1397,8 @@ impl HandProvider for DaytonaHandProvider {
                 MoaError::ProviderError(format!("failed to start Daytona sandbox: {error}"))
             })?;
         expect_success(response).await?;
-        Ok(())
+        self.wait_for_status(handle, HandStatus::Running, "start")
+            .await
     }
 
     async fn destroy(&self, handle: &HandHandle) -> Result<()> {

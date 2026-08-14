@@ -2,7 +2,7 @@
 
 use std::{
     sync::{Arc, RwLock},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -22,7 +22,7 @@ use super::{
     maintenance::WorkspaceMaintenanceCoordinator, repository::PostgresWorkspaceRepository,
 };
 use crate::core::{leases::HandLease, telemetry::record_workspace_reaper_health};
-use tokio::task::JoinHandle;
+use tokio::{task::JoinHandle, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 /// One provider inventory observation for an exact fenced operation.
@@ -78,6 +78,43 @@ pub struct WorkspaceReaperPass {
     pub retrying: usize,
 }
 
+/// Independent maintenance cadences for safety and resource-intensive workspace work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkspaceReaperCadenceConfig {
+    /// Prompt cadence for due/backlog reconciliation and readiness heartbeat.
+    pub safety_interval: Duration,
+    /// Initial checkpoint-retention cadence after work or failure.
+    pub retention_initial_interval: Duration,
+    /// Maximum checkpoint-retention cadence after consecutive idle passes.
+    pub retention_maximum_interval: Duration,
+    /// Initial full provider-inventory cadence after work or failure.
+    pub inventory_initial_interval: Duration,
+    /// Maximum full provider-inventory cadence after consecutive idle passes.
+    pub inventory_maximum_interval: Duration,
+    /// Fixed low-frequency fleet metric refresh cadence.
+    pub fleet_metrics_interval: Duration,
+}
+
+impl WorkspaceReaperCadenceConfig {
+    fn validate(self, heartbeat_maximum_age: Duration) -> Result<()> {
+        if self.safety_interval.is_zero()
+            || self.retention_initial_interval.is_zero()
+            || self.retention_maximum_interval < self.retention_initial_interval
+            || self.inventory_initial_interval.is_zero()
+            || self.inventory_maximum_interval < self.inventory_initial_interval
+            || self.fleet_metrics_interval.is_zero()
+            || heartbeat_maximum_age.is_zero()
+            || self.safety_interval >= heartbeat_maximum_age
+        {
+            return Err(MoaError::ConfigError(
+                "workspace reaper requires positive ordered cadences and a safety interval shorter than heartbeat freshness"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Cross-replica workspace cleanup owner.
 pub struct WorkspaceReaper {
     operations: Arc<PostgresWorkspaceOperationRepository>,
@@ -113,23 +150,52 @@ struct WorkspaceReaperHealth {
     exited: std::sync::atomic::AtomicBool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AdaptiveCadence {
+    initial: Duration,
+    maximum: Duration,
+    current: Duration,
+    idle_streak: u32,
+}
+
+impl AdaptiveCadence {
+    fn new(initial: Duration, maximum: Duration) -> Self {
+        Self {
+            initial,
+            maximum,
+            current: initial,
+            idle_streak: 0,
+        }
+    }
+
+    fn record_success(&mut self, idle: bool) {
+        if idle {
+            self.idle_streak = self.idle_streak.saturating_add(1);
+            self.current = self.current.saturating_mul(2).min(self.maximum);
+        } else {
+            self.reset();
+        }
+    }
+
+    fn reset(&mut self) {
+        self.current = self.initial;
+        self.idle_streak = 0;
+    }
+}
+
 impl WorkspaceReaperHandle {
     /// Starts the supervised reaper before listener readiness.
     pub fn spawn(
         coordinator: Arc<WorkspaceMaintenanceCoordinator>,
         reaper: WorkspaceReaper,
-        interval: Duration,
+        cadences: WorkspaceReaperCadenceConfig,
         batch_size: i64,
         heartbeat_maximum_age: Duration,
     ) -> Result<Self> {
-        if interval.is_zero()
-            || batch_size <= 0
-            || heartbeat_maximum_age.is_zero()
-            || interval >= heartbeat_maximum_age
-        {
+        cadences.validate(heartbeat_maximum_age)?;
+        if batch_size <= 0 {
             return Err(MoaError::ConfigError(
-                "workspace reaper requires positive batch/heartbeat bounds and an interval shorter than heartbeat freshness"
-                    .to_string(),
+                "workspace reaper requires a positive reconciliation batch".to_string(),
             ));
         }
         let state = Arc::new(WorkspaceReaperHealth {
@@ -146,33 +212,14 @@ impl WorkspaceReaperHandle {
         let task_state = Arc::clone(&state);
         let task_shutdown = shutdown.clone();
         let task = tokio::spawn(async move {
-            let result = async {
-                loop {
-                    let backlog = coordinator.backlog().await?;
-                    task_state
-                        .backlog
-                        .store(backlog.count, std::sync::atomic::Ordering::Release);
-                    task_state.oldest_work_seconds.store(
-                        backlog.oldest_age.as_secs(),
-                        std::sync::atomic::Ordering::Release,
-                    );
-                    reaper.run_once(batch_size).await?;
-                    coordinator.run_retention_once().await?;
-                    coordinator.reconcile_provider_inventory_once().await?;
-                    coordinator.emit_fleet_metrics().await?;
-                    set_reaper_heartbeat(&task_state)?;
-                    record_workspace_reaper_health(
-                        true,
-                        Duration::ZERO,
-                        backlog.count,
-                        backlog.oldest_age,
-                    );
-                    tokio::select! {
-                        () = task_shutdown.cancelled() => return Ok(()),
-                        () = tokio::time::sleep(interval) => {}
-                    }
-                }
-            }
+            let result = supervise_workspace_maintenance(
+                coordinator,
+                reaper,
+                cadences,
+                batch_size,
+                Arc::clone(&task_state),
+                task_shutdown,
+            )
             .await;
             task_state
                 .exited
@@ -369,6 +416,195 @@ impl WorkspaceReaperReadiness {
             ),
         );
         reason
+    }
+}
+
+async fn supervise_workspace_maintenance(
+    coordinator: Arc<WorkspaceMaintenanceCoordinator>,
+    reaper: WorkspaceReaper,
+    cadences: WorkspaceReaperCadenceConfig,
+    batch_size: i64,
+    state: Arc<WorkspaceReaperHealth>,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let mut lanes = tokio::task::JoinSet::new();
+    lanes.spawn(run_safety_lane(
+        Arc::clone(&coordinator),
+        reaper,
+        cadences.safety_interval,
+        batch_size,
+        Arc::clone(&state),
+        shutdown.clone(),
+    ));
+    lanes.spawn(run_retention_lane(
+        Arc::clone(&coordinator),
+        AdaptiveCadence::new(
+            cadences.retention_initial_interval,
+            cadences.retention_maximum_interval,
+        ),
+        shutdown.clone(),
+    ));
+    lanes.spawn(run_inventory_lane(
+        Arc::clone(&coordinator),
+        AdaptiveCadence::new(
+            cadences.inventory_initial_interval,
+            cadences.inventory_maximum_interval,
+        ),
+        usize::try_from(batch_size).map_err(|_| {
+            MoaError::ConfigError(
+                "workspace inventory reconciliation batch exceeds this platform".to_string(),
+            )
+        })?,
+        shutdown.clone(),
+    ));
+    lanes.spawn(run_metrics_lane(
+        coordinator,
+        cadences.fleet_metrics_interval,
+        shutdown.clone(),
+    ));
+
+    let mut failure = None;
+    while let Some(joined) = lanes.join_next().await {
+        match joined {
+            Ok(Ok(())) if shutdown.is_cancelled() => {}
+            Ok(Ok(())) => {
+                failure = Some(MoaError::StorageError(
+                    "workspace maintenance lane exited unexpectedly".to_string(),
+                ));
+                shutdown.cancel();
+            }
+            Ok(Err(error)) => {
+                failure = Some(error);
+                shutdown.cancel();
+            }
+            Err(error) => {
+                failure = Some(MoaError::StorageError(format!(
+                    "workspace maintenance lane join failed: {error}"
+                )));
+                shutdown.cancel();
+            }
+        }
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+async fn run_safety_lane(
+    coordinator: Arc<WorkspaceMaintenanceCoordinator>,
+    reaper: WorkspaceReaper,
+    interval: Duration,
+    batch_size: i64,
+    state: Arc<WorkspaceReaperHealth>,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    loop {
+        if shutdown.is_cancelled() {
+            return Ok(());
+        }
+        let backlog = coordinator.backlog().await?;
+        state
+            .backlog
+            .store(backlog.count, std::sync::atomic::Ordering::Release);
+        state.oldest_work_seconds.store(
+            backlog.oldest_age.as_secs(),
+            std::sync::atomic::Ordering::Release,
+        );
+        reaper.run_once(batch_size).await?;
+        set_reaper_heartbeat(&state)?;
+        record_workspace_reaper_health(true, Duration::ZERO, backlog.count, backlog.oldest_age);
+        if wait_for_lane(&shutdown, interval).await {
+            return Ok(());
+        }
+    }
+}
+
+async fn run_retention_lane(
+    coordinator: Arc<WorkspaceMaintenanceCoordinator>,
+    mut cadence: AdaptiveCadence,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    loop {
+        if shutdown.is_cancelled() {
+            return Ok(());
+        }
+        match coordinator.run_retention_once().await {
+            Ok(pass) => {
+                let idle = pass.claimed == 0
+                    && pass.deleted == 0
+                    && pass.awaiting_absence == 0
+                    && pass.retrying == 0;
+                cadence.record_success(idle);
+            }
+            Err(error) => {
+                cadence.reset();
+                tracing::warn!(
+                    error_code = safe_error_code(&error),
+                    "workspace checkpoint retention pass failed and will retry"
+                );
+            }
+        }
+        if wait_for_lane(&shutdown, cadence.current).await {
+            return Ok(());
+        }
+    }
+}
+
+async fn run_inventory_lane(
+    coordinator: Arc<WorkspaceMaintenanceCoordinator>,
+    mut cadence: AdaptiveCadence,
+    batch_size: usize,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    loop {
+        if shutdown.is_cancelled() {
+            return Ok(());
+        }
+        match coordinator
+            .reconcile_claimed_provider_inventory_once(batch_size)
+            .await
+        {
+            Ok(pass) => {
+                let idle = pass.resources == 0 && pass.unresolved_findings == 0;
+                cadence.record_success(idle);
+            }
+            Err(error) => {
+                cadence.reset();
+                tracing::warn!(
+                    error_code = safe_error_code(&error),
+                    "workspace provider inventory pass failed and will retry"
+                );
+            }
+        }
+        if wait_for_lane(&shutdown, cadence.current).await {
+            return Ok(());
+        }
+    }
+}
+
+async fn run_metrics_lane(
+    coordinator: Arc<WorkspaceMaintenanceCoordinator>,
+    interval: Duration,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    loop {
+        if shutdown.is_cancelled() {
+            return Ok(());
+        }
+        if let Err(error) = coordinator.emit_fleet_metrics().await {
+            tracing::warn!(
+                error_code = safe_error_code(&error),
+                "workspace fleet metric refresh failed and will retry"
+            );
+        }
+        if wait_for_lane(&shutdown, interval).await {
+            return Ok(());
+        }
+    }
+}
+
+async fn wait_for_lane(shutdown: &CancellationToken, delay: Duration) -> bool {
+    tokio::select! {
+        () = shutdown.cancelled() => true,
+        () = tokio::time::sleep(delay) => false,
     }
 }
 
@@ -569,12 +805,13 @@ fn safe_error_code(error: &MoaError) -> &'static str {
 mod tests {
     use std::{
         sync::{Arc, RwLock},
-        time::{Duration, Instant},
+        time::Duration,
     };
+    use tokio::time::Instant;
 
     use super::{
-        WorkspaceReaperHealth, WorkspaceReaperReadiness, reconciliation_backoff,
-        set_reaper_heartbeat,
+        AdaptiveCadence, WorkspaceReaperCadenceConfig, WorkspaceReaperHealth,
+        WorkspaceReaperReadiness, reconciliation_backoff, set_reaper_heartbeat,
     };
 
     #[test]
@@ -614,6 +851,75 @@ mod tests {
         assert_eq!(
             readiness.unready_reason().as_deref(),
             Some("workspace reaper exited unexpectedly")
+        );
+    }
+
+    #[test]
+    fn adaptive_cadence_backs_off_only_on_idle_and_resets_on_work_or_failure_offline() {
+        // Pins: empty expensive passes exponentially reduce provider/database load, while
+        // discovered work and pass failures both restore the prompt initial retry cadence.
+        let mut cadence = AdaptiveCadence::new(Duration::from_secs(10), Duration::from_secs(80));
+        cadence.record_success(true);
+        assert_eq!(
+            (cadence.current, cadence.idle_streak),
+            (Duration::from_secs(20), 1)
+        );
+        cadence.record_success(true);
+        cadence.record_success(true);
+        cadence.record_success(true);
+        assert_eq!(
+            (cadence.current, cadence.idle_streak),
+            (Duration::from_secs(80), 4)
+        );
+        cadence.record_success(true);
+        assert_eq!(
+            (cadence.current, cadence.idle_streak),
+            (Duration::from_secs(80), 5)
+        );
+        cadence.record_success(false);
+        assert_eq!(
+            (cadence.current, cadence.idle_streak),
+            (Duration::from_secs(10), 0)
+        );
+        cadence.record_success(true);
+        cadence.reset();
+        assert_eq!(
+            (cadence.current, cadence.idle_streak),
+            (Duration::from_secs(10), 0)
+        );
+    }
+
+    #[test]
+    fn cadence_config_rejects_hot_or_inverted_bounds_offline() {
+        // Pins: construction cannot accidentally enable a zero-delay hot loop or allow the
+        // safety heartbeat cadence to be slower than readiness freshness.
+        let valid = WorkspaceReaperCadenceConfig {
+            safety_interval: Duration::from_secs(5),
+            retention_initial_interval: Duration::from_secs(30),
+            retention_maximum_interval: Duration::from_secs(300),
+            inventory_initial_interval: Duration::from_secs(60),
+            inventory_maximum_interval: Duration::from_secs(600),
+            fleet_metrics_interval: Duration::from_secs(15),
+        };
+        valid
+            .validate(Duration::from_secs(20))
+            .expect("ordered nonzero cadences validate");
+        assert!(
+            WorkspaceReaperCadenceConfig {
+                retention_maximum_interval: Duration::from_secs(1),
+                ..valid
+            }
+            .validate(Duration::from_secs(20))
+            .is_err()
+        );
+        assert!(valid.validate(Duration::from_secs(5)).is_err());
+        assert!(
+            WorkspaceReaperCadenceConfig {
+                inventory_initial_interval: Duration::ZERO,
+                ..valid
+            }
+            .validate(Duration::from_secs(20))
+            .is_err()
         );
     }
 }

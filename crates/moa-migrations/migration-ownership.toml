@@ -435,6 +435,20 @@ owner = "moa-execution"
 readers = ["moa-orchestrator", "moa-analytics"]
 
 [[table]]
+name = "execution_amendment_planning_reservation"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator", "moa-analytics"]
+notes = "Immutable budget reservation for one automatic amendment-planner provider call."
+
+[[table]]
+name = "execution_amendment_planning_settlement"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator", "moa-analytics"]
+notes = "Immutable actual usage and cost settlement for one amendment-planning reservation."
+
+[[table]]
 name = "execution_compensation"
 schema = "moa"
 owner = "moa-execution"
@@ -458,6 +472,102 @@ name = "execution_task"
 schema = "moa"
 owner = "moa-execution"
 readers = ["moa-orchestrator", "moa-edge", "moa-experiments", "moa-analytics"]
+
+[[table]]
+name = "execution_node_state"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "execution_completion_scan"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "execution_amendment_receipt"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "execution_replan_stop_intent"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "execution_schedule"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator", "moa-edge"]
+
+[[table]]
+name = "execution_external_job"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator", "moa-edge"]
+
+[[table]]
+name = "execution_external_job_callback_receipt"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "execution_trigger"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "execution_dispatch_outbox"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "execution_task_checkpoint"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator", "moa-hands"]
+
+[[table]]
+name = "execution_capacity_bucket"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "execution_tenant_dispatch_state"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "execution_capacity_reservation"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "execution_terminal_archive"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator", "moa-analytics"]
+
+[[table]]
+name = "execution_terminal_archive_segment"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator", "moa-analytics"]
+
+[[table]]
+name = "execution_maintenance_checkpoint"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator"]
 
 [[table]]
 name = "execution_template_admission"
@@ -534,6 +644,18 @@ readers = ["moa-orchestrator"]
 
 [[table]]
 name = "sandbox_capacity_reservations"
+schema = "moa"
+owner = "moa-hands"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "sandbox_provider_inventory_claims"
+schema = "moa"
+owner = "moa-hands"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "sandbox_execution_hand_release_receipts"
 schema = "moa"
 owner = "moa-hands"
 readers = ["moa-orchestrator"]

@@ -53,6 +53,7 @@ impl LocalHandProvider {
         operation: &moa_core::types::sandbox_workspace::WorkspaceStorageOperation,
         hand: &HandHandle,
         parent_revision: Option<&WorkspaceRevisionRef>,
+        release_compute: bool,
     ) -> Result<WorkspaceStorageOperationResult> {
         if Utc::now() >= operation.deadline {
             return Err(MoaError::ProviderTimeout(
@@ -63,11 +64,12 @@ impl LocalHandProvider {
         let revision = next_workspace_revision(operation, parent_revision, checkpoint_id, None)?;
         let root = self.workspace_data_root(hand).await?;
         let store = self.checkpoint_store()?;
-        let archive = build_checkpoint_archive(
-            &root,
-            crate::core::sandbox_workspace::checkpoint::archive::ArchiveLimits::default(),
-        )
-        .await?;
+        let archive = build_checkpoint_archive(&root, store.archive_limits()).await?;
+        if let Some(capacity) = self.checkpoint_capacity.as_ref() {
+            capacity
+                .reserve_checkpoint_publication(operation, archive.manifest.logical_bytes)
+                .await?;
+        }
         let published = store
             .publish(Self::checkpoint_context(operation, checkpoint_id), archive)
             .await?;
@@ -77,13 +79,21 @@ impl LocalHandProvider {
             manifest_digest: published.manifest_sha256,
             logical_bytes: published.logical_bytes,
         };
+        if release_compute {
+            <Self as HandProvider>::destroy(self, hand).await?;
+        }
         Ok(WorkspaceStorageOperationResult {
             outcome: WorkspaceOperationOutcome::Confirmed,
             confirmed_disposition: Some(WorkspaceConfirmedDisposition::ResourcePresent),
             storage: Some(published.storage),
             checkpoint_publication: Some(checkpoint_publication),
-            post_commit_state: (operation.kind == WorkspaceOperationKind::Commit)
-                .then_some(WorkspacePostCommitState::AttachmentRetained),
+            post_commit_state: (operation.kind == WorkspaceOperationKind::Commit).then_some(
+                if release_compute {
+                    WorkspacePostCommitState::ComputeDestroyed
+                } else {
+                    WorkspacePostCommitState::AttachmentRetained
+                },
+            ),
         })
     }
 }
@@ -206,6 +216,7 @@ impl SandboxStorageProvider for LocalHandProvider {
             &request.operation,
             &request.hand,
             request.parent_revision.as_ref(),
+            request.release_compute,
         )
         .await
     }
@@ -343,6 +354,8 @@ impl SandboxStorageProvider for LocalHandProvider {
                         manifest_digest: published.manifest_sha256,
                         logical_bytes: published.logical_bytes,
                     }),
+                    // Reconciliation only proves the bytes; it never releases
+                    // compute. See `SandboxStorageProvider::reconcile_workspace_operation`.
                     post_commit_state: Some(WorkspacePostCommitState::AttachmentRetained),
                 }),
                 (WorkspaceOperationKind::Delete, None) => Ok(WorkspaceStorageOperationResult {

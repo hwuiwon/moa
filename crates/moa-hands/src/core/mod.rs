@@ -4,6 +4,7 @@ mod construction;
 mod dispatch;
 pub mod leases;
 mod lifecycle;
+mod maintenance_provider_inventory;
 pub mod mcp_catalog;
 mod normalization;
 mod output_budget;
@@ -16,7 +17,11 @@ mod registration;
 pub mod sandbox_workspace;
 pub mod telemetry;
 
+pub use lifecycle::SessionHandReleasePageOutcome;
+
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, HashMap};
+use std::ops::Bound;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,10 +48,12 @@ use tokio_util::sync::CancellationToken;
 use crate::adapters::local::LocalHandProvider;
 
 pub use dispatch::{
-    AuthorizedToolCall, DeferredWorkspaceToolOutput, JournaledWorkspaceCommit,
-    PendingConnectorToolOutput,
+    AuthorizedToolCall, DeferredWorkspaceToolOutput, ExecutionHandReleaseRequest,
+    JournaledWorkspaceCommit, PendingConnectorToolOutput, WorkerHandReleaseFence,
+    WorkerHandReleaseRequest,
 };
-use leases::HandLeaseStore;
+use leases::{HAND_LEASE_SESSION_PAGE_SIZE, HandLeaseStore};
+pub use maintenance_provider_inventory::SandboxProviderInventory;
 pub use mcp_catalog::{
     CandidateConnector, CatalogDefect, McpCatalogActivation, McpCatalogRefresh, McpConnectorHealth,
     PinnedToolContract, PinnedToolOwner, ToolCatalogDrift, ToolCatalogPin,
@@ -67,12 +74,13 @@ pub use registration::{
     HandRoute, MCP_TOOL_REFERENCE_PREFIX, ToolExecution, ToolRegistry,
     governed_tool_contract_revision, installed_connector_tool_name, mcp_tool_reference,
 };
+use sandbox_workspace::capacity::PostgresWorkspaceCapacityRepository;
 use sandbox_workspace::operations::PostgresWorkspaceOperationRepository;
 use sandbox_workspace::repository::PostgresWorkspaceRepository;
 pub use telemetry::truncate_tool_span_text;
 
 const DEFAULT_PROVIDER_NAME: &str = "local";
-const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_TOOL_TIMEOUT: Duration = crate::tools::bash::DEFAULT_BASH_TIMEOUT;
 
 /// Everything one tool dispatch needs to know about the scope that asked for it.
 ///
@@ -448,17 +456,18 @@ struct HandLifecycleOwner {
     providers: HashMap<String, Arc<dyn HandProvider>>,
     storage_providers: HashMap<String, Arc<dyn SandboxStorageProvider>>,
     local_provider: Option<Arc<LocalHandProvider>>,
-    active_hands: RwLock<HashMap<String, ActiveHand>>,
-    preferred_hand_routes: RwLock<HashMap<String, String>>,
+    active_hands: RwLock<BTreeMap<HandProviderCacheKey, ActiveHand>>,
+    preferred_hand_routes: RwLock<BTreeMap<HandScopeKey, String>>,
     hand_leases: Option<Arc<dyn HandLeaseStore>>,
     workspace_repository: Option<Arc<PostgresWorkspaceRepository>>,
     workspace_operations: Option<Arc<PostgresWorkspaceOperationRepository>>,
+    workspace_capacity: Option<Arc<PostgresWorkspaceCapacityRepository>>,
     checkpoint_store: Option<Arc<sandbox_workspace::checkpoint::store::CheckpointObjectStore>>,
     deployment_sandbox_policy: SandboxPolicySnapshot,
     tenant_sandbox_policy: Option<Arc<dyn TenantSandboxPolicyStore>>,
     hand_lease_reaper_installed: bool,
-    trusted_sandbox_files: RwLock<HashMap<HandScopeKey, Arc<TrustedSandboxManifest>>>,
-    installed_files: RwLock<HashMap<HandScopeKey, HashMap<String, InstalledManifestMarker>>>,
+    trusted_sandbox_files: RwLock<BTreeMap<HandScopeKey, Arc<TrustedSandboxManifest>>>,
+    installed_files: RwLock<BTreeMap<HandScopeKey, BTreeMap<String, InstalledManifestMarker>>>,
     workspace_roots: RwLock<HashMap<TenantId, PathBuf>>,
     sandbox_root: Option<PathBuf>,
 }
@@ -473,8 +482,166 @@ struct ActiveHand {
 /// Exact conversational scope used by trusted and installed manifest caches.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct HandScopeKey {
+    tenant_id: TenantId,
     session_id: SessionId,
     worker_id: String,
+}
+
+impl HandScopeKey {
+    fn new(tenant_id: TenantId, session_id: SessionId, worker_id: impl Into<String>) -> Self {
+        Self {
+            tenant_id,
+            session_id,
+            worker_id: worker_id.into(),
+        }
+    }
+}
+
+impl PartialOrd for HandScopeKey {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HandScopeKey {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        (self.tenant_id.0, self.session_id.0, &self.worker_id).cmp(&(
+            other.tenant_id.0,
+            other.session_id.0,
+            &other.worker_id,
+        ))
+    }
+}
+
+/// Exact process-local cache key for one provider binding under a typed owner.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HandProviderCacheKey {
+    scope: HandScopeKey,
+    provider: String,
+}
+
+impl HandProviderCacheKey {
+    fn new(scope: HandScopeKey, provider: impl Into<String>) -> Self {
+        Self {
+            scope,
+            provider: provider.into(),
+        }
+    }
+}
+
+impl PartialOrd for HandProviderCacheKey {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HandProviderCacheKey {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        (&self.scope, &self.provider).cmp(&(&other.scope, &other.provider))
+    }
+}
+
+/// Cursor through the bounded process-local cache cleanup phases for a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionCacheDrainCursor {
+    PreferredRoutes(Option<HandScopeKey>),
+    TrustedSandboxFiles(Option<HandScopeKey>),
+    InstalledFiles(Option<HandScopeKey>),
+    ActiveHands(Option<HandProviderCacheKey>),
+    Complete,
+}
+
+impl SessionCacheDrainCursor {
+    fn start() -> Self {
+        Self::PreferredRoutes(None)
+    }
+}
+
+/// One active process-local hand removed for provider teardown.
+#[derive(Debug)]
+struct CachedActiveHandRelease {
+    key: HandProviderCacheKey,
+    provider: String,
+    hand: ActiveHand,
+}
+
+/// One bounded process-local session-cache cleanup page.
+#[derive(Debug)]
+struct SessionCacheDrainPage {
+    removed_entries: usize,
+    active_hands: Vec<CachedActiveHandRelease>,
+    next_cursor: SessionCacheDrainCursor,
+}
+
+fn validate_scope_cache_cursor(
+    tenant_id: TenantId,
+    session_id: SessionId,
+    cursor: Option<&HandScopeKey>,
+) -> Result<()> {
+    if cursor.is_some_and(|cursor| cursor.tenant_id != tenant_id || cursor.session_id != session_id)
+    {
+        return Err(MoaError::ValidationError(
+            "session cache cursor does not belong to the requested tenant and session".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_provider_cache_cursor(
+    tenant_id: TenantId,
+    session_id: SessionId,
+    cursor: Option<&HandProviderCacheKey>,
+) -> Result<()> {
+    validate_scope_cache_cursor(tenant_id, session_id, cursor.map(|cursor| &cursor.scope))
+}
+
+fn session_scope_cache_keys<V>(
+    entries: &BTreeMap<HandScopeKey, V>,
+    tenant_id: TenantId,
+    session_id: SessionId,
+    after: Option<&HandScopeKey>,
+) -> Vec<HandScopeKey> {
+    let lower = after
+        .cloned()
+        .unwrap_or_else(|| HandScopeKey::new(tenant_id, session_id, String::new()));
+    let lower_bound = if after.is_some() {
+        Bound::Excluded(lower)
+    } else {
+        Bound::Included(lower)
+    };
+    entries
+        .range((lower_bound, Bound::Unbounded))
+        .take_while(|(key, _)| key.tenant_id == tenant_id && key.session_id == session_id)
+        .take(HAND_LEASE_SESSION_PAGE_SIZE + 1)
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
+fn session_provider_cache_keys<V>(
+    entries: &BTreeMap<HandProviderCacheKey, V>,
+    tenant_id: TenantId,
+    session_id: SessionId,
+    after: Option<&HandProviderCacheKey>,
+) -> Vec<HandProviderCacheKey> {
+    let lower = after.cloned().unwrap_or_else(|| {
+        HandProviderCacheKey::new(
+            HandScopeKey::new(tenant_id, session_id, String::new()),
+            String::new(),
+        )
+    });
+    let lower_bound = if after.is_some() {
+        Bound::Excluded(lower)
+    } else {
+        Bound::Included(lower)
+    };
+    entries
+        .range((lower_bound, Bound::Unbounded))
+        .take_while(|(key, _)| {
+            key.scope.tenant_id == tenant_id && key.scope.session_id == session_id
+        })
+        .take(HAND_LEASE_SESSION_PAGE_SIZE + 1)
+        .map(|(key, _)| key.clone())
+        .collect()
 }
 
 /// One immutable trusted-file publication shared cheaply across dispatches.
@@ -502,17 +669,18 @@ impl HandLifecycleOwner {
             providers,
             storage_providers: HashMap::new(),
             local_provider: None,
-            active_hands: RwLock::new(HashMap::new()),
-            preferred_hand_routes: RwLock::new(HashMap::new()),
+            active_hands: RwLock::new(BTreeMap::new()),
+            preferred_hand_routes: RwLock::new(BTreeMap::new()),
             hand_leases: None,
             workspace_repository: None,
             workspace_operations: None,
+            workspace_capacity: None,
             checkpoint_store: None,
             deployment_sandbox_policy,
             tenant_sandbox_policy: None,
             hand_lease_reaper_installed: false,
-            trusted_sandbox_files: RwLock::new(HashMap::new()),
-            installed_files: RwLock::new(HashMap::new()),
+            trusted_sandbox_files: RwLock::new(BTreeMap::new()),
+            installed_files: RwLock::new(BTreeMap::new()),
             workspace_roots: RwLock::new(HashMap::new()),
             sandbox_root: None,
         }
@@ -526,6 +694,123 @@ impl HandLifecycleOwner {
             .into_iter()
             .filter_map(|name| self.providers.get(&name).cloned())
             .collect()
+    }
+
+    /// Removes one bounded, session-indexed page of process-local lifecycle state.
+    ///
+    /// Each call advances exactly one cache family. Active bindings are returned
+    /// to the caller for provider teardown; the other cache families carry no
+    /// external resources. Supplying a cursor for another tenant or session is
+    /// rejected before any entry is removed.
+    async fn drain_session_cache_page(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+        cursor: SessionCacheDrainCursor,
+    ) -> Result<SessionCacheDrainPage> {
+        match cursor {
+            SessionCacheDrainCursor::PreferredRoutes(after) => {
+                validate_scope_cache_cursor(tenant_id, session_id, after.as_ref())?;
+                let mut routes = self.preferred_hand_routes.write().await;
+                let mut keys =
+                    session_scope_cache_keys(&routes, tenant_id, session_id, after.as_ref());
+                let has_more = keys.len() > HAND_LEASE_SESSION_PAGE_SIZE;
+                keys.truncate(HAND_LEASE_SESSION_PAGE_SIZE);
+                for key in &keys {
+                    routes.remove(key);
+                }
+                let next_cursor = if has_more {
+                    SessionCacheDrainCursor::PreferredRoutes(keys.last().cloned())
+                } else {
+                    SessionCacheDrainCursor::TrustedSandboxFiles(None)
+                };
+                Ok(SessionCacheDrainPage {
+                    removed_entries: keys.len(),
+                    active_hands: Vec::new(),
+                    next_cursor,
+                })
+            }
+            SessionCacheDrainCursor::TrustedSandboxFiles(after) => {
+                validate_scope_cache_cursor(tenant_id, session_id, after.as_ref())?;
+                let mut manifests = self.trusted_sandbox_files.write().await;
+                let mut keys =
+                    session_scope_cache_keys(&manifests, tenant_id, session_id, after.as_ref());
+                let has_more = keys.len() > HAND_LEASE_SESSION_PAGE_SIZE;
+                keys.truncate(HAND_LEASE_SESSION_PAGE_SIZE);
+                for key in &keys {
+                    manifests.remove(key);
+                }
+                let next_cursor = if has_more {
+                    SessionCacheDrainCursor::TrustedSandboxFiles(keys.last().cloned())
+                } else {
+                    SessionCacheDrainCursor::InstalledFiles(None)
+                };
+                Ok(SessionCacheDrainPage {
+                    removed_entries: keys.len(),
+                    active_hands: Vec::new(),
+                    next_cursor,
+                })
+            }
+            SessionCacheDrainCursor::InstalledFiles(after) => {
+                validate_scope_cache_cursor(tenant_id, session_id, after.as_ref())?;
+                let mut installed = self.installed_files.write().await;
+                let mut keys =
+                    session_scope_cache_keys(&installed, tenant_id, session_id, after.as_ref());
+                let has_more = keys.len() > HAND_LEASE_SESSION_PAGE_SIZE;
+                keys.truncate(HAND_LEASE_SESSION_PAGE_SIZE);
+                for key in &keys {
+                    installed.remove(key);
+                }
+                let next_cursor = if has_more {
+                    SessionCacheDrainCursor::InstalledFiles(keys.last().cloned())
+                } else {
+                    SessionCacheDrainCursor::ActiveHands(None)
+                };
+                Ok(SessionCacheDrainPage {
+                    removed_entries: keys.len(),
+                    active_hands: Vec::new(),
+                    next_cursor,
+                })
+            }
+            SessionCacheDrainCursor::ActiveHands(after) => {
+                validate_provider_cache_cursor(tenant_id, session_id, after.as_ref())?;
+                let mut hands = self.active_hands.write().await;
+                let mut keys =
+                    session_provider_cache_keys(&hands, tenant_id, session_id, after.as_ref());
+                let has_more = keys.len() > HAND_LEASE_SESSION_PAGE_SIZE;
+                keys.truncate(HAND_LEASE_SESSION_PAGE_SIZE);
+                let mut active_hands = Vec::with_capacity(keys.len());
+                for key in &keys {
+                    if let Some(hand) = hands.remove(key) {
+                        active_hands.push(CachedActiveHandRelease {
+                            key: key.clone(),
+                            provider: key.provider.clone(),
+                            hand,
+                        });
+                    }
+                }
+                let next_cursor = if has_more {
+                    SessionCacheDrainCursor::ActiveHands(keys.last().cloned())
+                } else {
+                    SessionCacheDrainCursor::Complete
+                };
+                Ok(SessionCacheDrainPage {
+                    removed_entries: active_hands.len(),
+                    active_hands,
+                    next_cursor,
+                })
+            }
+            SessionCacheDrainCursor::Complete => Ok(SessionCacheDrainPage {
+                removed_entries: 0,
+                active_hands: Vec::new(),
+                next_cursor: SessionCacheDrainCursor::Complete,
+            }),
+        }
+    }
+
+    /// Clears every installed-manifest marker for one exact typed owner.
+    async fn clear_installed_files_for_scope(&self, scope: &HandScopeKey) {
+        self.installed_files.write().await.remove(scope);
     }
 
     /// Installs the provider-neutral persistent-workspace adapters.
@@ -561,9 +846,11 @@ impl HandLifecycleOwner {
         &mut self,
         workspaces: Arc<PostgresWorkspaceRepository>,
         operations: Arc<PostgresWorkspaceOperationRepository>,
+        capacity: Arc<PostgresWorkspaceCapacityRepository>,
     ) {
         self.workspace_repository = Some(workspaces);
         self.workspace_operations = Some(operations);
+        self.workspace_capacity = Some(capacity);
     }
 
     /// Records that the deployment starts its durable lease reaper.
@@ -796,5 +1083,172 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(50), owner.wait_for_refresh_request())
             .await
             .expect("a failed or immediately stale refresh must be retryable");
+    }
+
+    #[tokio::test]
+    async fn session_cache_drain_is_bounded_and_tenant_session_indexed_offline() {
+        // Pins: terminal cleanup with more than one cache page removes only the
+        // exact tenant/session through ordered ranges and returns every active
+        // binding for teardown without a global retain or unbounded collect.
+        let owner = HandLifecycleOwner::new(
+            HashMap::new(),
+            crate::core::profile::local_development_sandbox_policy(),
+        );
+        let tenant_id = TenantId::new();
+        let unrelated_tenant_id = TenantId::new();
+        let session_id = SessionId::new();
+        let count = HAND_LEASE_SESSION_PAGE_SIZE + 7;
+
+        for index in 0..count {
+            let scope = HandScopeKey::new(tenant_id, session_id, format!("owner-{index:03}"));
+            let provider_key = HandProviderCacheKey::new(scope.clone(), "local");
+            owner
+                .preferred_hand_routes
+                .write()
+                .await
+                .insert(scope.clone(), "local".to_string());
+            owner.trusted_sandbox_files.write().await.insert(
+                scope,
+                Arc::new(TrustedSandboxManifest {
+                    identity: uuid::Uuid::new_v4(),
+                    files: Vec::<SandboxFile>::new().into(),
+                }),
+            );
+            owner
+                .installed_files
+                .write()
+                .await
+                .entry(provider_key.scope.clone())
+                .or_default()
+                .insert(
+                    "local".to_string(),
+                    InstalledManifestMarker {
+                        manifest_identity: uuid::Uuid::new_v4(),
+                        handle: HandHandle::local(PathBuf::from(format!("/tmp/installed-{index}"))),
+                        generation: Some(1),
+                    },
+                );
+            owner.active_hands.write().await.insert(
+                provider_key,
+                ActiveHand {
+                    handle: HandHandle::local(PathBuf::from(format!("/tmp/active-{index}"))),
+                    generation: Some(1),
+                },
+            );
+        }
+
+        let unrelated_scope = HandScopeKey::new(unrelated_tenant_id, session_id, "unrelated-owner");
+        let unrelated_provider_key = HandProviderCacheKey::new(unrelated_scope.clone(), "local");
+        owner
+            .preferred_hand_routes
+            .write()
+            .await
+            .insert(unrelated_scope.clone(), "local".to_string());
+        owner.trusted_sandbox_files.write().await.insert(
+            unrelated_scope,
+            Arc::new(TrustedSandboxManifest {
+                identity: uuid::Uuid::new_v4(),
+                files: Vec::<SandboxFile>::new().into(),
+            }),
+        );
+        owner
+            .installed_files
+            .write()
+            .await
+            .entry(unrelated_provider_key.scope.clone())
+            .or_default()
+            .insert(
+                "local".to_string(),
+                InstalledManifestMarker {
+                    manifest_identity: uuid::Uuid::new_v4(),
+                    handle: HandHandle::local(PathBuf::from("/tmp/unrelated-installed")),
+                    generation: Some(1),
+                },
+            );
+        owner.active_hands.write().await.insert(
+            unrelated_provider_key,
+            ActiveHand {
+                handle: HandHandle::local(PathBuf::from("/tmp/unrelated-active")),
+                generation: Some(1),
+            },
+        );
+
+        let first = owner
+            .drain_session_cache_page(tenant_id, session_id, SessionCacheDrainCursor::start())
+            .await
+            .expect("drain first preferred-route page");
+        assert_eq!(first.removed_entries, HAND_LEASE_SESSION_PAGE_SIZE);
+        assert!(matches!(
+            first.next_cursor,
+            SessionCacheDrainCursor::PreferredRoutes(Some(_))
+        ));
+
+        let mut cursor = first.next_cursor;
+        let mut removed = first.removed_entries;
+        let mut released = first.active_hands.len();
+        let mut calls = 1;
+        while cursor != SessionCacheDrainCursor::Complete {
+            let page = owner
+                .drain_session_cache_page(tenant_id, session_id, cursor)
+                .await
+                .expect("drain next exact-session cache page");
+            assert!(page.removed_entries <= HAND_LEASE_SESSION_PAGE_SIZE);
+            removed += page.removed_entries;
+            released += page.active_hands.len();
+            calls += 1;
+            assert!(calls <= 12, "the four two-page phases must terminate");
+            cursor = page.next_cursor;
+        }
+
+        assert_eq!(removed, count * 4);
+        assert_eq!(released, count);
+        assert_eq!(owner.preferred_hand_routes.read().await.len(), 1);
+        assert_eq!(owner.trusted_sandbox_files.read().await.len(), 1);
+        assert_eq!(owner.installed_files.read().await.len(), 1);
+        assert_eq!(owner.active_hands.read().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn installed_manifest_scope_removal_is_one_logical_owner_operation_offline() {
+        // Pins: an exact owner with more providers than one cleanup page is
+        // invalidated by removing its nested scope entry, without a provider-key
+        // loop, while another tenant's identically shaped scope remains intact.
+        let owner = HandLifecycleOwner::new(
+            HashMap::new(),
+            crate::core::profile::local_development_sandbox_policy(),
+        );
+        let session_id = SessionId::new();
+        let scope = HandScopeKey::new(TenantId::new(), session_id, "owner");
+        let unrelated_scope = HandScopeKey::new(TenantId::new(), session_id, "owner");
+        let mut providers = BTreeMap::new();
+        for index in 0..=HAND_LEASE_SESSION_PAGE_SIZE {
+            providers.insert(
+                format!("provider-{index:03}"),
+                InstalledManifestMarker {
+                    manifest_identity: uuid::Uuid::new_v4(),
+                    handle: HandHandle::local(PathBuf::from(format!("/tmp/provider-{index:03}"))),
+                    generation: Some(1),
+                },
+            );
+        }
+        let unrelated = providers
+            .first_key_value()
+            .map(|(_, marker)| marker.clone())
+            .expect("provider fixture is not empty");
+        owner
+            .installed_files
+            .write()
+            .await
+            .insert(scope.clone(), providers);
+        owner.installed_files.write().await.insert(
+            unrelated_scope.clone(),
+            BTreeMap::from([("local".to_string(), unrelated)]),
+        );
+
+        owner.clear_installed_files_for_scope(&scope).await;
+
+        let installed = owner.installed_files.read().await;
+        assert!(!installed.contains_key(&scope));
+        assert_eq!(installed.get(&unrelated_scope).map(BTreeMap::len), Some(1));
     }
 }

@@ -2,13 +2,15 @@
 
 use std::path::PathBuf;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{MoaError, Result};
 use crate::types::hands::HandHandle;
 use crate::types::identifiers::{
-    ExecutionRunScopeId, ExecutionTaskScopeId, HandProvisioningOperationId, ProviderAccountId,
-    SandboxWorkspaceId, SessionId, TenantId, WorkspaceCheckpointId, WorkspaceOperationId,
+    ExecutionCompensationScopeId, ExecutionRunScopeId, ExecutionTaskScopeId,
+    HandProvisioningOperationId, ProviderAccountId, SandboxWorkspaceId, SessionId, TenantId,
+    WorkspaceCheckpointId, WorkspaceOperationId,
 };
 use crate::types::worker::state::WorkerId;
 
@@ -212,12 +214,72 @@ pub struct ProviderStorageRef {
 pub enum WorkspaceCapacityDimension {
     /// Logical workspaces.
     Workspaces,
+    /// Ephemeral sandbox compute instances with a live durable owner.
+    ActiveHands,
     /// Provider volumes.
     Volumes,
     /// Immutable checkpoint count.
     Checkpoints,
     /// Total logical uncompressed checkpoint bytes.
     LogicalBytes,
+}
+
+/// Exact durable execution owner whose bounded attempt released sandbox compute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionHandReleaseOwner {
+    /// Forward task owner with its exact logical generation.
+    Task {
+        /// Stable execution task.
+        task_id: ExecutionTaskScopeId,
+        /// Exact logical task generation.
+        logical_generation: u64,
+    },
+    /// Rollback compensation owner with its exact logical generation.
+    Compensation {
+        /// Stable compensation registration.
+        compensation_id: ExecutionCompensationScopeId,
+        /// Exact logical compensation generation.
+        logical_generation: u64,
+    },
+}
+
+/// Durable proof that one exact execution attempt released its sandbox compute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionHandReleaseReceipt {
+    /// Deterministic receipt identity.
+    pub receipt_id: uuid::Uuid,
+    /// Tenant owner.
+    pub tenant_id: TenantId,
+    /// Owning execution run.
+    pub run_id: ExecutionRunScopeId,
+    /// Exact task or compensation owner and logical generation.
+    pub owner: ExecutionHandReleaseOwner,
+    /// Exact bounded attempt generation.
+    pub attempt_generation: u64,
+    /// Released workspace, present for task-owned durable filesystems.
+    pub workspace_id: Option<SandboxWorkspaceId>,
+    /// Exact writer generation checkpointed by the attempt.
+    pub writer_epoch: Option<u64>,
+    /// Exact compute instance generation destroyed by the attempt.
+    pub instance_generation: Option<u64>,
+    /// Provider-visible hand creation identity that was destroyed.
+    pub hand_provisioning_operation_id: Option<HandProvisioningOperationId>,
+    /// Exact durable hand lease generation that was released.
+    pub hand_lease_generation: Option<u64>,
+    /// Verified portable checkpoint promoted as recovery authority.
+    pub checkpoint_id: Option<WorkspaceCheckpointId>,
+    /// Monotonic checkpoint generation.
+    pub checkpoint_generation: Option<u64>,
+    /// Verified canonical checkpoint manifest digest.
+    pub checkpoint_manifest_digest: Option<String>,
+    /// Exact logical bytes charged to the checkpoint.
+    pub checkpoint_logical_bytes: Option<u64>,
+    /// Time the release operation was first requested.
+    pub requested_at: DateTime<Utc>,
+    /// Time verified provider absence and durable release completed.
+    pub released_at: DateTime<Utc>,
 }
 
 macro_rules! impl_persisted_workspace_labels {
@@ -294,6 +356,7 @@ impl_persisted_workspace_labels!(ProviderStorageKind, "provider storage kind", {
 });
 impl_persisted_workspace_labels!(WorkspaceCapacityDimension, "workspace capacity dimension", {
     WorkspaceCapacityDimension::Workspaces => "workspaces",
+    WorkspaceCapacityDimension::ActiveHands => "active_hands",
     WorkspaceCapacityDimension::Volumes => "volumes",
     WorkspaceCapacityDimension::Checkpoints => "checkpoints",
     WorkspaceCapacityDimension::LogicalBytes => "logical_bytes",
@@ -424,6 +487,8 @@ pub struct WorkspaceCheckpointPublishRequest {
     pub hand: HandHandle,
     /// Parent committed revision being advanced, absent only at generation zero.
     pub parent_revision: Option<WorkspaceRevisionRef>,
+    /// Whether verified publication must destroy compute before reporting success.
+    pub release_compute: bool,
 }
 
 /// Request to restore one verified checkpoint into compute.

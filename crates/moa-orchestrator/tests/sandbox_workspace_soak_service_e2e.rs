@@ -25,17 +25,16 @@ use moa_core::{
         sandbox_workspace::{
             DurabilityClass, ProviderAccountStorageInventory, ProviderInventoryOwner,
             ProviderInventoryResource, ProviderInventoryResourceKind, ProviderStorageRef,
-            SandboxWorkspaceScope, WorkspaceAttachRequest, WorkspaceCapacityDimension,
-            WorkspaceCheckpointPublishRequest, WorkspaceOperationKind, WorkspaceReconcileRequest,
-            WorkspaceRestoreRequest, WorkspaceStorageDeleteRequest,
-            WorkspaceStorageOperationResult, WorkspaceStoragePrepareRequest,
+            SandboxWorkspaceScope, WorkspaceAttachRequest, WorkspaceCheckpointPublishRequest,
+            WorkspaceOperationKind, WorkspaceReconcileRequest, WorkspaceRestoreRequest,
+            WorkspaceStorageDeleteRequest, WorkspaceStorageOperationResult,
+            WorkspaceStoragePrepareRequest,
         },
     },
 };
 use moa_crypto::LocalKmsProvider;
 use moa_hands::LocalHandProvider;
 use moa_hands::core::sandbox_workspace::{
-    capacity::{CapacityQuantity, CapacityReservationRequest, PostgresWorkspaceCapacityRepository},
     checkpoint::{
         archive::ArchiveLimits,
         store::{CheckpointObjectStore, ObservedCheckpointBucketVersioning},
@@ -55,7 +54,8 @@ const SCRIPTED_PROVIDER: &str = "scripted-soak";
 
 struct Candidate {
     tenant_id: TenantId,
-    request: CapacityReservationRequest,
+    workspace_id: SandboxWorkspaceId,
+    operation_id: WorkspaceOperationId,
 }
 
 struct ScriptedSoakStorageProvider {
@@ -73,17 +73,16 @@ impl ScriptedSoakStorageProvider {
 
     async fn provision(&self, candidate: &Candidate) -> String {
         self.create_calls.fetch_add(1, Ordering::SeqCst);
-        let provider_reference = format!("soak-storage/{}", candidate.request.workspace_id);
-        let resource_fingerprint =
-            format!("sha256:soak-resource-{}", candidate.request.workspace_id);
+        let provider_reference = format!("soak-storage/{}", candidate.workspace_id);
+        let resource_fingerprint = format!("sha256:soak-resource-{}", candidate.workspace_id);
         self.resources.lock().await.push(ProviderInventoryResource {
             kind: ProviderInventoryResourceKind::MutableFilesystem,
             provider_reference: provider_reference.clone(),
             resource_fingerprint,
-            evidence_digest: format!("sha256:soak-evidence-{}", candidate.request.workspace_id),
+            evidence_digest: format!("sha256:soak-evidence-{}", candidate.workspace_id),
             verified_owner: Some(ProviderInventoryOwner {
                 tenant_id: candidate.tenant_id,
-                workspace_id: candidate.request.workspace_id,
+                workspace_id: candidate.workspace_id,
                 provisioning_operation_id: None,
                 writer_epoch: Some(0),
                 instance_generation: Some(0),
@@ -173,22 +172,20 @@ async fn seed_candidate(
     operations: &PostgresWorkspaceOperationRepository,
     pool: &sqlx::PgPool,
     account_id: ProviderAccountId,
-) -> Result<Candidate> {
-    let tenant_id = TenantId::new();
-    let workspace_id = SandboxWorkspaceId::new();
-    let operation_id = WorkspaceOperationId::new();
+    candidate: &Candidate,
+) -> Result<()> {
     sqlx::query(
         "INSERT INTO moa.sandbox_tenant_capacity_limits (tenant_id, configured_limits) \
          VALUES ($1, '{\"workspaces\": 1}'::jsonb)",
     )
-    .bind(tenant_id)
+    .bind(candidate.tenant_id)
     .execute(pool)
     .await
     .context("seed one-tenant workspace quota")?;
     workspaces
         .create(&CreateWorkspaceRequest {
-            workspace_id,
-            tenant_id,
+            workspace_id: candidate.workspace_id,
+            tenant_id: candidate.tenant_id,
             scope: SandboxWorkspaceScope::ExecutionTask {
                 run_id: ExecutionRunScopeId::new(),
                 task_id: ExecutionTaskScopeId::new(),
@@ -204,13 +201,13 @@ async fn seed_candidate(
     let now = Utc::now();
     operations
         .persist_intent(&WorkspaceOperationIntent {
-            operation_id,
-            tenant_id,
-            workspace_id,
+            operation_id: candidate.operation_id,
+            tenant_id: candidate.tenant_id,
+            workspace_id: candidate.workspace_id,
             provider_account_id: account_id,
             provider_account_generation: 1,
             kind: WorkspaceOperationKind::Create,
-            request_hash: format!("sha256:soak-{operation_id}"),
+            request_hash: format!("sha256:soak-{}", candidate.operation_id),
             expected_writer_epoch: 0,
             expected_instance_generation: 0,
             expected_checkpoint_generation: 0,
@@ -219,22 +216,7 @@ async fn seed_candidate(
         })
         .await
         .context("persist soak create intent through production repository")?;
-    Ok(Candidate {
-        tenant_id,
-        request: CapacityReservationRequest {
-            tenant_id,
-            workspace_id,
-            operation_id,
-            provider_account_id: account_id,
-            provider_account_generation: 1,
-            expected_writer_epoch: 0,
-            expected_instance_generation: 0,
-            quantities: vec![CapacityQuantity {
-                dimension: WorkspaceCapacityDimension::Workspaces,
-                quantity: 1,
-            }],
-        },
-    })
+    Ok(())
 }
 
 #[tokio::test]
@@ -273,7 +255,6 @@ async fn sandbox_workspace_1000_tenant_soak_exact_capacity_and_zero_drift_servic
 
     let workspaces = PostgresWorkspaceRepository::new(pool.clone());
     let operations = PostgresWorkspaceOperationRepository::new(pool.clone());
-    let capacity = PostgresWorkspaceCapacityRepository::new(pool.clone());
     let storage_resources = PostgresWorkspaceStorageResourceRepository::new(pool.clone());
     let scripted_provider = Arc::new(ScriptedSoakStorageProvider::new());
     let local_root =
@@ -298,26 +279,21 @@ async fn sandbox_workspace_1000_tenant_soak_exact_capacity_and_zero_drift_servic
     )?;
     let mut admitted = Vec::with_capacity(TENANT_COUNT);
     for _ in 0..TENANT_COUNT {
-        let candidate = seed_candidate(&workspaces, &operations, &pool, account_id).await?;
-        let reservation = capacity
-            .reserve(&candidate.request)
-            .await
-            .context("reserve one exact tenant/provider workspace slot")?;
-        assert_eq!(
-            reservation.len(),
-            1,
-            "each tenant consumes exactly one slot"
-        );
+        let candidate = Candidate {
+            tenant_id: TenantId::new(),
+            workspace_id: SandboxWorkspaceId::new(),
+            operation_id: WorkspaceOperationId::new(),
+        };
+        seed_candidate(&workspaces, &operations, &pool, account_id, &candidate).await?;
         let storage_resource_id = Uuid::now_v7();
-        let deterministic_name = format!("soak-storage-{}", candidate.request.workspace_id);
-        let verified_owner_fingerprint =
-            format!("sha256:soak-owner-{}", candidate.request.workspace_id);
+        let deterministic_name = format!("soak-storage-{}", candidate.workspace_id);
+        let verified_owner_fingerprint = format!("sha256:soak-owner-{}", candidate.workspace_id);
         storage_resources
             .persist_create_intent(&StorageResourceCreateIntent {
                 storage_resource_id,
                 tenant_id: candidate.tenant_id,
-                workspace_id: candidate.request.workspace_id,
-                create_operation_id: candidate.request.operation_id,
+                workspace_id: candidate.workspace_id,
+                create_operation_id: candidate.operation_id,
                 provider_account_id: account_id,
                 provider_account_generation: 1,
                 security_class: "scheduled-soak".to_string(),
@@ -333,7 +309,7 @@ async fn sandbox_workspace_1000_tenant_soak_exact_capacity_and_zero_drift_servic
                     candidate.tenant_id,
                     storage_resource_id,
                     1,
-                    candidate.request.operation_id,
+                    candidate.operation_id,
                     &provider_reference,
                 )
                 .await
@@ -346,11 +322,14 @@ async fn sandbox_workspace_1000_tenant_soak_exact_capacity_and_zero_drift_servic
         TENANT_COUNT
     );
 
-    let rejected = seed_candidate(&workspaces, &operations, &pool, account_id).await?;
-    let error = capacity
-        .reserve(&rejected.request)
+    let rejected = Candidate {
+        tenant_id: TenantId::new(),
+        workspace_id: SandboxWorkspaceId::new(),
+        operation_id: WorkspaceOperationId::new(),
+    };
+    let error = seed_candidate(&workspaces, &operations, &pool, account_id, &rejected)
         .await
-        .expect_err("provider ceiling plus one must fail before provider I/O");
+        .expect_err("provider ceiling plus one must fail during workspace creation");
     assert_eq!(
         scripted_provider.create_calls.load(Ordering::SeqCst),
         TENANT_COUNT,
@@ -358,19 +337,33 @@ async fn sandbox_workspace_1000_tenant_soak_exact_capacity_and_zero_drift_servic
     );
     assert!(
         matches!(
-            error,
-            MoaError::ValidationError(ref detail)
-                if detail == "provider account workspaces capacity exceeded: 1000 + 1 > 1000"
+            error.downcast_ref::<MoaError>(),
+            Some(MoaError::StorageError(detail))
+                if detail.contains("provider account workspaces capacity exceeded: 1000 + 1 > 1000")
         ),
-        "capacity rejection must identify the exact provider-account boundary: {error}"
+        "atomic create rejection must identify the exact provider-account boundary: {error}"
     );
 
-    let row: (i64, i64, i64, i64) = sqlx::query_as(
+    let rejected_state: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT (SELECT count(*) FROM moa.sandbox_workspaces WHERE workspace_id = $1)::BIGINT,
+               (SELECT count(*) FROM moa.sandbox_capacity_reservations
+                WHERE workspace_id = $1 AND resource_dimension = 'workspaces')::BIGINT
+        "#,
+    )
+    .bind(rejected.workspace_id)
+    .fetch_one(&pool)
+    .await
+    .context("verify atomic create admission rollback")?;
+    assert_eq!(rejected_state, (0, 0));
+
+    let row: (i64, i64, i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT count(*)::BIGINT,
                count(DISTINCT tenant_id)::BIGINT,
                count(DISTINCT workspace_id)::BIGINT,
-               count(DISTINCT operation_id)::BIGINT
+               count(*) FILTER (WHERE reservation_state = 'committed')::BIGINT,
+               count(operation_id)::BIGINT
         FROM moa.sandbox_capacity_reservations
         WHERE provider_account_id = $1
           AND resource_dimension = 'workspaces'
@@ -381,7 +374,7 @@ async fn sandbox_workspace_1000_tenant_soak_exact_capacity_and_zero_drift_servic
     .fetch_one(&pool)
     .await
     .context("measure exact non-double-counted capacity")?;
-    assert_eq!(row, (1_000, 1_000, 1_000, 1_000));
+    assert_eq!(row, (1_000, 1_000, 1_000, 1_000, 0));
 
     let workspace_fences: (i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         r#"
@@ -401,7 +394,7 @@ async fn sandbox_workspace_1000_tenant_soak_exact_capacity_and_zero_drift_servic
     .fetch_one(&pool)
     .await
     .context("measure workspace ownership and monotonic head fences")?;
-    assert_eq!(workspace_fences, (1_001, 1_001, 0, 0, 0, 0, 0, 0));
+    assert_eq!(workspace_fences, (1_000, 1_000, 0, 0, 0, 0, 0, 0));
 
     let durable_storage: (i64, i64, i64) = sqlx::query_as(
         r#"
@@ -420,9 +413,11 @@ async fn sandbox_workspace_1000_tenant_soak_exact_capacity_and_zero_drift_servic
     assert_eq!(durable_storage, (1_000, 1_000, 1_000));
 
     let inventory = maintenance
-        .reconcile_provider_inventory_once()
+        .reconcile_claimed_provider_inventory_once(1)
         .await
-        .context("run production inventory reconciliation after soak admission")?;
+        .context(
+            "claim and reconcile the production provider-account shard after soak admission",
+        )?;
     assert_eq!(inventory.accounts, 1);
     assert_eq!(inventory.resources, TENANT_COUNT as u64);
     assert_eq!(inventory.unresolved_findings, 0);

@@ -1,4 +1,4 @@
-.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status test-fast test-affected test-ci test-db-session test-db-memory test-authz-pentest test-clickhouse test-service-e2e test-behavior-lab test-behavior-lab-live test-provider-e2e build-timings e2e-clean e2e-clean-live loadtest-mock loadtest-live loadtest-capacity loadtest-capacity-edge loadtest-capacity-direct-append loadtest-capacity-brackets chaos-smoke chaos-matrix codegraph
+.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status test-fast test-affected test-ci test-db-session test-db-memory test-authz-pentest test-clickhouse test-long-horizon test-service-e2e test-behavior-lab test-behavior-lab-live test-provider-e2e build-timings e2e-clean e2e-clean-live loadtest-mock loadtest-live loadtest-capacity loadtest-capacity-edge loadtest-capacity-direct-append loadtest-capacity-brackets chaos-smoke chaos-matrix codegraph
 
 codegraph:
 	@./scripts/codegraph init
@@ -91,6 +91,44 @@ test-clickhouse:
 	MOA_CLICKHOUSE_USER=$${MOA_CLICKHOUSE_USER:-moa} \
 	MOA_CLICKHOUSE_PASSWORD=$${MOA_CLICKHOUSE_PASSWORD:-dev} \
 	cargo nextest run --locked --profile clickhouse-docker --run-ignored all
+
+# The accelerated long-horizon execution suite: pause/resume, external-job
+# callback dedup, deadline/wait exactness, deployment drain, and disaster
+# recovery. Every case owns a disposable Restate/Postgres/Valkey stack, so it
+# needs Docker but neither the compose stack nor the clean-E2E harness.
+#
+# Deterministic and unbilled. Provider credentials and external-stack discovery
+# are stripped from the environment so the lane stays hermetic and cannot spend
+# provider credit even when a developer shell exports keys. `scripts/run-clean-e2e.sh
+# --long-horizon` runs the identical selection inside the full gate; this target
+# exists so the lane is reachable — and schedulable — on its own.
+test-long-horizon:
+	@command -v cargo-nextest >/dev/null 2>&1 || { echo "cargo-nextest is required; install with: cargo install cargo-nextest --locked"; exit 127; }
+	env \
+	  -u MOA_RESTATE_INGRESS_URL \
+	  -u MOA_RESTATE_ADMIN_URL \
+	  -u RESTATE_ADMIN_URL \
+	  -u MOA_RESTATE_DEPLOYMENT_URI \
+	  -u MOA_RUNTIME_CACHE_BACKEND \
+	  -u MOA_RUNTIME_CACHE_REDIS_URL \
+	  -u MOA_ANTHROPIC_API_KEY \
+	  -u MOA_OPENAI_API_KEY \
+	  -u MOA_GOOGLE_API_KEY \
+	  -u MOA_COHERE_API_KEY \
+	  -u MOA_ZEROENTROPY_API_KEY \
+	  -u MOA_FIDELITY_SIMULATOR_API_KEY \
+	  -u MOA_LLAMAPARSE_API_KEY \
+	  -u MOA_MERGE_API_KEY \
+	  -u MOA_NANGO_API_KEY \
+	  -u MOA_NEON_API_KEY \
+	  -u MOA_DATABASE_NEON_API_KEY \
+	  -u MOA_REDUCTO_API_KEY \
+	  -u MOA_TEST_MCP_DEPLOYMENT_API_KEY \
+	  -u MOA_TURBOPUFFER_API_KEY \
+	  -u MOA_UNSTRUCTURED_API_KEY \
+	  cargo nextest run -p moa-orchestrator --locked \
+	    --features provider-overrides,integration \
+	    --profile long-horizon-execution --run-ignored ignored-only --no-tests fail
 
 test-service-e2e: e2e-clean-live
 

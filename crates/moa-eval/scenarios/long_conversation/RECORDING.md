@@ -13,7 +13,7 @@ To re-record a scenario:
 2. Export the relevant live provider key locally. Do not commit secrets or shell history containing secrets.
 3. Run the scenario through a dedicated recorder or fixture-generation workflow.
 4. Capture the provider stream with the recording wrapper and save it as `<scenario>/transcript.jsonl`.
-5. Validate it with `moa_core::transcript::Transcript::read_jsonl`.
+5. Validate it with `moa_eval_core::transcript::Transcript::read_jsonl`.
 6. Run `cargo test -p moa-eval --test long_conversation_smoke_eval --locked -- --ignored`.
 
 The current in-repo long-conversation runner replays recorded transcripts; it

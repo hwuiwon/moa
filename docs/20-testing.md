@@ -123,16 +123,25 @@ not elapsed quiet periods:
   deadline movement, no stale signal while terminal or awaiting input, one
   joined stale signal after the exact deadline, and no periodic Session calls
   while a healthy child remains active.
-- `execution_run_service_e2e` proves that a 500-item map completes with
-  `peak_live <= execution.max_in_flight_tasks`, restart after 137 completions is
-  exactly once, and pending rows have no live task invocation outside the
-  window.
-- Public execution-mutation cases stop at the committed-epoch/pre-wake and
-  wake-ack/pre-park barriers. Success is valid only after the task/run wake is
-  accepted; replay must neither increment the epoch nor resume twice.
+- Long-horizon execution cases prove that every controller activation stays
+  within its scheduler-step and dispatch-batch bounds, every task or
+  compensation activation executes one generation, and restart after partial
+  completion is exactly once.
+- Public execution-mutation cases stop after the Postgres transition but before
+  immediate dispatch. Recovery must redeliver the same outbox/trigger identity,
+  and replay must neither advance the generation nor apply the transition twice.
+- Input/review/signal/timer/external/pause cases assert that parked rows have no
+  active attempt reservation, Restate handler invocation, or hand. Resume must
+  provision fresh compute and restore the verified checkpoint when filesystem
+  state is required.
 
 Use the `restate-recovery-pr` profile for the conversational restart matrix and
-the `execution-eval-nightly` profile for the 500-task window/recovery matrix.
+the `long-horizon-execution` profile for accelerated timer, burst, deployment
+drain, and Postgres/outbox reconstruction scenarios. The latter runs one thread,
+uses deterministic time/provider fixtures, and must fail when its selector
+matches no tests. Twenty-four-hour and seven-day canaries remain ignored behind
+`MOA_RUN_LONG_HORIZON_CANARY=1`; provider-live execution additionally requires
+its own opt-in and positive cost budget.
 Both use deterministic local Postgres, Restate, OpenFGA, Valkey, MCP, and
 fixture-capability dependencies; neither requires a billed provider.
 

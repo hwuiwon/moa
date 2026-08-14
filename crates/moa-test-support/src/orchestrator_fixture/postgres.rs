@@ -1,6 +1,7 @@
 //! Postgres container bootstrap for orchestrator service fixtures.
 
 use super::*;
+use sqlx::Connection as _;
 
 pub(super) async fn start_postgres_container() -> Result<ContainerAsync<GenericImage>> {
     GenericImage::new(POSTGRES_IMAGE, POSTGRES_TAG)
@@ -62,20 +63,32 @@ pub(super) async fn ensure_postgres_image(repo_root: &Path) -> Result<()> {
 pub(super) async fn wait_for_postgres(postgres_url: &str) -> Result<()> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
-        match PgPoolOptions::new()
-            .max_connections(1)
-            .connect(postgres_url)
-            .await
-        {
-            Ok(pool) => {
-                pool.close().await;
+        let probe = tokio::time::timeout(
+            Duration::from_secs(1),
+            sqlx::PgConnection::connect(postgres_url),
+        )
+        .await;
+        match probe {
+            Ok(Ok(connection)) => {
+                connection
+                    .close()
+                    .await
+                    .context("close Postgres readiness connection")?;
                 return Ok(());
             }
-            Err(error) if Instant::now() < deadline => {
+            Ok(Err(error)) if Instant::now() < deadline => {
                 tracing::debug!(%error, "waiting for Postgres testcontainer");
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
-            Err(error) => return Err(error).context("Postgres testcontainer did not become ready"),
+            Ok(Err(error)) => {
+                return Err(error).context("Postgres testcontainer did not become ready");
+            }
+            Err(_) if Instant::now() < deadline => {
+                tracing::debug!("Postgres testcontainer readiness probe timed out");
+            }
+            Err(error) => {
+                return Err(error).context("Postgres testcontainer readiness probe timed out");
+            }
         }
     }
 }

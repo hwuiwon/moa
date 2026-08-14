@@ -37,8 +37,11 @@ inherits = "default"
 test-threads = 8
 # moa-session keeps its physical-database clone and schema-binding checks inline
 # in the library. Select only those DB tests; all other moa-session lib tests
-# remain outside this lane.
+# remain outside this lane. `hands_db` owns the canonical shared database and
+# runs only after CI applies direct-repository migrations, so it is excluded
+# from this pre-migration, clone-isolated profile.
 default-filter = '''
+(
 binary(/_db$/)
   | (
       package(moa-session)
@@ -47,6 +50,8 @@ binary(/_db$/)
     )
   | (package(moa-eval) & kind(lib) & test(/::tests::.*_db(?:_|$)/))
   | (package(moa-orchestrator) & kind(lib) & test(/::tests::.*_db(?:_|$)/))
+)
+  - binary(/^hands_db$/)
 '''
 
 [profile.db-memory]
@@ -80,6 +85,8 @@ inherits = "default"
 test-threads = 1
 default-filter = '''
 binary(/^(session_turn_lifecycle_service_e2e|turn_execution_smoke_service_e2e)$/)
+  | (binary(/^llm_gateway_provider_e2e$/)
+      & test(/^direct_llm_gateway_ingress_is_rejected$/))
   - test(/recovery_matrix_/)
 '''
 
@@ -95,7 +102,33 @@ default-filter = '''
 binary(/^orchestrator_fixture_service_e2e$/)
   | binary(/^(action_policy_service_e2e|guardrails_service_e2e|ingestion_service_e2e|memory_service_e2e|turn_responsiveness_service_e2e)$/)
   | binary(/^turn_terminal_failure_service_e2e$/)
+  | (binary(/^coordinator_worker_behavior_provider_e2e$/)
+      & test(/^duplicate_worker_rejection_persists_tool_result_and_turn_continues_service_e2e$/))
 '''
+
+# Accelerated eight-logical-day execution validation. The binary owns one
+# disposable Restate/Postgres/Valkey fixture and deliberately restarts those
+# dependencies, so cases are serialized and have a hard ten-minute ceiling.
+[profile.long-horizon-execution]
+inherits = "default"
+test-threads = 1
+junit.path = "target/nextest/long-horizon-execution/junit.xml"
+default-filter = 'package(moa-orchestrator) & binary(/^long_horizon_execution_service_e2e$/)'
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+# The thousand-common-wake case deliberately spends its first three minutes
+# admitting and parking 1,000 runs before one shared absolute wake, then drains
+# them in ~32 fleet-capped waves. That budget exceeds the lane's own ten-minute
+# ceiling, so nextest was terminating the single gate that proves fleet cap and
+# WFQ fairness instead of letting it fail on one of its own bounded phases.
+# Every phase inside the case is bounded well below this ceiling, so a real
+# regression still reports which phase stalled.
+[[profile.long-horizon-execution.overrides]]
+filter = '''
+binary(/^long_horizon_execution_service_e2e$/)
+  & test(/one_thousand_common_wakes_bound_capacity_invocations_and_oldest_ready_age/)
+'''
+slow-timeout = { period = "120s", terminate-after = 10 }
 
 # Small deterministic crash/replay and worker-deadline cases run serially on
 # pull requests. Large fan-out, A/B rollout, node-loss, and chaos scenarios
@@ -197,18 +230,22 @@ binary(/^mock_loadtest_service_e2e$/)
 [profile.provider-e2e]
 inherits = "default"
 test-threads = 1
-# The coordinator provider binary also contains deterministic crash/recovery
-# fixtures. Those fixtures own a dedicated Restate instance and run in the
-# restate-recovery lane, so they cannot share the external Restate configured
-# for provider E2E. The paid 20x5 execution evaluation has a separate budget
-# authorization contract and must never be swept into the ordinary provider
-# lane merely because its binary name ends in `_provider_e2e`.
+# The coordinator provider binary also contains deterministic dedicated-fixture
+# tests. They run in fixture/recovery lanes with external Restate discovery
+# disabled, so they cannot share the external Restate configured for provider
+# E2E. The paid 20x5 execution evaluation has a separate budget authorization
+# contract and must never be swept into the ordinary provider lane merely
+# because its binary name ends in `_provider_e2e`.
 default-filter = '''
 (
   binary(/_provider_e2e$/)
     | binary(/^(provider_matrix_live|query_rewrite_live)$/)
 )
   - (binary(/^coordinator_worker_behavior_provider_e2e$/) & test(/^recovery_matrix_/))
+  - (binary(/^coordinator_worker_behavior_provider_e2e$/)
+      & test(/^duplicate_worker_rejection_persists_tool_result_and_turn_continues_service_e2e$/))
+  - (binary(/^llm_gateway_provider_e2e$/)
+      & test(/^direct_llm_gateway_ingress_is_rejected$/))
   - binary(/^execution_eval_provider_e2e$/)
 '''
 
@@ -240,7 +277,6 @@ binary(/^execution_run_service_e2e$/)
       | test(/remove_only_amendment_is_no_progress_service_e2e/)
       | test(/useful_amendment_preserves_completed_work_service_e2e/)
       | test(/stale_generation_is_audit_only_service_e2e/)
-      | test(/duplicate_completion_does_not_double_account_service_e2e/)
       | (test(/execution_eval_/) - test(/execution_eval_silent_incomplete_500_item_universe/))
     )
 '''

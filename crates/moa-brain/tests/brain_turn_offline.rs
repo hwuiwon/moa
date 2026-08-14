@@ -19,6 +19,28 @@ use wiremock::MockServer;
 use offline_session_store::{MockSessionStore, session_meta};
 use openai_wiremock::{captured_json_bodies, mount_openai_text};
 
+struct BudgetDeniedPlannerProvider;
+
+#[async_trait::async_trait]
+impl moa_core::traits::LLMProvider for BudgetDeniedPlannerProvider {
+    fn name(&self) -> &'static str {
+        "budget-denied-planner"
+    }
+
+    fn capabilities(&self) -> moa_core::types::model::ModelCapabilities {
+        MockLlmProvider.capabilities()
+    }
+
+    async fn complete(
+        &self,
+        _request: moa_core::types::completion::SharedCompletionRequest,
+    ) -> moa_core::error::Result<moa_core::types::completion::CompletionStream> {
+        Err(moa_core::error::MoaError::BudgetExhausted(
+            "automatic amendment planning exhausted the approved run budget".to_string(),
+        ))
+    }
+}
+
 fn fixture_worker_workspace_scope(
     session: &SessionMeta,
 ) -> moa_core::types::sandbox_workspace::SandboxWorkspaceScope {
@@ -438,7 +460,7 @@ async fn execution_planning_compiler_rejection_allows_only_one_repair() {
 #[tokio::test]
 async fn execution_planning_amendment_invokes_once_with_persisted_evidence() {
     // Pins: one valid amendment is generated over the persisted revision,
-    // completed structured output, waiting task, and frozen authority snapshot.
+    // bounded node status, waiting task, and frozen authority snapshot.
     let request = execution_amendment_planning_request();
     let provider = ScriptedProvider::new(MockLlmProvider.capabilities())
         .push_text(execution_amendment_candidate(7, true));
@@ -459,7 +481,6 @@ async fn execution_planning_amendment_invokes_once_with_persisted_evidence() {
     assert_accepted_planner_report_matches_compile(&result.audits);
     let prompt = serde_json::to_string(&provider.recorded_requests()[0].messages)
         .expect("serialize recorded amendment prompt");
-    assert!(prompt.contains("completed-value"));
     assert!(prompt.contains("shape changed"));
     assert!(prompt.contains("base_plan_revision\\\":7"));
     let amendment_message = &provider.recorded_requests()[0].messages[1].content;
@@ -509,6 +530,67 @@ async fn execution_planning_amendment_schema_rejection_regenerates_once_without_
             .expect("amendment schema-repair audits should serialize")
             .contains(raw),
         "raw amendment output must not be persisted in planning audits"
+    );
+}
+
+#[tokio::test]
+async fn execution_planning_amendment_audits_attribute_each_repair_call_usage_and_cost() {
+    // Pins: malformed amendment output and its one repair are two paid provider calls. Each audit
+    // must retain its own normalized token counters and exact model-priced cost rather than
+    // collapsing repair spend into an unattributed planner total.
+    let first_usage = moa_core::types::completion::TokenUsage {
+        input_tokens_uncached: 1_000,
+        input_tokens_cache_write: 200,
+        input_tokens_cache_read: 300,
+        output_tokens: 0,
+    };
+    let repair_usage = moa_core::types::completion::TokenUsage {
+        input_tokens_uncached: 2_000,
+        input_tokens_cache_write: 400,
+        input_tokens_cache_read: 600,
+        output_tokens: 0,
+    };
+    let provider = ScriptedProvider::new(MockLlmProvider.capabilities())
+        .push_response(ScriptedResponse::text("INVALID_AMENDMENT").with_usage(first_usage))
+        .push_response(
+            ScriptedResponse::text(execution_amendment_candidate(7, true)).with_usage(repair_usage),
+        );
+
+    let result = moa_brain::execution_planning::plan_amendment(
+        &provider,
+        execution_amendment_planning_request(),
+    )
+    .await
+    .expect("one metered amendment repair should succeed");
+
+    let calls = result
+        .audits
+        .iter()
+        .filter_map(|audit| match &audit.payload {
+            moa_core::types::execution_planning::ExecutionPlanningAuditPayload::PlannerCall {
+                call_ordinal,
+                usage,
+                cost_microusd,
+                ..
+            } => Some((*call_ordinal, *usage, *cost_microusd)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].0, 0);
+    assert_eq!(calls[0].1.input_tokens_uncached, 1_000);
+    assert_eq!(calls[0].1.input_tokens_cache_write, 200);
+    assert_eq!(calls[0].1.input_tokens_cache_read, 300);
+    assert!(calls[0].1.output_tokens > 0);
+    assert!(calls[0].2 > 0, "the initial call must retain priced spend");
+    assert_eq!(calls[1].0, 1);
+    assert_eq!(calls[1].1.input_tokens_uncached, 2_000);
+    assert_eq!(calls[1].1.input_tokens_cache_write, 400);
+    assert_eq!(calls[1].1.input_tokens_cache_read, 600);
+    assert!(calls[1].1.output_tokens > calls[0].1.output_tokens);
+    assert!(
+        calls[1].2 > calls[0].2,
+        "repair spend must be attributed separately"
     );
 }
 
@@ -621,6 +703,27 @@ async fn execution_planning_amendment_provider_failure_is_distinct_from_unsuppor
         vec![moa_core::types::execution_planning::ExecutionPlannerOutcome::ProviderError]
     );
     assert_eq!(provider.recorded_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn execution_planning_amendment_budget_denial_is_not_a_provider_call_audit() {
+    // Pins: durable reserve-before-dispatch denial is a typed budget stop, not a provider failure
+    // and not an invented paid-call audit; the provider implementation has made no gateway call.
+    let result = moa_brain::execution_planning::plan_amendment(
+        &BudgetDeniedPlannerProvider,
+        execution_amendment_planning_request(),
+    )
+    .await
+    .expect("budget denial should remain a typed amendment result");
+
+    assert!(matches!(
+        result.kind,
+        moa_brain::execution_planning::ExecutionAmendmentPlanningResultKind::BudgetExhausted { .. }
+    ));
+    assert!(
+        result.audits.is_empty(),
+        "a call denied before provider I/O must not persist a planner-call audit"
+    );
 }
 
 #[tokio::test]
@@ -768,7 +871,9 @@ fn execution_planning_request(
                 max_tasks: Some(100),
                 max_tool_calls: Some(100),
                 max_retrieved_bytes: Some(1_000_000),
-                deadline_at: None,
+                deadline_at: Some(
+                    moa_test_support::fixtures::pg_now() + chrono::TimeDelta::hours(2),
+                ),
             },
         },
         execution_template: None,
@@ -829,7 +934,7 @@ fn execution_planning_candidate(objective: &str, max_attempts: u32) -> String {
 
 fn execution_amendment_planning_request()
 -> moa_brain::execution_planning::ExecutionAmendmentPlanningRequest {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     let objective = "Repair the durable report";
     let mut initial = serde_json::from_str::<
@@ -872,29 +977,6 @@ fn execution_amendment_planning_request()
         )
     });
     let run_uid = uuid::Uuid::from_u128(700);
-    let prepare_task = moa_execution::state::ExecutionTaskProjection {
-        task_id: moa_execution::state::ExecutionTaskId::derive(run_uid, "prepare", "")
-            .expect("prepare task id"),
-        node_id: "prepare".to_string(),
-        item_key: String::new(),
-        status: moa_execution::state::ExecutionTaskStatus::Completed,
-        attempt: 1,
-        generation: 1,
-        input: json!({}),
-        outcome: Some(moa_artifacts::execution_plan::ExecutionTaskOutcome {
-            schema_version: 1,
-            usage: moa_artifacts::execution_plan::ExecutionUsage {
-                cost_microusd: 0,
-                tokens: 0,
-                tool_calls: 0,
-                retrieved_bytes: 0,
-            },
-            result: moa_artifacts::execution_plan::ExecutionTaskResult::Completed {
-                output: json!({"value": "completed-value"}),
-                citations: Vec::new(),
-            },
-        }),
-    };
     let waiting_task = moa_execution::state::ExecutionTaskProjection {
         task_id: moa_execution::state::ExecutionTaskId::derive(run_uid, "output", "")
             .expect("waiting task id"),
@@ -926,7 +1008,7 @@ fn execution_amendment_planning_request()
         evidence: moa_brain::execution_planning::AmendmentPlanningEvidence {
             goal: initial.goal,
             active_plan: compiled.plan,
-            projection: moa_execution::state::ExecutionProjection {
+            projection: moa_execution::state::ExecutionAmendmentProjection {
                 plan_revision: 7,
                 node_statuses: BTreeMap::from([
                     (
@@ -938,7 +1020,8 @@ fn execution_amendment_planning_request()
                         moa_execution::state::ExecutionNodeStatus::Waiting,
                     ),
                 ]),
-                tasks: vec![prepare_task, waiting_task],
+                started_node_ids: BTreeSet::from(["prepare".to_string(), "output".to_string()]),
+                replan_tasks: vec![waiting_task],
             },
             failure_evidence: json!({"reason": "shape changed"}),
             waiting_task: waiting_task_id,

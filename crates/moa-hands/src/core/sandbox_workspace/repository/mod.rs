@@ -8,15 +8,18 @@ mod lifecycle;
 use moa_core::{
     error::{MoaError, Result},
     types::{
+        contact::ContactId,
         identifiers::{
-            ExecutionRunScopeId, ExecutionTaskScopeId, ProviderAccountId, SandboxWorkspaceId,
-            SessionId, TenantId, WorkspaceCheckpointId, WorkspaceOperationId,
+            ExecutionCompensationScopeId, ExecutionRunScopeId, ExecutionTaskScopeId,
+            HandProvisioningOperationId, ProviderAccountId, SandboxWorkspaceId, SessionId,
+            TenantId, WorkspaceCheckpointId, WorkspaceOperationId,
         },
         memory::RlsContext,
         sandbox_workspace::{
-            DurabilityClass, ProviderStorageKind, SandboxWorkspaceScope, SandboxWorkspaceState,
-            WorkspaceBinding, WorkspaceCheckpointPublication, WorkspaceCheckpointState,
-            WorkspaceOperationKind, WorkspacePostCommitState,
+            DurabilityClass, ExecutionHandReleaseOwner, ExecutionHandReleaseReceipt,
+            ProviderStorageKind, SandboxWorkspaceScope, SandboxWorkspaceState, WorkspaceBinding,
+            WorkspaceCheckpointPublication, WorkspaceCheckpointState, WorkspaceOperationKind,
+            WorkspacePostCommitState,
         },
     },
 };
@@ -31,9 +34,11 @@ use super::{
     },
     failpoints,
     model::{
-        ActivateHydratedWorkspaceRequest, CreateWorkspaceRequest, SandboxWorkspace, WorkspaceGrant,
-        WorkspaceGrantRelation, WorkspaceGrantSubjectType, WorkspaceProviderAccount,
-        WorkspaceTransition, WorkspaceWriterClaim,
+        AbsentTaskHandReleaseIntent, ActivateHydratedWorkspaceRequest,
+        CompensationHandReleaseClaim, CompensationHandReleaseClaimIntent,
+        CompensationHandReleaseIntent, CreateWorkspaceRequest, SandboxWorkspace,
+        TaskHandReleaseIntent, WorkspaceGrant, WorkspaceGrantRelation, WorkspaceGrantSubjectType,
+        WorkspaceProviderAccount, WorkspaceTransition, WorkspaceWriterClaim,
     },
     operations::ClaimedWorkspaceOperation,
 };
@@ -66,6 +71,14 @@ impl PostgresWorkspaceRepository {
     }
 
     async fn begin(&self, tenant_id: TenantId) -> Result<ScopedConn<'_>> {
+        self.begin_with_contact(tenant_id, None).await
+    }
+
+    async fn begin_with_contact(
+        &self,
+        tenant_id: TenantId,
+        contact_id: Option<ContactId>,
+    ) -> Result<ScopedConn<'_>> {
         if self.assume_workspace_maintenance_role {
             let mut conn = ScopedConn::begin_control_plane(&self.pool).await?;
             sqlx::query("SET LOCAL ROLE moa_workspace_maintenance")
@@ -74,7 +87,11 @@ impl PostgresWorkspaceRepository {
                 .map_err(map_sqlx_error)?;
             Ok(conn)
         } else {
-            ScopedConn::begin_as_app(&self.pool, &RlsContext::tenant(tenant_id), true).await
+            let context = contact_id.map_or_else(
+                || RlsContext::tenant(tenant_id),
+                |contact_id| RlsContext::contact(tenant_id, contact_id),
+            );
+            ScopedConn::begin_as_app(&self.pool, &context, true).await
         }
     }
 

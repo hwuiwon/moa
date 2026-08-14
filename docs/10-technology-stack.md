@@ -66,13 +66,18 @@ those instances explicitly rather than installing process globals.
 | Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP revision `2026-07-28` Streamable HTTP client/server |
 | Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |
 
-`moa-migrations` owns the fresh-install-only, contiguous 57-file PostgreSQL
-chain and the central table-ownership manifest. The current 143 table
-families span 148 `CREATE TABLE` declarations and map one-to-one to 143
-ownership entries. `cargo run -p xtask --locked -- check-migrations` enforces
-this contract. V57 adds provider-visible hand operation identities, absolute
+`moa-migrations` owns the fresh-install-only, contiguous V1-V60 PostgreSQL
+chain and the central table-ownership manifest. Every final logical table
+family must map one-to-one to an ownership entry; the repository's
+`xtask check-migrations` command enforces this contract. V57 adds
+provider-visible hand operation identities, absolute
 create deadlines, delayed reconciliation, and a database generation-rotation
-guard that rejects pre-V57 writers before provider I/O.
+guard that rejects pre-V57 writers before provider I/O. V59 installs bounded
+execution activations, triggers, schedules, external jobs, admission, and the
+dispatch outbox, persists the current attempt step bound so watchdog staleness
+respects the work actually in flight, and durably reserves and settles
+automatic amendment-planner provider-call budget. V60 installs exact
+active-compute capacity reservations.
 
 ## External Services
 
@@ -94,7 +99,7 @@ the Compose `pii` profile when `MOA_PII_SERVICE_URL` is configured.
 | Service | Purpose |
 |---|---|
 | Restate | Durable orchestration engine |
-| Postgres/Neon | Product data store, relational graph storage, and pgvector transactional vector source |
+| Postgres/Neon | Product data store, long-horizon execution/wait/schedule/outbox authority, relational graph storage, and pgvector transactional vector source |
 | Redis or Valkey | Shared runtime cache for orchestrator replicas |
 | AWS S3 or GCS | Session attachment byte storage in cloud |
 | Turbopuffer | Cloud vector backend for storage partitions configured away from local pgvector |
@@ -265,7 +270,7 @@ and deployment setup. Key groups:
 | `MOA_SKILL_BUDGET_*` | skill manifest budget controls |
 | `MOA_EXECUTION_*` | planner repair, task/token/tool/retrieval/cost defaults, unattended confirmation threshold, deadlines, and the positive per-run live-task window |
 | `MOA_CLOUD_*` | remote hand provider settings |
-| `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Normal-runtime Restate ingress and optional health URL; bootstrap Admin access is an explicit command argument |
+| `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Normal-runtime Restate ingress and optional health URL; bootstrap receives explicit Admin access, while only the singleton maintenance observer may use `MOA_RESTATE_ADMIN_URL` for read-only deployment-drain queries |
 | `MOA_AUTH_*`, `MOA_AUTHZ_*`, `MOA_ASYNC_AUTHZ_*`, `MOA_AUDIT_SECURITY_*` | identity, authorization, builtin async authorization challenges, and OCSF security-event audit |
 | `MOA_SESSION_BLOB_*` | claim-check blob backend, threshold, and explicit local path when filesystem blobs are used |
 | `MOA_SESSION_ATTACHMENT_*` | session upload object storage backend, bucket, prefix, endpoint, and cloud credentials |
@@ -279,7 +284,15 @@ and deployment setup. Key groups:
 Implemented architectural pillars:
 
 - Restate cloud orchestration with session, worker, tenant, service, and workflow handlers.
-- Dynamic `respond`/`act`/`run` routing with `ExecutionRun` and `ExecutionTask` as the only durable typed-DAG runtime.
+- Dynamic `respond`/`act`/`run` routing with Postgres-backed execution runs and
+  the bounded `ExecutionRunController`, `ExecutionTaskAttempt`,
+  `ExecutionCompensationAttempt`, `ExecutionTrigger`, `ExecutionDispatcher`,
+  fleet-keyed `ExecutionDispatchDrain`, and `ExecutionDispatchReconciler`
+  activation family as the durable typed-DAG runtime; the drain serializes
+  bounded outbox delivery and admission against fleet-global capacity.
+  `ExecutionSchedule` and `DurableTimeout` own bounded schedule and timeout
+  delivery, while `ExecutionRetention` owns bounded terminal-detail archival
+  and deletion.
 - `moa-execution` ownership of canonical plan compilation, bindings, pure scheduling, pure integer budget transitions, completion checks, and replan-stop evaluation; these core APIs have no I/O, provider, Restate, or persistence dependencies.
 - One `moa-orchestrator` production binary for local development and cloud execution, with domain logic kept behind in-process application and repository boundaries.
 - Constructor-based runtime composition: `RuntimeDeps::build` constructs the
@@ -332,6 +345,15 @@ MOA_KMS_PROVIDER=postgres
 MOA_KMS_ROOT_KEY_DIR=/var/run/secrets/moa-kms/root-keys
 MOA_KMS_REQUIRED_GENERATION=primary
 ```
+
+Production runs two roles from the same immutable orchestrator image. The
+versioned `RestateDeployment` serves handler, SCIM, channel, and credential
+ingress. A stable one-replica `moa-maintenance` Deployment runs
+`moa-orchestrator maintenance`, exposes health/metrics only, and owns trigger
+and dispatch-outbox reconciliation, retention, approval/authz reconciliation,
+workspace/hand reaping, and provider inventory. Serving revisions never start
+duplicate correctness scanners. Draining Restate revisions retain at least one
+recovery replica and autoscale down as their bounded invocations finish.
 
 Production Kubernetes provisions `moa-kms-root-keys` externally and mounts it
 read-only into orchestrator pods only. The edge never receives root-key
@@ -441,15 +463,13 @@ and Postgres, never in process memory or Redis:
   RestateDeployment readiness, rather than an Admin API call from each replica,
   gates registered service traffic.
 
-Durable execution runs use a separate topology. `ExecutionRun` and
-`ExecutionTask` workflows recover from Postgres execution rows plus Restate
-journals; the `Session` VO stores only compact linkage and terminal-synthesis
-dedupe state. Ready map items have stable logical task identities and are fully
-materialized, but pending rows are storage-only. Each run owns at most
-`execution.max_in_flight_tasks` attached `ExecutionTask` calls (64 by default),
-a positive physical window separate from logical `max_tasks` and provider
-concurrency. The run fills open slots in stable order, acknowledges its
-processed wake epoch, and suspends on the epoch promise plus owned task handles;
-only a persisted transition or attached task completion advances it. Public
-execution mutations return accepted responses only after the committed task/run
-wake is acknowledged.
+Durable execution runs use a separate topology. Postgres owns run, node, task,
+attempt, compensation, wait, trigger, schedule, external-job, capacity, and
+dispatch-outbox recovery; the `Session` VO stores only compact linkage and
+terminal-synthesis dedupe state. Ready map items have stable logical task
+identities, but pending and waiting rows are storage-only. Controller
+activations advance and dispatch bounded batches, task and compensation
+activations run one generation, and every activation returns. The singleton
+maintenance role repairs due triggers and undelivered outbox rows. No process
+memory, Valkey entry, or lifetime Restate invocation is required to keep a
+day- or week-scale run alive.

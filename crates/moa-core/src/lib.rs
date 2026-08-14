@@ -14,7 +14,6 @@ pub mod session_engine;
 pub mod session_replay;
 pub mod shell;
 pub mod traits;
-pub mod transcript;
 pub mod truncation;
 pub mod types;
 pub mod workspace;

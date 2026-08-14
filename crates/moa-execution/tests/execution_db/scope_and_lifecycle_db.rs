@@ -3,6 +3,149 @@
 use super::support::*;
 
 #[tokio::test]
+async fn queued_run_admission_persists_initial_activation_before_returning_db() -> TestResult {
+    // Pins: the real create_run path accepts the current five-key plan contract, and a
+    // serving-process crash after admission cannot strand the queued run because its canonical
+    // generation-one, wake-one activation commits atomically, matching scheduled admission.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let repository = ExecutionRepository::new(pool.clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let run = create_run(
+        &repository,
+        scope,
+        new_run(
+            tenant_id,
+            None,
+            "initial-run-activation",
+            ExecutionRunStatus::Queued,
+            budget(1),
+        ),
+    )
+    .await?;
+
+    assert_eq!(run.activation_state, ExecutionActivationState::Queued);
+    assert_eq!(run.controller_generation, 1);
+    assert_eq!(run.wake_epoch, 1);
+    assert_eq!(run.processed_wake_epoch, 0);
+    let current_plan_shape: (bool, bool) = sqlx::query_as(
+        "SELECT moa.execution_plan_snapshot_is_current(initial_plan), \
+                moa.execution_plan_snapshot_is_current(active_plan) \
+         FROM moa.execution_run WHERE run_uid=$1",
+    )
+    .bind(run.run_uid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(current_plan_shape, (true, true));
+    let persisted: (Uuid, i64, i64, String, String, String) = sqlx::query_as(
+        "SELECT dispatch.dispatch_uid, dispatch.controller_generation, dispatch.wake_epoch, \
+                dispatch.dispatch_kind, \
+                dispatch.state, run.activation_state \
+         FROM moa.execution_dispatch_outbox AS dispatch \
+         JOIN moa.execution_run AS run USING (run_uid) \
+         WHERE dispatch.run_uid = $1",
+    )
+    .bind(run.run_uid)
+    .fetch_one(&pool)
+    .await?;
+    assert_ne!(persisted.0, Uuid::nil());
+    assert_eq!(persisted.1, 1);
+    assert_eq!(persisted.2, 1);
+    assert_eq!(persisted.3, "run_activation");
+    assert_eq!(persisted.4, "pending");
+    assert_eq!(persisted.5, "queued");
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_fenced_run_reads_hide_cross_session_rows_db() -> TestResult {
+    // Pins: after caller authorization, a guessed run UID from another parent session is
+    // excluded by the protected SQL read itself, including the scheduler snapshot path.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let repository = ExecutionRepository::new(test_db.store().pool().clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let owning_session_id = SessionId::new();
+    let other_session_id = SessionId::new();
+    let mut run = new_run(
+        tenant_id,
+        None,
+        "session-fenced-read",
+        ExecutionRunStatus::Queued,
+        budget(1),
+    );
+    run.session_id = owning_session_id;
+    let run = create_run(&repository, scope, run).await?;
+
+    assert_eq!(
+        repository
+            .load_run_for_session(scope, run.run_uid, owning_session_id)
+            .await?,
+        Some(run.clone())
+    );
+    assert_eq!(
+        repository
+            .load_run_for_session(scope, run.run_uid, other_session_id)
+            .await?,
+        None,
+        "a same-tenant session must not observe another session's run"
+    );
+    assert!(
+        repository
+            .load_planning_context_for_session(scope, run.planning_context_uid, owning_session_id,)
+            .await?
+            .is_some()
+    );
+    assert_eq!(
+        repository
+            .load_planning_context_for_session(scope, run.planning_context_uid, other_session_id,)
+            .await?,
+        None,
+        "execution start must not materialize another session's planning context"
+    );
+    assert_eq!(
+        repository
+            .load_run_by_idempotency_key_for_session(
+                scope,
+                tenant_id,
+                None,
+                owning_session_id,
+                "session-fenced-read",
+            )
+            .await?,
+        Some(run.clone())
+    );
+    assert_eq!(
+        repository
+            .load_run_by_idempotency_key_for_session(
+                scope,
+                tenant_id,
+                None,
+                other_session_id,
+                "session-fenced-read",
+            )
+            .await?,
+        None,
+        "execution start replay must not materialize another session's idempotent run"
+    );
+    assert!(
+        repository
+            .load_run_for_session(scope, run.run_uid, owning_session_id)
+            .await?
+            .is_some()
+    );
+    assert_eq!(
+        repository
+            .load_run_for_session(scope, run.run_uid, other_session_id)
+            .await?,
+        None,
+        "the run read must enforce the same parent-session fence"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn originating_user_sequence_num_round_trips_to_execution_run_db() -> TestResult {
     // Pins: execution admission persists the exact user-event sequence as immutable run
     // provenance instead of deriving it from current session state.
@@ -49,7 +192,7 @@ async fn execution_analytics_metadata_round_trips_normalized_source_and_terminal
         None,
         "execution-analytics-metadata",
         ExecutionRunStatus::Queued,
-        budget(10),
+        budget_without_deadline(10),
     );
     let (expected_template_ref, expected_template_revision_uid) = match &new_run.source_provenance {
         ExecutionSourceProvenance::SkillTemplate {
@@ -66,16 +209,20 @@ async fn execution_analytics_metadata_round_trips_normalized_source_and_terminal
             .fetch_one(&pool)
             .await?;
 
-    let TransitionOutcome::RunApplied(running) = repository
-        .transition_run_wait(
+    let queued =
+        claim_running_controller(&repository, scope, &ExecutionConfig::default(), &run).await?;
+    let running = match repository
+        .claim_controller_wake(
             scope,
-            run.run_uid,
-            ExecutionRunStatus::Queued,
-            ExecutionRunStatus::Running,
+            queued.run_uid,
+            queued.controller_generation,
+            queued.wake_epoch,
         )
         .await?
-    else {
-        panic!("analytics fixture must transition to running");
+    {
+        RunControllerClaimOutcome::Claimed(running)
+        | RunControllerClaimOutcome::Resumed(running) => running,
+        outcome => panic!("terminal analytics wake must be claimable: {outcome:?}"),
     };
     let evaluation = CompletionEvaluation {
         status: CompletionStatus::Completed,
@@ -149,256 +296,6 @@ async fn execution_analytics_metadata_round_trips_normalized_source_and_terminal
         persisted.terminal_reason,
         Some(ExecutionTerminalReason::Completed)
     );
-    Ok(())
-}
-
-#[tokio::test]
-async fn terminal_delivery_is_derived_from_durable_run_state_db() -> TestResult {
-    // Pins: terminal session delivery reuses the persisted origin and canonical full output,
-    // rather than accepting caller-supplied projection fields.
-    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
-    let repository = ExecutionRepository::new(test_db.store().pool().clone());
-    let tenant_id = TenantId::new();
-    let scope = ExecutionScope::Tenant { tenant_id };
-    let mut new_run = new_run(
-        tenant_id,
-        None,
-        "terminal-delivery",
-        ExecutionRunStatus::Queued,
-        budget(10),
-    );
-    new_run.originating_user_sequence_num = 57;
-    let run = create_run(&repository, scope, new_run).await?;
-    let TransitionOutcome::RunApplied(_running) = repository
-        .transition_run_wait(
-            scope,
-            run.run_uid,
-            ExecutionRunStatus::Queued,
-            ExecutionRunStatus::Running,
-        )
-        .await?
-    else {
-        panic!("terminal delivery fixture must transition to running");
-    };
-    let tasks = repository
-        .materialize_tasks(
-            scope,
-            run.run_uid,
-            1,
-            vec![
-                logical_task(run.run_uid, "collect", "a", estimate(3)),
-                logical_task(run.run_uid, "collect", "b", estimate(3)),
-            ],
-        )
-        .await?;
-    for task in &tasks {
-        reserve_and_start(&repository, scope, run.run_uid, task.task_id).await?;
-    }
-    assert!(matches!(
-        repository
-            .record_task_outcome(
-                scope,
-                run.run_uid,
-                tasks[0].task_id,
-                1,
-                ExecutionTaskOutcome {
-                    schema_version: 1,
-                    usage: usage(1),
-                    result: ExecutionTaskResult::Completed {
-                        output: json!({ "part": "a" }),
-                        citations: vec![
-                            ExecutionCitation {
-                                source_id: "source-b".to_string(),
-                                uri: None,
-                                locator: None,
-                            },
-                            ExecutionCitation {
-                                source_id: "source-a".to_string(),
-                                uri: None,
-                                locator: None,
-                            },
-                            ExecutionCitation {
-                                source_id: "source-a".to_string(),
-                                uri: None,
-                                locator: None,
-                            },
-                        ],
-                    },
-                },
-            )
-            .await?,
-        TaskOutcomeWrite::Applied { .. }
-    ));
-    assert!(matches!(
-        repository
-            .record_task_outcome(
-                scope,
-                run.run_uid,
-                tasks[1].task_id,
-                1,
-                ExecutionTaskOutcome {
-                    schema_version: 1,
-                    usage: usage(1),
-                    result: ExecutionTaskResult::Failed {
-                        class: ExecutionFailureClass::Terminal,
-                        message: "source b failed".to_string(),
-                    },
-                },
-            )
-            .await?,
-        TaskOutcomeWrite::Applied { .. }
-    ));
-    let prefinal = repository
-        .load_run(scope, run.run_uid)
-        .await?
-        .expect("run remains visible before finalization");
-    let progress = execution_progress_from_run(&prefinal);
-    assert_eq!(progress.run_uid, run.run_uid);
-    assert_eq!(progress.originating_user_sequence_num, 57);
-    assert_eq!(progress.plan_revision, 1);
-    assert_eq!(progress.status, "running");
-    assert_eq!(progress.total, 2);
-    assert_eq!(progress.completed, 1);
-    assert_eq!(progress.failed, 1);
-    assert_eq!(progress.cancelled, 0);
-    let output = json!({ "z": 1, "a": [2, 3] });
-    let evaluation = CompletionEvaluation {
-        status: CompletionStatus::Partial,
-        limit_stop: None,
-        checks: Vec::new(),
-        satisfied_requirement_ids: Vec::new(),
-        unsatisfied_requirement_ids: Vec::new(),
-        gaps: vec!["source b missing".to_string()],
-    };
-    let cause = ExecutionTerminalCause::Completion { limit_stop: None };
-    let terminal = TerminalProjection::Partial {
-        output: Some(output.clone()),
-        gaps: vec!["source b missing".to_string()],
-    };
-    let evidence = terminal_evidence_from_evaluation(cause.clone(), &evaluation)?;
-    let terminal_reason = execution_terminal_reason(&cause, &terminal, &evaluation)?;
-    let fence = repository
-        .fence_run_for_terminal(
-            scope,
-            run.run_uid,
-            1,
-            prefinal.wake_epoch,
-            PendingExecutionTerminal {
-                status: ExecutionRunStatus::Partial,
-                reason: terminal_reason,
-                terminal_evidence: evidence,
-                output: Some(output.clone()),
-                completion_check_results: Vec::new(),
-                terminal_gaps: evaluation.gaps,
-                cancellation_reason: None,
-            },
-        )
-        .await?;
-    let TerminalFenceOutcome::Applied(fence) = fence else {
-        panic!("partial terminal intent must enter the compensation fence: {fence:?}");
-    };
-    assert!(matches!(
-        repository
-            .finalize_fenced_terminal(scope, run.run_uid, 1, fence.run.wake_epoch)
-            .await?,
-        FencedTerminalFinalizationOutcome::Finalized(_)
-    ));
-
-    let delivery = repository
-        .load_terminal_delivery(scope, run.run_uid)
-        .await?
-        .expect("finalized run must have terminal delivery");
-    let canonical = moa_core::canonical_json::canonical_json_bytes(&output)?;
-    assert_eq!(delivery.status, ExecutionRunStatus::Partial);
-    assert_eq!(delivery.summary.run_uid, run.run_uid);
-    assert_eq!(delivery.summary.originating_user_sequence_num, 57);
-    assert_eq!(delivery.summary.output, Some(output));
-    assert_eq!(
-        delivery.summary.output_hash,
-        *blake3::hash(&canonical).as_bytes()
-    );
-    assert_eq!(
-        delivery.summary.citation_ids,
-        vec!["source-a".to_string(), "source-b".to_string()]
-    );
-    assert_eq!(
-        delivery.summary.failures,
-        vec!["source b failed".to_string()]
-    );
-    assert_eq!(delivery.summary.gaps, vec!["source b missing".to_string()]);
-    assert_eq!(
-        delivery.summary.task_results,
-        ExecutionTaskResultsRef::ExecutionTaskTable {
-            run_uid: run.run_uid
-        }
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn wake_epoch_acknowledgement_is_lossless_and_compare_and_set_db() -> TestResult {
-    // Pins: a scheduler can acknowledge only the exact persisted wake epoch, and a later wake remains pending.
-    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
-    let repository = ExecutionRepository::new(test_db.store().pool().clone());
-    let tenant_id = TenantId::new();
-    let scope = ExecutionScope::Tenant { tenant_id };
-    let run = create_run(
-        &repository,
-        scope,
-        new_run(
-            tenant_id,
-            None,
-            "wake-epoch-cas",
-            ExecutionRunStatus::Queued,
-            budget(10),
-        ),
-    )
-    .await?;
-
-    let initial_epoch = run.wake_epoch;
-    assert_eq!(run.processed_wake_epoch, 0);
-    let task = logical_task(run.run_uid, "wake", "one", estimate(1));
-    let materialized = repository
-        .materialize_tasks(scope, run.run_uid, 1, vec![task])
-        .await?;
-    assert_eq!(materialized.len(), 1);
-
-    assert_eq!(
-        repository
-            .ack_run_wake(scope, run.run_uid, initial_epoch)
-            .await?,
-        WakeAckOutcome::Changed {
-            current_wake_epoch: initial_epoch + 1,
-        }
-    );
-    assert_eq!(
-        repository
-            .ack_run_wake(scope, run.run_uid, initial_epoch + 1)
-            .await?,
-        WakeAckOutcome::Acknowledged {
-            processed_wake_epoch: initial_epoch + 1,
-        }
-    );
-    assert_eq!(
-        repository
-            .ack_run_wake(scope, run.run_uid, initial_epoch + 1)
-            .await?,
-        WakeAckOutcome::Replayed {
-            processed_wake_epoch: initial_epoch + 1,
-        }
-    );
-
-    let page = repository
-        .list_runs(scope, ExecutionRunPageRequest::default())
-        .await?;
-    assert_eq!(page.runs.len(), 1);
-    assert_eq!(page.runs[0].processed_wake_epoch, initial_epoch + 1);
-    let snapshot = repository
-        .load_scheduling_snapshot(scope, run.run_uid)
-        .await?
-        .expect("repeatable-read scheduling snapshot should load");
-    assert_eq!(snapshot.run.run_uid, run.run_uid);
-    assert_eq!(snapshot.projection.tasks.len(), 1);
     Ok(())
 }
 
@@ -717,285 +614,6 @@ async fn terminal_run_rows_require_typed_cause_and_requirement_counts_db() -> Te
 }
 
 #[tokio::test]
-async fn terminal_finalization_persists_every_runtime_cause_and_replays_exactly_db() -> TestResult {
-    // Pins: completion, typed task failure, zero-dispatch limits, scheduler
-    // no-progress, and internal failure persist one complete replay identity.
-    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
-    let pool = test_db.store().pool().clone();
-    let repository = ExecutionRepository::new(pool.clone());
-    let tenant_id = TenantId::new();
-    let scope = ExecutionScope::Tenant { tenant_id };
-    let mut cases = vec![
-        (
-            "completion",
-            ExecutionTerminalCause::Completion { limit_stop: None },
-            CompletionStatus::Completed,
-            TerminalProjection::Completed { output: json!({}) },
-        ),
-        (
-            "completion-deadline-partial",
-            ExecutionTerminalCause::Completion {
-                limit_stop: Some(ExecutionLimitStop::DeadlineExceeded),
-            },
-            CompletionStatus::Partial,
-            TerminalProjection::Partial {
-                output: Some(json!({"useful": true})),
-                gaps: vec!["deadline".to_string()],
-            },
-        ),
-        (
-            "completion-budget-no-result",
-            ExecutionTerminalCause::Completion {
-                limit_stop: Some(ExecutionLimitStop::BudgetExceeded),
-            },
-            CompletionStatus::Failed,
-            terminal_failure_projection(ExecutionFailureClass::BudgetExceeded),
-        ),
-        (
-            "limit-deadline-partial",
-            ExecutionTerminalCause::LimitStop {
-                reason: ExecutionLimitStop::DeadlineExceeded,
-            },
-            CompletionStatus::Partial,
-            TerminalProjection::Partial {
-                output: Some(json!({"useful": true})),
-                gaps: vec!["deadline".to_string()],
-            },
-        ),
-        (
-            "limit-budget-no-result",
-            ExecutionTerminalCause::LimitStop {
-                reason: ExecutionLimitStop::BudgetExceeded,
-            },
-            CompletionStatus::Failed,
-            terminal_failure_projection(ExecutionFailureClass::BudgetExceeded),
-        ),
-        (
-            "scheduler-no-progress",
-            ExecutionTerminalCause::SchedulerNoProgress,
-            CompletionStatus::Failed,
-            terminal_failure_projection(ExecutionFailureClass::Terminal),
-        ),
-        (
-            "internal-failure",
-            ExecutionTerminalCause::InternalFailure,
-            CompletionStatus::Failed,
-            terminal_failure_projection(ExecutionFailureClass::Terminal),
-        ),
-    ];
-    for class in [
-        ExecutionFailureClass::Retryable,
-        ExecutionFailureClass::DependencyFailed,
-        ExecutionFailureClass::InvalidInput,
-        ExecutionFailureClass::InvalidOutput,
-        ExecutionFailureClass::AuthorizationDenied,
-        ExecutionFailureClass::BudgetExceeded,
-        ExecutionFailureClass::DeadlineExceeded,
-        ExecutionFailureClass::Cancelled,
-        ExecutionFailureClass::Unsupported,
-        ExecutionFailureClass::Terminal,
-    ] {
-        cases.push((
-            "task-failure",
-            ExecutionTerminalCause::TaskFailure {
-                class: class.clone(),
-            },
-            CompletionStatus::Failed,
-            terminal_failure_projection(class),
-        ));
-    }
-
-    for (index, (name, cause, status, terminal)) in cases.into_iter().enumerate() {
-        let run = create_run(
-            &repository,
-            scope,
-            new_run(
-                tenant_id,
-                None,
-                &format!("terminal-cause-{index}-{name}"),
-                ExecutionRunStatus::Queued,
-                budget(1),
-            ),
-        )
-        .await?;
-        let TransitionOutcome::RunApplied(running) = repository
-            .transition_run_wait(
-                scope,
-                run.run_uid,
-                ExecutionRunStatus::Queued,
-                ExecutionRunStatus::Running,
-            )
-            .await?
-        else {
-            panic!("terminal fixture must transition to running");
-        };
-        let expected_wake_epoch = running.wake_epoch;
-        let evaluation = CompletionEvaluation {
-            status,
-            limit_stop: match &cause {
-                ExecutionTerminalCause::Completion { limit_stop } => *limit_stop,
-                ExecutionTerminalCause::TaskFailure { .. }
-                | ExecutionTerminalCause::LimitStop { .. }
-                | ExecutionTerminalCause::SchedulerNoProgress
-                | ExecutionTerminalCause::ReplanStop { .. }
-                | ExecutionTerminalCause::Cancellation
-                | ExecutionTerminalCause::InternalFailure
-                | ExecutionTerminalCause::CompensationFailure { .. } => None,
-            },
-            checks: Vec::new(),
-            satisfied_requirement_ids: Vec::new(),
-            unsatisfied_requirement_ids: Vec::new(),
-            gaps: match &terminal {
-                TerminalProjection::Partial { gaps, .. }
-                | TerminalProjection::Blocked { gaps, .. }
-                | TerminalProjection::Unsupported { gaps, .. } => gaps.clone(),
-                TerminalProjection::Completed { .. }
-                | TerminalProjection::Failed { .. }
-                | TerminalProjection::Cancelled { .. } => Vec::new(),
-            },
-        };
-        let evidence = terminal_evidence_from_evaluation(cause.clone(), &evaluation)?;
-        let terminal_reason = execution_terminal_reason(&cause, &terminal, &evaluation)?;
-        if status != CompletionStatus::Completed {
-            let direct = repository
-                .finalize_run(
-                    scope,
-                    RunFinalizationRequest {
-                        run_uid: run.run_uid,
-                        expected_revision: 1,
-                        expected_wake_epoch,
-                        terminal_projection: terminal.clone(),
-                        completion_evaluation: evaluation.clone(),
-                        terminal_evidence: evidence.clone(),
-                        terminal_reason,
-                    },
-                )
-                .await;
-            assert!(
-                matches!(
-                    direct,
-                    Err(moa_execution::Error::InvalidRepositoryInput { .. })
-                ),
-                "{name} bypassed the compensation fence: {direct:?}"
-            );
-            let fence = repository
-                .fence_run_for_terminal(
-                    scope,
-                    run.run_uid,
-                    1,
-                    expected_wake_epoch,
-                    PendingExecutionTerminal {
-                        status: moa_execution::state::run_status_from_terminal_projection(
-                            &terminal,
-                        ),
-                        reason: terminal_reason,
-                        terminal_evidence: evidence.clone(),
-                        output: match &terminal {
-                            TerminalProjection::Completed { output } => Some(output.clone()),
-                            TerminalProjection::Partial { output, .. } => output.clone(),
-                            TerminalProjection::Cancelled { .. }
-                            | TerminalProjection::Blocked { .. }
-                            | TerminalProjection::Unsupported { .. }
-                            | TerminalProjection::Failed { .. } => None,
-                        },
-                        completion_check_results: Vec::new(),
-                        terminal_gaps: evaluation.gaps.clone(),
-                        cancellation_reason: match &terminal {
-                            TerminalProjection::Cancelled { reason } => Some(reason.clone()),
-                            _ => None,
-                        },
-                    },
-                )
-                .await?;
-            let TerminalFenceOutcome::Applied(fence) = fence else {
-                panic!("{name} must fence before terminal settlement: {fence:?}");
-            };
-            let finalized = repository
-                .finalize_fenced_terminal(scope, run.run_uid, 1, fence.run.wake_epoch)
-                .await?;
-            let FencedTerminalFinalizationOutcome::Finalized(finalized) = finalized else {
-                panic!("{name} must finalize from the fence: {finalized:?}");
-            };
-            assert_eq!(
-                finalized.terminal_evidence,
-                Some(evidence.clone()),
-                "{name}"
-            );
-            assert!(matches!(
-                ExecutionRepository::new(pool.clone())
-                    .finalize_fenced_terminal(scope, run.run_uid, 1, fence.run.wake_epoch)
-                    .await?,
-                FencedTerminalFinalizationOutcome::Replayed(_)
-            ));
-            continue;
-        }
-        let finalized = repository
-            .finalize_run(
-                scope,
-                RunFinalizationRequest {
-                    run_uid: run.run_uid,
-                    expected_revision: 1,
-                    expected_wake_epoch,
-                    terminal_projection: terminal.clone(),
-                    completion_evaluation: evaluation.clone(),
-                    terminal_evidence: evidence.clone(),
-                    terminal_reason,
-                },
-            )
-            .await?;
-        let FinalizationOutcome::Finalized(finalized) = finalized else {
-            panic!("{name} must finalize on first delivery: {finalized:?}");
-        };
-        assert_eq!(
-            finalized.terminal_evidence,
-            Some(evidence.clone()),
-            "{name}"
-        );
-
-        let restarted_repository = ExecutionRepository::new(pool.clone());
-        assert!(matches!(
-            restarted_repository
-                .finalize_run(
-                    scope,
-                    RunFinalizationRequest {
-                        run_uid: run.run_uid,
-                        expected_revision: 1,
-                        expected_wake_epoch,
-                        terminal_projection: terminal.clone(),
-                        completion_evaluation: evaluation.clone(),
-                        terminal_evidence: evidence.clone(),
-                        terminal_reason,
-                    },
-                )
-                .await?,
-            FinalizationOutcome::Replayed(_)
-        ));
-        let mut conflicting = evidence;
-        conflicting.satisfied_requirement_count = 1;
-        conflicting.requirement_count = 1;
-        assert_eq!(
-            restarted_repository
-                .finalize_run(
-                    scope,
-                    RunFinalizationRequest {
-                        run_uid: run.run_uid,
-                        expected_revision: 1,
-                        expected_wake_epoch,
-                        terminal_projection: terminal,
-                        completion_evaluation: evaluation,
-                        terminal_evidence: conflicting,
-                        terminal_reason,
-                    },
-                )
-                .await?,
-            FinalizationOutcome::Conflict,
-            "{name} conflicting replay"
-        );
-    }
-    Ok(())
-}
-
-#[tokio::test]
 async fn terminal_finalization_rejects_a_projection_changed_after_evaluation_db() -> TestResult {
     // Pins: cause and counts computed before a scheduling-relevant task mutation
     // cannot be committed as evidence for the newer locked projection.
@@ -1015,17 +633,8 @@ async fn terminal_finalization_rejects_a_projection_changed_after_evaluation_db(
         ),
     )
     .await?;
-    let TransitionOutcome::RunApplied(running) = repository
-        .transition_run_wait(
-            scope,
-            run.run_uid,
-            ExecutionRunStatus::Queued,
-            ExecutionRunStatus::Running,
-        )
-        .await?
-    else {
-        panic!("fixture must be running");
-    };
+    let running =
+        claim_running_controller(&repository, scope, &ExecutionConfig::default(), &run).await?;
     let evaluation = CompletionEvaluation {
         status: CompletionStatus::Completed,
         limit_stop: None,
@@ -1115,12 +724,14 @@ async fn idempotency_is_scoped_and_null_contact_is_not_distinct_db() -> TestResu
     let contact = ContactId::new();
     let key = "same-key";
 
+    let first_request = new_run(tenant_a, None, key, ExecutionRunStatus::Queued, budget(10));
+    let duplicate_request = first_request.clone();
     let first = create_run(
         &repository,
         ExecutionScope::Tenant {
             tenant_id: tenant_a,
         },
-        new_run(tenant_a, None, key, ExecutionRunStatus::Queued, budget(10)),
+        first_request,
     )
     .await?;
     let duplicate = create_run(
@@ -1128,7 +739,7 @@ async fn idempotency_is_scoped_and_null_contact_is_not_distinct_db() -> TestResu
         ExecutionScope::Tenant {
             tenant_id: tenant_a,
         },
-        new_run(tenant_a, None, key, ExecutionRunStatus::Queued, budget(20)),
+        duplicate_request,
     )
     .await?;
     let other_tenant = create_run(
@@ -1196,6 +807,11 @@ async fn database_rejects_illegal_run_and_task_transition_matrices_db() -> TestR
         "failed",
         "cancelled",
     ];
+    let matrix_config = ExecutionConfig {
+        max_tenant_active_runs: 256,
+        ..ExecutionConfig::default()
+    };
+    matrix_config.validate()?;
 
     let mut rejected_run_edges = 0;
     for source in RUN_STATUSES {
@@ -1208,9 +824,10 @@ async fn database_rejects_illegal_run_and_task_transition_matrices_db() -> TestR
             } else {
                 ExecutionRunStatus::Queued
             };
-            let run = create_run(
+            let RunAdmissionOutcome::Admitted(run) = create_run_with_config(
                 &repository,
                 scope,
+                &matrix_config,
                 new_run(
                     tenant_id,
                     None,
@@ -1219,7 +836,11 @@ async fn database_rejects_illegal_run_and_task_transition_matrices_db() -> TestR
                     budget(10),
                 ),
             )
-            .await?;
+            .await?
+            else {
+                panic!("transition-matrix run must be admitted");
+            };
+            let run = *run;
             set_run_status_path(test_db.store().pool(), run.run_uid, run_setup_path(source))
                 .await?;
             let error = sqlx::query("UPDATE moa.execution_run SET status = $2 WHERE run_uid = $1")
@@ -1247,11 +868,12 @@ async fn database_rejects_illegal_run_and_task_transition_matrices_db() -> TestR
             rejected_run_edges += 1;
         }
     }
-    assert_eq!(rejected_run_edges, 111);
+    assert_eq!(rejected_run_edges, 104);
 
-    let task_run = create_run(
+    let RunAdmissionOutcome::Admitted(task_run) = create_run_with_config(
         &repository,
         scope,
+        &matrix_config,
         new_run(
             tenant_id,
             None,
@@ -1260,7 +882,11 @@ async fn database_rejects_illegal_run_and_task_transition_matrices_db() -> TestR
             budget(100),
         ),
     )
-    .await?;
+    .await?
+    else {
+        panic!("task transition-matrix run must be admitted");
+    };
+    let task_run = *task_run;
     let mut task_cases = Vec::new();
     for source in TASK_STATUSES {
         for target in TASK_STATUSES {
@@ -1291,12 +917,14 @@ async fn database_rejects_illegal_run_and_task_transition_matrices_db() -> TestR
             task_setup_path(source),
         )
         .await?;
-        let error = sqlx::query("UPDATE moa.execution_task SET status = $2 WHERE task_id = $1")
+        let result = sqlx::query("UPDATE moa.execution_task SET status = $2 WHERE task_id = $1")
             .bind(task.task_id.as_uuid())
             .bind(target)
             .execute(test_db.store().pool())
-            .await
-            .expect_err("contract-disallowed task transition must fail");
+            .await;
+        let Err(error) = result else {
+            panic!("contract-disallowed task transition {source} -> {target} must fail");
+        };
         assert!(
             error
                 .to_string()
@@ -1372,7 +1000,7 @@ async fn database_enforces_task_counter_history_and_immutable_field_guards_db() 
         .bind(guard_tasks[0].task_id.as_uuid())
         .execute(test_db.store().pool())
         .await,
-        "execution retry must increment attempt and generation together",
+        "execution task counters changed outside retry or input resume",
     );
     assert_eq!(
         listed_task(&repository, scope, task_run.run_uid, guard_tasks[0].task_id,).await?,
@@ -1423,7 +1051,7 @@ async fn database_enforces_task_counter_history_and_immutable_field_guards_db() 
         .bind(guard_tasks[1].task_id.as_uuid())
         .execute(test_db.store().pool())
         .await,
-        "execution input resume must increment only generation",
+        "execution task counters changed outside retry or input resume",
     );
     assert_eq!(
         listed_task(&repository, scope, task_run.run_uid, guard_tasks[1].task_id,).await?,
@@ -1487,7 +1115,7 @@ async fn database_enforces_run_immutable_and_plan_update_guards_db() -> TestResu
             .bind(run_guard.run_uid)
             .execute(test_db.store().pool())
             .await,
-        "execution run plan changes require one fenced history append",
+        "execution run amendment must use the current plan contract",
     );
     Ok(())
 }

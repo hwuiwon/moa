@@ -1,7 +1,5 @@
 //! Shared workflow error conversion for Restate handlers.
 
-use std::borrow::Cow;
-
 use moa_authz::{AuthzCheckError, AuthzError};
 use moa_core::error::{FailureProvenance, MoaError};
 use restate_sdk::prelude::*;
@@ -80,17 +78,21 @@ pub(crate) fn classify_authz_error(error: &AuthzError) -> RestateErrorClass {
 /// Classifies a Postgres error without parsing its display text.
 #[must_use]
 pub(crate) fn classify_sqlx_error(error: &sqlx::Error) -> RestateErrorClass {
-    let transient = match error {
-        sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::WorkerCrashed => true,
-        sqlx::Error::Io(error) => transient_io(error.kind()),
-        sqlx::Error::Database(error) => transient_sqlstate(error.code()),
-        _ => false,
-    };
-
-    if transient {
+    if moa_db::is_retryable_sqlx_error(error) {
         RestateErrorClass::Retryable
     } else {
         RestateErrorClass::Terminal { status: None }
+    }
+}
+
+/// Classifies an execution-domain failure at the Restate boundary.
+#[must_use]
+pub(crate) fn classify_execution_error(error: &moa_execution::Error) -> RestateErrorClass {
+    match error {
+        moa_execution::Error::Database { source } => classify_sqlx_error(source),
+        moa_execution::Error::StorageUnavailable { .. }
+        | moa_execution::Error::CapacitySaturated { .. } => RestateErrorClass::Retryable,
+        _ => RestateErrorClass::Terminal { status: None },
     }
 }
 
@@ -119,6 +121,11 @@ pub(crate) fn sqlx_error_to_handler_error(error: sqlx::Error) -> HandlerError {
     error_to_handler_error(classify_sqlx_error(&error), error)
 }
 
+/// Converts an execution-domain failure into a Restate handler error.
+pub(crate) fn execution_error_to_handler_error(error: moa_execution::Error) -> HandlerError {
+    error_to_handler_error(classify_execution_error(&error), error)
+}
+
 fn error_to_handler_error(
     class: RestateErrorClass,
     error: impl std::error::Error + Send + Sync + 'static,
@@ -132,34 +139,6 @@ fn error_to_handler_error(
             TerminalError::new(error.to_string()).into()
         }
     }
-}
-
-fn transient_io(kind: std::io::ErrorKind) -> bool {
-    matches!(
-        kind,
-        std::io::ErrorKind::Interrupted
-            | std::io::ErrorKind::WouldBlock
-            | std::io::ErrorKind::TimedOut
-            | std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::ConnectionAborted
-            | std::io::ErrorKind::ConnectionRefused
-            | std::io::ErrorKind::NotConnected
-            | std::io::ErrorKind::NetworkDown
-            | std::io::ErrorKind::NetworkUnreachable
-            | std::io::ErrorKind::HostUnreachable
-    )
-}
-
-fn transient_sqlstate(code: Option<Cow<'_, str>>) -> bool {
-    let Some(code) = code else {
-        return false;
-    };
-    code.starts_with("08")
-        || code.starts_with("40")
-        || matches!(
-            code.as_ref(),
-            "53P01" | "53P02" | "53P03" | "55P03" | "57P01" | "57P02" | "57P03"
-        )
 }
 
 /// Builds a terminal `400` handler error from a message.
@@ -377,5 +356,57 @@ mod tests {
             ))),
             terminal(None)
         );
+    }
+
+    #[test]
+    fn execution_errors_preserve_retryability_at_the_restate_boundary() {
+        // Pins: transient execution storage failures stay replayable while
+        // deterministic repository corruption terminates the invocation.
+        let cases = [
+            (
+                moa_execution::Error::Database {
+                    source: sqlx::Error::PoolClosed,
+                },
+                RestateErrorClass::Retryable,
+            ),
+            (
+                moa_execution::Error::StorageUnavailable {
+                    message: "database restarting".to_string(),
+                },
+                RestateErrorClass::Retryable,
+            ),
+            (
+                moa_execution::Error::CapacitySaturated {
+                    dimension: "scheduled_triggers",
+                },
+                RestateErrorClass::Retryable,
+            ),
+            (
+                moa_execution::Error::Database {
+                    source: sqlx::Error::RowNotFound,
+                },
+                terminal(None),
+            ),
+            (
+                moa_execution::Error::InvalidRepositoryData {
+                    message: "invalid persisted status".to_string(),
+                },
+                terminal(None),
+            ),
+            (
+                moa_execution::Error::Storage {
+                    message: "missing required row".to_string(),
+                },
+                terminal(None),
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(
+                classify_execution_error(&error),
+                expected,
+                "unexpected class for {error}"
+            );
+        }
     }
 }

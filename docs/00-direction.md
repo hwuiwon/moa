@@ -23,7 +23,12 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 
 ## What MOA Provides
 
-- **Durable work:** sessions, conversational workers, and execution runs survive process restarts because Restate owns orchestration and Postgres owns product data. Sandbox compute remains ephemeral; tenant filesystem work survives only through the independently retained `SandboxWorkspace` and its verified portable checkpoints, as defined in [Sandbox Workspaces](25-sandbox-workspaces.md).
+- **Durable work at every horizon:** sessions and conversational workers use
+  Restate directly; execution runs persist their complete product state in
+  Postgres and advance through bounded Restate controller, task-attempt,
+  compensation-attempt, and trigger activations. A run waiting for input,
+  review, signal, time, external completion, or operator resume retains no live
+  handler or sandbox compute.
 - **Task segmentation:** conversations are split into discrete task segments so one long session can contain many independently tracked outcomes.
 - **Outcome assessment:** MOA records whether each task segment resolved, partially resolved, failed, was abandoned, or remains unknown without requiring explicit user feedback.
 - **Per-tenant learning:** task outcomes become experience records, attributions, candidates, skill changes, and memory updates at tenant scope without requiring a fixed session intent taxonomy.
@@ -53,7 +58,11 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 MOA's differentiators are architectural, not cosmetic:
 
 - **Restate-native agents:** sessions and workers map to virtual objects with single-writer semantics and durable waits.
-- **Reliable bulk execution:** `ExecutionRun` and `ExecutionTask` durably execute validated plans with atomic budgets, exact logical coverage, a positive bounded window for live task invocations, storage-only pending rows, and compact terminal delivery to the owning session.
+- **Reliable long-horizon execution:** `ExecutionRunController`,
+  `ExecutionTaskAttempt`, and `ExecutionTrigger` execute validated plans through
+  bounded, generation-fenced activations. Postgres owns plan, identity, wait,
+  task, budget, schedule, external-job, and outbox truth; fleet/tenant admission
+  bounds active compute separately from storage-only parked work.
 - **Experience-level analytics:** learning is derived from assessed task segments, not whole-session guesses.
 - **Resolution-weighted improvement:** skills and future retrieval decisions can use measured success rates.
 - **Candidate-gated adaptation:** reusable skills, memory proposals, policy proposals, and eval proposals start as learning candidates before promotion.
@@ -66,5 +75,8 @@ MOA's differentiators are architectural, not cosmetic:
 - MOA does not require a durable session intent taxonomy for routing or learning. The agent loop and skills decide dynamically from context.
 - MOA does not keep durable product state only in Restate. Restate is orchestration state; Postgres is the product record.
 - MOA does not retain sandbox process memory by default or treat a live sandbox, mutable volume, paused instance, or provider snapshot as the committed filesystem revision. The filesystem-only workspace contract requires a verified portable checkpoint.
+- MOA does not represent a day- or week-scale execution as one lifetime-spanning
+  workflow invocation. Every activation returns after bounded progress; every
+  yield checkpoints required filesystem state and destroys active compute.
 - MOA does not bind agent work to a single front door. REST/gateway, API automation, and messaging adapters are peers over the same runtime model.
 - MOA does not optimize for a single-user personal desktop workflow. Local mode is a development and operator path over the same enterprise runtime model.

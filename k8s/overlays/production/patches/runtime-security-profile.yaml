@@ -10,10 +10,15 @@ data:
   MOA_SECURITY_PROFILE: cloud
   MOA_PERMISSIONS_DEFAULT_EFFECT: deny
   MOA_CLOUD_HANDS_DEFAULT_PROVIDER: e2b
-  # Production first starts maintenance owners while admission stays dark.
-  # Switching to `admit` is a later atomic rollout step after readiness proves
-  # the exact provider account, bucket, quotas, and reaper heartbeat.
+  # The singleton moa-maintenance Deployment owns reconciliation and reaping;
+  # versioned Restate handlers consume this policy without starting scanners.
+  # Production first keeps workspace admission dark. Switching to `admit` is a
+  # later atomic rollout step after maintenance readiness proves the exact
+  # provider account, bucket, quotas, and reaper heartbeat.
   MOA_SANDBOX_WORKSPACE_MODE: maintenance
+  # Safety-critical due delivery remains frequent. Full provider inventory and
+  # retention use their separate adaptive cadences inside the maintenance role.
+  MOA_EXECUTION_TRIGGER_RECONCILIATION_CADENCE_SECONDS: "30"
   MOA_SANDBOX_WORKSPACE_OPERATION_RETENTION_SECONDS: "604800"
   MOA_SANDBOX_WORKSPACE_MAXIMUM_OPERATION_SECONDS: "86400"
   MOA_SANDBOX_WORKSPACE_RECONCILIATION_CLAIM_TTL_SECONDS: "60"

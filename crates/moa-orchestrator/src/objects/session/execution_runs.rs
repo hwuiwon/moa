@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use super::*;
 use moa_brain::execution_planning::{
     ExecutionPlanningRequest, ExecutionPlanningResultKind, ExecutionRoutingInput, plan_execution,
     route_execution,
@@ -15,14 +16,13 @@ use moa_core::types::execution_planning::{
 };
 use moa_core::types::identifiers::ModelId;
 use moa_core::types::model::ModelCapabilities;
+use moa_execution::repository::audit::{
+    CompileAuditWriteOutcome, PlannerCallAuditWriteOutcome, RouteAuditWriteOutcome,
+};
 use moa_execution::repository::{
-    CompileAuditWriteOutcome, ExecutionRepository, ExecutionScope,
-    ExecutionTemplateAdmissionRecord, PlannerCallAuditWriteOutcome, RouteAuditWriteOutcome,
+    ExecutionRepository, ExecutionScope, ExecutionTemplateAdmissionRecord,
 };
 use moa_session::PostgresSessionStore;
-
-use super::*;
-use crate::workflows::execution_run::ExecutionRunClient;
 
 const EXECUTION_SYNTHESIS_TURN_NAMESPACE: uuid::Uuid =
     uuid::Uuid::from_u128(0xf61c_9bb0_e9a7_5793_80f5_6a38_5d6e_8eb2);
@@ -337,6 +337,13 @@ async fn start_external_template_execution(
     )
     .await?;
 
+    let horizon_seconds = i64::try_from(config.execution.maximum_horizon_seconds)
+        .map_err(|_| TerminalError::new("execution maximum horizon does not fit i64"))?;
+    let horizon = chrono::TimeDelta::try_seconds(horizon_seconds)
+        .ok_or_else(|| TerminalError::new("execution maximum horizon does not fit chrono"))?;
+    let deadline_at = accepted_at
+        .checked_add_signed(horizon)
+        .ok_or_else(|| TerminalError::new("execution maximum horizon exceeds timestamp range"))?;
     let planning_call = ctx
         .service_client::<ExecutionClient>()
         .planning_context(Json::from(
@@ -345,6 +352,7 @@ async fn start_external_template_execution(
                 contact_id: request.contact_id,
                 session_id,
                 originating_user_sequence_num,
+                deadline_at,
                 requested_template: Some(request.template.clone()),
             },
         ));
@@ -418,33 +426,6 @@ async fn start_external_template_execution(
         .into());
     }
     Ok(started.run.run_uid)
-}
-
-/// Durably launches one committed run after the owning Session has activated it.
-pub(super) fn dispatch_execution_run(
-    ctx: &ObjectContext<'_>,
-    state: &SessionVoState,
-    run_uid: uuid::Uuid,
-    identity: moa_core::traits::Identity,
-) -> Result<(), HandlerError> {
-    let session_id = parse_session_key(ctx.key())?;
-    let meta = state
-        .ensure_initialized()
-        .map_err(crate::workflows::errors::moa_error_to_status_handler_error)?;
-    crate::restate_identity::replay_safe_request(
-        ctx.workflow_client::<ExecutionRunClient>(run_uid.to_string())
-            .run(Json::from(
-                moa_execution::wire::ExecutionRunWorkflowRequest {
-                    run_uid,
-                    tenant_id: meta.tenant_id,
-                    contact_id: meta.contact.as_ref().map(|contact| contact.contact_id),
-                    session_id,
-                    identity,
-                },
-            )),
-    )
-    .send();
-    Ok(())
 }
 
 /// Persists one normalized planning audit after validating its Session origin.
@@ -695,21 +676,22 @@ pub(super) async fn accept_execution_progress(
     {
         return Ok(());
     }
-    append_exact_execution_event(
-        ctx,
-        Event::ExecutionProgress(progress.clone()),
-        format!(
-            "execution-progress:{}:{}:{}:{}:{}:{}:{}",
-            progress.run_uid,
-            progress.plan_revision,
-            progress.status,
-            progress.total,
-            progress.completed,
-            progress.failed,
-            progress.cancelled,
-        ),
-    )
-    .await
+    let dedupe_key = execution_progress_event_dedupe_key(&progress)?;
+    append_exact_execution_event(ctx, Event::ExecutionProgress(progress), dedupe_key).await
+}
+
+fn execution_progress_event_dedupe_key(
+    progress: &ExecutionProgress,
+) -> Result<String, HandlerError> {
+    let canonical = moa_core::canonical_json::canonical_json_bytes(progress).map_err(|error| {
+        TerminalError::new(format!(
+            "execution progress canonicalization failed: {error}"
+        ))
+    })?;
+    Ok(format!(
+        "execution-progress:{}",
+        blake3::hash(&canonical).to_hex()
+    ))
 }
 
 /// Publishes and activates one exact waiting execution task input request.
@@ -899,7 +881,68 @@ pub(super) async fn accept_execution_run_started(
 
 #[cfg(test)]
 mod tests {
-    use super::stable_execution_synthesis_turn_id;
+    use super::{execution_progress_event_dedupe_key, stable_execution_synthesis_turn_id};
+
+    #[test]
+    fn progress_event_dedupe_key_covers_wait_pause_and_external_projection_offline() {
+        // Pins: two published projections cannot collide merely because their legacy status and
+        // counters match while the typed parked-state evidence changed.
+        let waiting_since = chrono::DateTime::parse_from_rfc3339("2026-08-11T12:00:00Z")
+            .expect("fixture timestamp parses")
+            .with_timezone(&chrono::Utc);
+        let baseline = moa_core::events::ExecutionProgress {
+            run_uid: uuid::Uuid::from_u128(91),
+            originating_user_sequence_num: 7,
+            plan_revision: 2,
+            status: "waiting_external".to_string(),
+            phase: moa_core::events::ExecutionProgressPhase::WaitingExternal,
+            waiting_since: Some(waiting_since),
+            next_wake_at: Some(waiting_since + chrono::TimeDelta::hours(1)),
+            last_progress_at: waiting_since,
+            external_job_uid: None,
+            ready_tasks: 1,
+            active_tasks: 1,
+            parked_tasks: 1,
+            blocker_audience: Some(moa_core::events::ExecutionBlockerAudience::External),
+            remaining_budget: moa_core::events::ExecutionRemainingBudget {
+                cost_microusd: Some(20),
+                tokens: Some(200),
+                tasks: Some(3),
+                tool_calls: Some(4),
+                retrieved_bytes: Some(2_000),
+                deadline_at: Some(waiting_since + chrono::TimeDelta::hours(4)),
+            },
+            economics: Some(moa_core::events::ExecutionProgressEconomics {
+                consumed_cost_microusd: 30,
+                consumed_tokens: 300,
+                consumed_tasks: 2,
+                consumed_tool_calls: 5,
+                consumed_retrieved_bytes: 1_500,
+                requirements_total: 2,
+                requirements_satisfied: None,
+            }),
+            total: 5,
+            completed: 2,
+            failed: 0,
+            cancelled: 0,
+        };
+        let baseline_key =
+            execution_progress_event_dedupe_key(&baseline).expect("baseline key hashes");
+
+        let mut phase_changed = baseline.clone();
+        phase_changed.phase = moa_core::events::ExecutionProgressPhase::Paused;
+        let mut wake_changed = baseline.clone();
+        wake_changed.next_wake_at = Some(waiting_since + chrono::TimeDelta::hours(2));
+        let mut external_job_changed = baseline.clone();
+        external_job_changed.external_job_uid = Some(uuid::Uuid::from_u128(92));
+
+        for changed in [phase_changed, wake_changed, external_job_changed] {
+            assert_ne!(
+                execution_progress_event_dedupe_key(&changed).expect("changed key hashes"),
+                baseline_key
+            );
+        }
+    }
 
     #[test]
     fn synthesis_turn_id_is_deterministic_uuid_scoped_to_run_and_origin() {

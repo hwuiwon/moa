@@ -338,15 +338,6 @@ pub fn execution_terminal_reason(
             }
             terminal_reason_from_limit(*reason)
         }
-        ExecutionTerminalCause::SchedulerNoProgress => match projection {
-            TerminalProjection::Unsupported { .. } => ExecutionTerminalReason::UnsupportedPlan,
-            TerminalProjection::Partial { .. }
-            | TerminalProjection::Blocked { .. }
-            | TerminalProjection::Failed { .. } => ExecutionTerminalReason::NoProgress,
-            TerminalProjection::Completed { .. } | TerminalProjection::Cancelled { .. } => {
-                return invalid_terminal_combination(cause, projection);
-            }
-        },
         ExecutionTerminalCause::TaskFailure { class } => match projection {
             TerminalProjection::Unsupported { .. } => ExecutionTerminalReason::UnsupportedPlan,
             TerminalProjection::Blocked { .. } => ExecutionTerminalReason::Blocked,
@@ -356,7 +347,6 @@ pub fn execution_terminal_reason(
                 }
                 ExecutionFailureClass::BudgetExceeded => ExecutionTerminalReason::BudgetExceeded,
                 ExecutionFailureClass::Retryable
-                | ExecutionFailureClass::DependencyFailed
                 | ExecutionFailureClass::InvalidInput
                 | ExecutionFailureClass::InvalidOutput
                 | ExecutionFailureClass::AuthorizationDenied
@@ -370,7 +360,6 @@ pub fn execution_terminal_reason(
                 }
                 ExecutionFailureClass::BudgetExceeded => ExecutionTerminalReason::BudgetExceeded,
                 ExecutionFailureClass::Retryable
-                | ExecutionFailureClass::DependencyFailed
                 | ExecutionFailureClass::InvalidInput
                 | ExecutionFailureClass::InvalidOutput
                 | ExecutionFailureClass::AuthorizationDenied
@@ -440,11 +429,6 @@ pub fn cancellation_terminal_evidence(
     plan: &CanonicalExecutionPlan,
     projection: &ExecutionProjection,
 ) -> Result<ExecutionTerminalEvidence> {
-    let declared_requirement_ids = goal
-        .requirements
-        .iter()
-        .map(|requirement| requirement.id.as_str())
-        .collect::<BTreeSet<_>>();
     let completed_node_ids = projection
         .tasks
         .iter()
@@ -456,11 +440,32 @@ pub fn cancellation_terminal_evidence(
         })
         .map(|task| task.node_id.as_str())
         .collect::<BTreeSet<_>>();
+    cancellation_terminal_evidence_from_completed_nodes(goal, plan, &completed_node_ids)
+}
+
+/// Builds cancellation evidence from a bounded set of completed plan-node identities.
+pub fn cancellation_terminal_evidence_from_completed_nodes<S>(
+    goal: &ExecutionGoalContract,
+    plan: &CanonicalExecutionPlan,
+    completed_node_ids: &BTreeSet<S>,
+) -> Result<ExecutionTerminalEvidence>
+where
+    S: AsRef<str> + Ord,
+{
+    let declared_requirement_ids = goal
+        .requirements
+        .iter()
+        .map(|requirement| requirement.id.as_str())
+        .collect::<BTreeSet<_>>();
     let evidenced_requirement_ids = plan
         .definition
         .nodes
         .iter()
-        .filter(|node| completed_node_ids.contains(node.id.as_str()))
+        .filter(|node| {
+            completed_node_ids
+                .iter()
+                .any(|completed| completed.as_ref() == node.id.as_str())
+        })
         .flat_map(|node| node.requirement_ids.iter().map(String::as_str))
         .filter(|requirement_id| declared_requirement_ids.contains(requirement_id))
         .collect::<BTreeSet<_>>();
@@ -849,13 +854,21 @@ fn evaluate_coverage(
             ExecutionTaskStatus::Completed => {
                 completed_keys.insert(task.item_key.clone());
             }
-            ExecutionTaskStatus::Failed | ExecutionTaskStatus::Cancelled => {
+            ExecutionTaskStatus::Failed
+            | ExecutionTaskStatus::UnknownOutcome
+            | ExecutionTaskStatus::Cancelled => {
                 failed_keys.insert(task.item_key.clone());
             }
             ExecutionTaskStatus::Pending
+            | ExecutionTaskStatus::Ready
             | ExecutionTaskStatus::Reserved
+            | ExecutionTaskStatus::Dispatching
             | ExecutionTaskStatus::Running
             | ExecutionTaskStatus::WaitingInput
+            | ExecutionTaskStatus::WaitingReview
+            | ExecutionTaskStatus::WaitingSignal
+            | ExecutionTaskStatus::WaitingTimer
+            | ExecutionTaskStatus::WaitingExternal
             | ExecutionTaskStatus::WaitingReplan
             | ExecutionTaskStatus::Skipped => {}
         }
@@ -938,16 +951,21 @@ fn evaluate_requirements(
 
 fn is_blocked(request: &CompletionEvaluationRequest) -> bool {
     request.projection.tasks.iter().any(|task| {
-        task.status == ExecutionTaskStatus::WaitingInput
-            || task.outcome.as_ref().is_some_and(|outcome| {
-                matches!(
-                    outcome.result,
-                    ExecutionTaskResult::Failed {
-                        class: ExecutionFailureClass::AuthorizationDenied,
-                        ..
-                    }
-                )
-            })
+        matches!(
+            task.status,
+            ExecutionTaskStatus::WaitingInput
+                | ExecutionTaskStatus::WaitingReview
+                | ExecutionTaskStatus::WaitingSignal
+                | ExecutionTaskStatus::WaitingExternal
+        ) || task.outcome.as_ref().is_some_and(|outcome| {
+            matches!(
+                outcome.result,
+                ExecutionTaskResult::Failed {
+                    class: ExecutionFailureClass::AuthorizationDenied,
+                    ..
+                }
+            )
+        })
     }) || request.plan.definition.nodes.iter().any(|node| {
         request.projection.node_statuses.get(&node.id) == Some(&ExecutionNodeStatus::Waiting)
             && matches!(
@@ -1152,6 +1170,7 @@ fn map_capability(
         | ExecutionOperation::Reduce { .. }
         | ExecutionOperation::Review { .. }
         | ExecutionOperation::WaitSignal { .. }
+        | ExecutionOperation::WaitUntil { .. }
         | ExecutionOperation::Output { .. } => None,
     }
 }

@@ -389,10 +389,6 @@ async fn e2b_provider_round_trip() {
         );
 
         assert!(matches!(
-            provider.pause(&handle).await,
-            Err(MoaError::Unsupported(_))
-        ));
-        assert!(matches!(
             provider.resume(&handle).await,
             Err(MoaError::Unsupported(_))
         ));
@@ -595,6 +591,7 @@ async fn e2b_workspace_restores_into_fresh_compute_live() {
                     ),
                     hand: source.clone(),
                     parent_revision: source_binding.current_revision.clone(),
+                    release_compute: false,
                 },
             )
             .await

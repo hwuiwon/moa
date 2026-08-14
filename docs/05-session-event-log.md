@@ -18,7 +18,9 @@ Postgres stores:
 - task segments
 - learning log entries
 - live behavior experiment run metadata
-- execution run/task state, immutable plan snapshots, and completion results
+- execution run/node/task/attempt/compensation state, immutable plan snapshots,
+  admitted identities, waits, triggers, schedules, external jobs, capacity,
+  dispatch outbox, and completion results
 - normalized execution route, planner-call, and compiler audit records
 - graph changelog outbox rows and per-tenant changelog versions
 - large event payload claim-check blobs
@@ -334,24 +336,41 @@ the originating user sequence and run ID.
 durable typed DAG work. They are separate from session events and protected by
 the same tenant/contact/admin scope rules.
 
-An execution-run row stores its immutable `ExecutionGoalContract`, canonical
+An execution-run row stores its immutable admitted `Identity`,
+`ExecutionGoalContract`, canonical
 initial plan, active plan, plan revision and append-only amendment history,
 plan hashes, skill-template or compiled-plan provenance, input/output,
 completion-check evidence, terminal gaps, status, integer budget and usage,
-aggregate counters, owning session/tenant/user scope, idempotency key, and
-timestamps. It cannot be marked `completed` while a required deliverable,
+aggregate counters, controller generation/activation state, next wake,
+owning session/tenant/user scope, idempotency key, and timestamps. The full
+identity tuple (`identity_type`, ID, tenant ID, API-key ID, and
+`acting_on_behalf_of`) is persisted at admission and never reconstructed from a
+later session, contact, or request. A run cannot be marked `completed` while a required deliverable,
 coverage item, schema check, citation requirement, or budget/deadline check is
 unsatisfied.
 
 An execution-task row stores one logical node or map-item instance, unique by
 `(run_uid, node_id, item_key)`. It records requirement IDs, plan revision,
-status, attempt, generation fence, input/output/error, reserved and actual
-usage, citations, and timestamps. Atomic SQL reserves every worst-case budget
-dimension before dispatch. Generation-fenced completion prevents a stale retry
-from overwriting current state; cancellation prevents new reservations while
-leaving completed results queryable. Deterministic materialization may create
-every pending row, but pending rows remain storage-only until `ExecutionRun`
-admits them into its positive `execution.max_in_flight_tasks` window.
+status, active attempt/dispatch identity, generation fence, wait state and
+`due_at`, input/output/error, reserved and actual usage, citations, and
+timestamps. `moa.execution_node_state` stores aggregate node counters;
+`moa.execution_compensation` stores strict reverse-order undo state.
+
+Atomic SQL reserves every worst-case budget dimension and both tenant/fleet
+active-attempt capacity before dispatch. Generation-fenced completion prevents
+a stale retry from overwriting current state; cancellation prevents new
+reservations while leaving completed results queryable. Deterministic
+materialization may create every pending row, but pending and waiting rows are
+storage-only until a bounded controller activation dispatches an attempt.
+
+`moa.execution_trigger` and `moa.execution_dispatch_outbox` form the recovery
+bridge to Restate. Exact run deadlines, task timers, wait expiry, watchdogs,
+external reconciliation, and schedule occurrences are immutable trigger rows;
+the same transaction that changes product state inserts an idempotent dispatch
+row. `moa.execution_external_job` records asynchronous provider identity,
+generation, callback disposition, and sparse reconciliation. Capacity bucket,
+tenant dispatch, reservation, and schedule rows keep fairness and admission
+durable without using Valkey as an authority.
 
 ## Idempotent Append
 
@@ -476,6 +495,14 @@ Replay is history-first:
 The orchestrator publishes live runtime events during turn execution. Visible
 history is recoverable from the durable event log; hot turn/worker progress
 is queryable through Restate where a durable execution primitive owns it.
+
+Long-horizon execution replay is product-state-first, not a reconstruction from
+session events or a lifetime journal. The controller reloads the admitted
+identity and current Postgres projection, claims its generation/wake epoch,
+and applies the pure scheduler. A restored or rebuilt Restate cluster receives
+the same activation through the transactional outbox and due-trigger scan.
+External effects are resumed only from their persisted idempotency and
+unknown-outcome ledgers.
 
 Replay uses persisted session contact metadata; clients cannot provide a new
 contact per message to change historical attribution. Tool-call records only

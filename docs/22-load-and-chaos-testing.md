@@ -89,6 +89,119 @@ lease under valid configuration.
 | T2 capacity | one strong box, compose | nightly (`make loadtest-capacity`) | max sustainable turns/sec per replica + per-turn resource bill |
 | T3 scale-out | k8s topology (HPA 2–50) | pre-release / on demand | does capacity scale ≈ linearly with replicas, and what breaks first? |
 
+## Long-horizon execution validation
+
+The `long-horizon-execution` nextest profile is the deterministic durability
+lane for execution runs whose product horizon is measured in days or weeks. It
+uses the production Restate handlers, PostgreSQL repositories and outbox, and
+Valkey runtime-cache backend with fixture providers only. Provider credentials
+are removed by `scripts/run-clean-e2e.sh --live --long-horizon`; this lane must
+never enable a live-provider flag or consume a provider budget.
+
+The suite represents eight logical days with compressed real intervals. One
+logical day is two real seconds, so plan-authored `At`/`After` waits still travel
+through the production compiler, persisted absolute `due_at`, Restate
+`send_after`, database `now()`, and generation-fenced trigger delivery. This is
+not a fake clock and tests must assert the persisted due time, delivery order,
+and exact generation rather than treating elapsed test time as evidence.
+
+Every implemented user-visible parked status checks the parked-resource
+invariant at each input, review, signal, timer, and pause interval:
+
+- exactly one durable `parked_runs` receipt for the parked run;
+- zero non-released `active_tasks` capacity receipts for the parked run;
+- no active dispatch UID or running attempt retained by a parked task;
+- no live sandbox hand/workspace operation retained for storage-only waits;
+- no continuing Restate invocation pinned merely to wait for wall time.
+
+`WaitingExternal` deliberately retains one bounded `external_jobs` receipt for
+the provider-owned job, but still retains zero `active_tasks`, sandbox hands, or
+continuing attempt invocations. Provider progress updates only PostgreSQL and a
+sparse due trigger; it does not create a hot controller loop.
+
+The retry-backoff case separately proves a future persisted `ready_at`, no
+active task reservation or dispatch during the backoff, and no generation-two
+provider call before that timestamp; it does not mislabel retry readiness as a
+user-visible parked run.
+
+The 1,000-run common-wake burst also observes the production OTLP
+`moa_execution_dispatch_batch_size` and
+`moa_execution_oldest_ready_age_seconds` instruments from the bounded
+dispatcher callsite, alongside exact database capacity and Restate invocation
+counts. SQL queue age alone is diagnostic evidence, not a substitute for
+proving that the production metric is wired.
+
+The lane drives `WaitingExternal` through an integration-only catalog tool whose
+declared async mode selects a deterministic HTTP provider adapter. That path
+asserts pre-start reservation and idempotency-key equality, post-bind terminal
+callback deferral until the owning attempt releases capacity, progress callback
+deduplication and reconcile rearming, sparse reconciliation while paused, and
+unbound-start recovery after total Restate-state loss without replaying the
+original task attempt. The built-in tool fails closed if execution bypasses its
+declared adapter, and neither the adapter nor its catalog entry exists outside
+the provider-override integration lane. Sandbox release coverage also uses a real
+sandbox-required hand capability: it observes the exact execution-task
+`active_hands` receipt while the task runs, its release during a storage-only
+wait, and a downstream task's distinct receipt after resume. The implemented
+deterministic matrix covers an accelerated week, deadlines and wait expiry,
+pause, an Agent action-review checkpoint and redispatch, idempotent versus
+ambiguous watchdog expiry, governed retry, burst admission fairness and
+fleet/tenant caps, three real Restate handler deployments draining in order,
+and dependency recovery. The Agent review case proves the exact pending effect
+is checkpointed after active-task capacity release and that approval creates a
+new bounded attempt dispatch; it does not wait on a Restate promise.
+
+Recovery cases include pausing a storage-only timer before its due time: the
+timer and task settle once while the run remains parked with no controller
+activation, and a generation-fenced resume creates the only activation that
+advances the settled graph. Other cases restart the orchestrator and Valkey
+repeatedly, stop/start PostgreSQL without replacing its durable volume, replay
+late or duplicate input, signal, review, trigger, and outbox deliveries, and
+replace Restate with an empty node on the same endpoints. Production
+reconciliation re-drives the exact generation-fenced dispatch identity from
+PostgreSQL, so cluster replacement cannot duplicate a logical delivery. A
+Running non-idempotent
+attempt is deliberately excluded from dispatch re-drive; after empty-state
+replacement, only its durable watchdog may classify it as `UnknownOutcome`.
+Tests use Restate's
+deployment and invocation system tables only to observe routing and drain;
+PostgreSQL remains the product state source of truth.
+
+Run the deterministic lane with:
+
+```bash
+MOA_RUN_LIVE_E2E=1 ./scripts/run-clean-e2e.sh --live --long-horizon
+```
+
+The separate 24-hour and seven-day deployment canaries are ignored by default.
+They require both the explicit `MOA_RUN_LONG_HORIZON_CANARY=1` gate and
+`MOA_LONG_HORIZON_CANARY_WINDOW=24h` or `7d`. They refuse to construct a local
+fallback stack: `MOA_DATABASE_URL`, `MOA_RESTATE_INGRESS_URL`, and
+`RESTATE_ADMIN_URL` must identify the deployed system. They remain unbilled and
+fail closed if any `MOA_RUN_LIVE_*=1` integration flag is present. Run them
+without provider credentials as defense in depth:
+
+```bash
+env -u MOA_ANTHROPIC_API_KEY -u MOA_OPENAI_API_KEY \
+  -u MOA_GOOGLE_API_KEY -u MOA_COHERE_API_KEY \
+  -u MOA_ZEROENTROPY_API_KEY -u MOA_FIDELITY_SIMULATOR_API_KEY \
+  -u MOA_LLAMAPARSE_API_KEY -u MOA_MERGE_API_KEY -u MOA_NANGO_API_KEY \
+  -u MOA_NEON_API_KEY -u MOA_DATABASE_NEON_API_KEY \
+  -u MOA_REDUCTO_API_KEY -u MOA_TEST_MCP_DEPLOYMENT_API_KEY \
+  -u MOA_TURBOPUFFER_API_KEY -u MOA_UNSTRUCTURED_API_KEY \
+  MOA_RUN_LONG_HORIZON_CANARY=1 \
+  MOA_LONG_HORIZON_CANARY_WINDOW=24h \
+  cargo nextest run -p moa-orchestrator --locked \
+    --test long_horizon_execution_canary_live \
+    -E 'test(/^deployed_long_horizon_invariants_hold_for_24_hours_live$/)' \
+    --run-ignored ignored-only --no-tests fail
+```
+
+Use the corresponding exact seven-day test name when
+`MOA_LONG_HORIZON_CANARY_WINDOW=7d`. A named canary fails closed when its test
+name and configured window differ, so a wrong selection cannot report a
+successful soak that sampled nothing.
+
 T3 certifies the 10k+ QPS claim as arithmetic validated by measurement:
 `replicas_needed = ceil(10_000 / per_replica_rate)` must be ≤ HPA max, and a
 scale-out run at the computed replica count must sustain the target rate

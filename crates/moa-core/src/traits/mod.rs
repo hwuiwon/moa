@@ -734,10 +734,35 @@ pub trait HandProvider: Send + Sync {
     /// Returns the current hand status.
     async fn status(&self, handle: &HandHandle) -> Result<HandStatus>;
 
-    /// Pauses a provisioned hand.
-    async fn pause(&self, handle: &HandHandle) -> Result<()>;
+    /// Reports whether [`HandProvider::suspend`] actually releases compute here.
+    ///
+    /// Callers must consult this before choosing the suspend path, because a
+    /// provider that cannot release compute needs a different — and differently
+    /// priced — decision, not a failed call. The default is `false`: a provider
+    /// only opts in when its suspend genuinely stops billing for CPU and memory.
+    fn supports_suspend(&self) -> bool {
+        false
+    }
 
-    /// Resumes a paused hand.
+    /// Releases a hand's compute while keeping its filesystem for a later resume.
+    ///
+    /// This is an optional warm tier, never a durability primitive. Callers must
+    /// have published a portable checkpoint *before* suspending, which is what
+    /// makes an evicted or failed suspension a pure cache miss rather than data
+    /// loss. Failure is therefore non-fatal: the caller degrades to
+    /// checkpoint-and-destroy and restores from the published head.
+    ///
+    /// A provider that cannot actually release compute must return
+    /// [`MoaError::Unsupported`] and leave [`HandProvider::supports_suspend`]
+    /// false rather than approximating it with a freeze that keeps the resource
+    /// billed. Resuming a suspended hand goes through [`HandProvider::resume`].
+    async fn suspend(&self, _handle: &HandHandle) -> Result<()> {
+        Err(MoaError::Unsupported(
+            "compute suspension is not supported by this hand provider".to_string(),
+        ))
+    }
+
+    /// Resumes a paused or suspended hand.
     async fn resume(&self, handle: &HandHandle) -> Result<()>;
 
     /// Destroys a provisioned hand.
@@ -811,6 +836,13 @@ pub trait SandboxStorageProvider: Send + Sync {
     }
 
     /// Reconciles an operation whose provider outcome could not be confirmed.
+    ///
+    /// Reconciliation proves only what the provider already did to storage. It
+    /// must never release compute as a side effect: the caller may still be
+    /// executing on the reconciled hand, and a compute-releasing commit destroys
+    /// its hand as a separate exact step after the durable publication CAS. A
+    /// confirmed commit or checkpoint therefore always reports
+    /// `WorkspacePostCommitState::AttachmentRetained`.
     async fn reconcile_workspace_operation(
         &self,
         request: WorkspaceReconcileRequest,
@@ -1009,6 +1041,7 @@ pub trait BuiltInTool: Send + Sync {
             schema: self.input_schema(),
             policy: self.policy_spec(),
             idempotency_class: self.idempotency_class(),
+            async_mode: crate::types::tools::ToolAsyncMode::SynchronousOnly,
             rollback: None,
             max_output_tokens: self.max_output_tokens(),
         }

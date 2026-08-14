@@ -14,6 +14,21 @@ Default commands:
 - `check-migrations` — enforce the flat canonical `V000001..V00000N` central
   sequence, ban non-central `migrations/` directories, and require exact table
   ownership.
+- `check-subsystems` — validate the path, owner, architecture-doc, local-agent,
+  nextest/Make, live-prerequisite, and workspace-member coverage in
+  `.agents/subsystems.toml`.
+- `plan-subsystem-audit` — resolve a base revision or explicit paths through the
+  validated subsystem map and write at most four deterministic, read-only
+  context packets under `target/agent-audits/`. It never launches agents or runs
+  the referenced test/live gates.
+
+Plan an affected audit with checked-in identifiers rather than copied commands:
+
+```bash
+cargo xtask plan-subsystem-audit --base origin/main --max-agents 4
+cargo xtask plan-subsystem-audit --path crates/moa-hands/src/lib.rs \
+  --output target/agent-audits/hands-review
+```
 
 ## Features
 

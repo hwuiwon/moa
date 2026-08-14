@@ -13,11 +13,12 @@ LIVE=0
 RUN_PROVIDERS=0
 RUN_LONG_EVAL=0
 RUN_BEHAVIOR_LAB_LIVE=0
+RUN_LONG_HORIZON=0
 
 usage() {
   cat <<'USAGE'
 Usage: scripts/run-clean-e2e.sh [--live] [--providers] [--long-eval]
-                                [--behavior-lab-live]
+                                [--behavior-lab-live] [--long-horizon]
 
 Runs E2E tests against isolated state:
   - temporary Postgres database on the local compose Postgres service
@@ -38,6 +39,12 @@ Options:
                the provider tests' own opt-in flags, such as
                MOA_RUN_LIVE_PROVIDER_TESTS=1.
   --long-eval  Also run ignored long-conversation eval smoke. Requires --live.
+  --long-horizon
+               Run the deterministic accelerated-week execution suite. Requires
+               --live, but strips provider credentials and never spends budget.
+               `make test-long-horizon` runs the identical selection on its own,
+               and the nightly `long-horizon-execution` job in
+               .github/workflows/integration-tests.yml is what schedules it.
   --behavior-lab-live
                Also run the billed Behavior Lab trial-to-score smoke. Requires
                --live, MOA_RUN_LIVE_PROVIDER_TESTS=1, a provider credential, and
@@ -58,6 +65,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --behavior-lab-live)
       RUN_BEHAVIOR_LAB_LIVE=1
+      ;;
+    --long-horizon)
+      RUN_LONG_HORIZON=1
       ;;
     -h|--help)
       usage
@@ -216,7 +226,7 @@ run() {
 
 run_without_provider_keys() {
   echo
-  echo ">> env -u MOA_ANTHROPIC_API_KEY -u MOA_OPENAI_API_KEY -u MOA_GOOGLE_API_KEY -u MOA_COHERE_API_KEY $*"
+  echo ">> env -u MOA_ANTHROPIC_API_KEY -u MOA_OPENAI_API_KEY -u MOA_GOOGLE_API_KEY -u MOA_COHERE_API_KEY -u MOA_ZEROENTROPY_API_KEY $*"
   local start=$SECONDS
   local status=0
   begin_timing_phase "env -u provider keys $*" "env -u provider keys $*" "${start}"
@@ -226,6 +236,7 @@ run_without_provider_keys() {
     -u MOA_OPENAI_API_KEY \
     -u MOA_GOOGLE_API_KEY \
     -u MOA_COHERE_API_KEY \
+    -u MOA_ZEROENTROPY_API_KEY \
     "$@"
   status=$?
   set -e
@@ -558,6 +569,11 @@ if [[ "${RUN_LONG_EVAL}" -eq 1 && "${LIVE}" -ne 1 ]]; then
   exit 2
 fi
 
+if [[ "${RUN_LONG_HORIZON}" -eq 1 && "${LIVE}" -ne 1 ]]; then
+  echo "--long-horizon requires --live" >&2
+  exit 2
+fi
+
 # The billed Behavior Lab smoke spends real provider credit. Authorization and a
 # positive budget are both required, and they are checked here, before any
 # container or database is created, so an unauthorized run cannot get far enough
@@ -789,6 +805,36 @@ if [[ "${LIVE}" -eq 1 ]]; then
   run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile restate-recovery-pr --run-ignored ignored-only --no-tests fail
 
   run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile fixture-service-e2e --run-ignored ignored-only --no-tests fail
+
+  if [[ "${RUN_LONG_HORIZON}" -eq 1 ]]; then
+    # The suite owns its disposable Restate/Postgres/Valkey stack. Strip both
+    # external-stack discovery, ambient runtime-cache selection, and provider
+    # keys so the lane remains hermetic and cannot accidentally consume billed
+    # provider credit.
+    run_without_external_orchestrator env \
+      -u MOA_RUNTIME_CACHE_BACKEND \
+      -u MOA_RUNTIME_CACHE_REDIS_URL \
+      -u MOA_ANTHROPIC_API_KEY \
+      -u MOA_OPENAI_API_KEY \
+      -u MOA_GOOGLE_API_KEY \
+      -u MOA_COHERE_API_KEY \
+      -u MOA_ZEROENTROPY_API_KEY \
+      -u MOA_FIDELITY_SIMULATOR_API_KEY \
+      -u MOA_LLAMAPARSE_API_KEY \
+      -u MOA_MERGE_API_KEY \
+      -u MOA_NANGO_API_KEY \
+      -u MOA_NEON_API_KEY \
+      -u MOA_DATABASE_NEON_API_KEY \
+      -u MOA_REDUCTO_API_KEY \
+      -u MOA_TEST_MCP_DEPLOYMENT_API_KEY \
+      -u MOA_TURBOPUFFER_API_KEY \
+      -u MOA_UNSTRUCTURED_API_KEY \
+      cargo nextest run -p moa-orchestrator --locked \
+        --features "${ORCH_E2E_FEATURES}" \
+        --profile long-horizon-execution \
+        --run-ignored ignored-only \
+        --no-tests fail
+  fi
 
   run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features "${EXECUTION_EVAL_FEATURES}" --profile execution-eval-pr --run-ignored ignored-only --no-tests fail
 

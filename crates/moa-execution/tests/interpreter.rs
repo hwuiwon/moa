@@ -1,11 +1,15 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    str::FromStr,
+};
 
 use chrono::{TimeZone, Utc};
 use moa_artifacts::execution_plan::{
     CapabilityReference, CompletionCheck, CompletionCheckKind, ExecutionBudgetLimit,
     ExecutionCancelPolicy, ExecutionCondition, ExecutionGoalContract, ExecutionNode,
-    ExecutionOperation, ExecutionPlanDefinition, ExecutionReference, ExecutionRequirement,
-    ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, MapTask, RetryPolicy,
+    ExecutionOperation, ExecutionPlanDefinition, ExecutionReducer, ExecutionReference,
+    ExecutionRequirement, ExecutionTaskOutcome, ExecutionTaskResult, ExecutionTemporalTarget,
+    ExecutionUsage, MapTask, RetryPolicy,
 };
 use moa_config::ExecutionConfig;
 use moa_core::types::{
@@ -19,90 +23,24 @@ use moa_execution::{
         ExecutionClass, ExecutionEstimate, ExecutionHash, catalog_hash,
     },
     compiler::{CanonicalExecutionPlan, ExecutionValidationReport},
-    completion::{CompletionEvaluationRequest, CompletionStatus, evaluate_completion},
-    interpreter::{ScheduleRequest, schedule as schedule_outcome},
+    interpreter::{
+        ReduceMaterializationPageInput, ScheduleRequest, materialize_node_page,
+        resolve_temporal_target,
+    },
     state::{
-        ExecutionNodeStatus, ExecutionProjection, ExecutionTaskId, ExecutionTaskProjection,
-        ExecutionTaskStatus, LogicalTaskKind, ScheduleDecision, TerminalProjection,
-        input_resume_counters, retry_dispatch_counters, supersede_waiting_replan,
+        ExecutionNodeStatus, ExecutionProjection, ExecutionRunStatus, ExecutionTaskId,
+        ExecutionTaskProjection, ExecutionTaskStatus, input_resume_counters,
+        retry_dispatch_counters, run_status_after_task_outcome, supersede_waiting_replan,
         task_status_from_outcome, validate_outcome_generation,
     },
-};
-use proptest::{
-    prelude::*,
-    test_runner::{Config as ProptestConfig, FileFailurePersistence},
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-fn schedule(request: ScheduleRequest) -> Result<ScheduleDecision, moa_execution::Error> {
-    schedule_outcome(request).map(|outcome| outcome.decision)
-}
-
-proptest! {
-    #![proptest_config(property_config())]
-
-    #[test]
-    fn property_scheduler_is_idempotent_for_unchanged_projection(
-        item_count in 0_u64..=12,
-        completed_seed in 0_u64..=12,
-        run_seed in 1_u128..=u128::MAX,
-    ) {
-        // Pins: replaying an unchanged durable projection yields the exact same decision and projection.
-        let completed_count = completed_seed.min(item_count);
-        let items = (0..item_count).map(|item| json!(item)).collect::<Vec<_>>();
-        let map = node(
-            "inspect",
-            &[],
-            ExecutionOperation::Map {
-                items: Value::Array(items),
-                item_key: "".to_string(),
-                max_items: item_count,
-                item_output_schema: json!({ "type": "object" }),
-                task: MapTask::Capability {
-                    reference: capability(),
-                },
-            },
-        );
-        let plan = canonical(vec![map, output_node("inspect")]);
-        let run_uid = Uuid::from_u128(run_seed);
-        let statuses = if completed_count == 0 {
-            BTreeMap::new()
-        } else {
-            BTreeMap::from([("inspect".to_string(), ExecutionNodeStatus::Running)])
-        };
-        let tasks = (0..completed_count)
-            .map(|item| {
-                completed_item_task(
-                    run_uid,
-                    "inspect",
-                    &format!("number:{item}"),
-                    json!({ "item": item }),
-                    json!({ "ok": true }),
-                )
-            })
-            .collect::<Vec<_>>();
-        let request = request(run_uid, plan, statuses, tasks);
-
-        let first = schedule_outcome(request.clone()).expect("generated projection schedules");
-        let second = schedule_outcome(request).expect("unchanged generated projection schedules");
-        prop_assert_eq!(first, second);
-    }
-}
-
-fn property_config() -> ProptestConfig {
-    ProptestConfig {
-        cases: 256,
-        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
-            "proptest-regressions/properties.txt",
-        ))),
-        ..ProptestConfig::default()
-    }
-}
-
 #[test]
-fn scheduler_materializes_every_ready_map_item_with_stable_typed_keys() {
-    // Pins: max_items is accounting, not a hidden active-worker cap.
+fn controller_materializes_every_map_item_with_stable_typed_keys() {
+    // Pins: max_items is accounting, not a hidden active-worker cap, and one page keeps the
+    // plan's item order so the persisted cursor addresses the same item on every replay.
     let run_uid = Uuid::from_u128(11);
     let plan = canonical(vec![
         ExecutionNode {
@@ -128,19 +66,25 @@ fn scheduler_materializes_every_ready_map_item_with_stable_typed_keys() {
         output_node("inspect"),
     ]);
 
-    let decision = schedule(request(run_uid, plan, BTreeMap::new(), vec![])).expect("schedule map");
-    let ScheduleDecision::Ready(tasks) = decision else {
-        panic!("expected ready tasks, got {decision:?}");
-    };
-    assert_eq!(tasks.len(), 3);
+    let page = materialize_node_page(
+        &request(run_uid, plan, BTreeMap::new(), vec![]),
+        "inspect",
+        &BTreeMap::new(),
+        0,
+        3,
+        None,
+    )
+    .expect("materialize map page");
+    assert!(page.source_exhausted);
+    assert_eq!(page.next_cursor, 3);
     assert_eq!(
-        tasks
+        page.tasks
             .iter()
             .map(|task| task.item_key.as_str())
             .collect::<Vec<_>>(),
-        ["number:1", "object:{\"id\":1}", "string:\"1\""]
+        ["number:1", "string:\"1\"", "object:{\"id\":1}"]
     );
-    for task in tasks {
+    for task in page.tasks {
         assert_eq!(
             task.task_id,
             ExecutionTaskId::derive(run_uid, "inspect", &task.item_key).expect("stable id")
@@ -160,8 +104,199 @@ fn scheduler_materializes_every_ready_map_item_with_stable_typed_keys() {
 }
 
 #[test]
-fn scheduler_rejects_duplicate_dynamic_map_keys() {
-    // Pins: duplicate item identities fail materialization before any task can be returned.
+fn controller_materializes_large_map_in_non_overlapping_cursor_pages() {
+    // Pins: controller-facing materialization selects one named node and returns at most
+    // 1,000 deterministic tasks without constructing the complete large-map task vector.
+    let run_uid = Uuid::from_u128(12);
+    let items = (0_u64..2_500).map(|item| json!(item)).collect::<Vec<_>>();
+    let plan = canonical(vec![node(
+        "inspect",
+        &[],
+        ExecutionOperation::Map {
+            items: Value::Array(items),
+            item_key: "".to_string(),
+            max_items: 2_500,
+            item_output_schema: json!({ "type": "object" }),
+            task: MapTask::Capability {
+                reference: capability(),
+            },
+        },
+    )]);
+    let request = request(run_uid, plan, BTreeMap::new(), Vec::new());
+    let first = materialize_node_page(&request, "inspect", &BTreeMap::new(), 0, 1_000, None)
+        .expect("first map page");
+    let second = materialize_node_page(
+        &request,
+        "inspect",
+        &BTreeMap::new(),
+        first.next_cursor,
+        1_000,
+        None,
+    )
+    .expect("second map page");
+    let third = materialize_node_page(
+        &request,
+        "inspect",
+        &BTreeMap::new(),
+        second.next_cursor,
+        1_000,
+        None,
+    )
+    .expect("third map page");
+    assert_eq!(
+        (first.tasks.len(), second.tasks.len(), third.tasks.len()),
+        (1_000, 1_000, 500)
+    );
+    assert_eq!(
+        (first.next_cursor, second.next_cursor, third.next_cursor),
+        (1_000, 2_000, 2_500)
+    );
+    assert!(!first.source_exhausted);
+    assert!(!second.source_exhausted);
+    assert!(third.source_exhausted);
+    let ids = first
+        .tasks
+        .iter()
+        .chain(&second.tasks)
+        .chain(&third.tasks)
+        .map(|task| task.task_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(ids.len(), 2_500);
+}
+
+#[test]
+fn controller_pages_more_than_twenty_five_hundred_reduce_batches_across_rounds() {
+    // Pins: a persisted round/batch cursor materializes every reducer batch exactly once across
+    // 1,000-task activation bounds, then starts the next round from its own zero-based cursor.
+    let run_uid = Uuid::from_u128(120);
+    let items = (0_u64..5_001).map(|item| json!(item)).collect::<Vec<_>>();
+    let mut reduce = node(
+        "reduce",
+        &[],
+        ExecutionOperation::Reduce {
+            items: Value::Array(items),
+            max_items: 5_001,
+            reducer: moa_artifacts::execution_plan::ExecutionReducer::Capability {
+                reference: capability(),
+            },
+            batch_size: 2,
+        },
+    );
+    reduce.output_schema = json!({});
+    let request = request(
+        run_uid,
+        canonical(vec![reduce]),
+        BTreeMap::new(),
+        Vec::new(),
+    );
+
+    let first = materialize_node_page(
+        &request,
+        "reduce",
+        &BTreeMap::new(),
+        0,
+        1_000,
+        Some(&ReduceMaterializationPageInput {
+            round: 1,
+            batch_cursor: 0,
+            round_input_count: None,
+            page_inputs: Vec::new(),
+        }),
+    )
+    .expect("first reduce page");
+    let second = materialize_node_page(
+        &request,
+        "reduce",
+        &BTreeMap::new(),
+        1_000,
+        1_000,
+        Some(&ReduceMaterializationPageInput {
+            round: 1,
+            batch_cursor: 1_000,
+            round_input_count: Some(5_001),
+            page_inputs: Vec::new(),
+        }),
+    )
+    .expect("second reduce page");
+    let third = materialize_node_page(
+        &request,
+        "reduce",
+        &BTreeMap::new(),
+        2_000,
+        1_000,
+        Some(&ReduceMaterializationPageInput {
+            round: 1,
+            batch_cursor: 2_000,
+            round_input_count: Some(5_001),
+            page_inputs: Vec::new(),
+        }),
+    )
+    .expect("final reduce page");
+    assert_eq!(
+        (first.tasks.len(), second.tasks.len(), third.tasks.len()),
+        (1_000, 1_000, 501)
+    );
+    assert_eq!(
+        (first.next_cursor, second.next_cursor, third.next_cursor),
+        (1_000, 2_000, 2_501)
+    );
+    assert_eq!(first.tasks[0].item_key, "r1:b0");
+    assert_eq!(third.tasks[500].item_key, "r1:b2500");
+    assert!(!first.source_exhausted);
+    assert!(!second.source_exhausted);
+    assert!(third.source_exhausted);
+    assert_eq!(
+        first.reduce_cursor.expect("concrete first-round fence"),
+        moa_execution::ReduceMaterializationCursor {
+            round: 1,
+            batch_cursor: 0,
+            round_input_count: 5_001,
+        }
+    );
+
+    let prior_round_outputs = (0_u64..2_501).map(|value| json!(value)).collect::<Vec<_>>();
+    let round_two_first = materialize_node_page(
+        &request,
+        "reduce",
+        &BTreeMap::new(),
+        2_501,
+        1_000,
+        Some(&ReduceMaterializationPageInput {
+            round: 2,
+            batch_cursor: 0,
+            round_input_count: Some(2_501),
+            page_inputs: prior_round_outputs[..2_000].to_vec(),
+        }),
+    )
+    .expect("first second-round page");
+    let round_two_second = materialize_node_page(
+        &request,
+        "reduce",
+        &BTreeMap::new(),
+        3_501,
+        1_000,
+        Some(&ReduceMaterializationPageInput {
+            round: 2,
+            batch_cursor: 1_000,
+            round_input_count: Some(2_501),
+            page_inputs: prior_round_outputs[2_000..].to_vec(),
+        }),
+    )
+    .expect("final second-round page");
+    assert_eq!(
+        (round_two_first.tasks.len(), round_two_second.tasks.len()),
+        (1_000, 251)
+    );
+    assert_eq!(round_two_first.tasks[0].item_key, "r2:b0");
+    assert_eq!(round_two_second.tasks[250].item_key, "r2:b1250");
+    assert!(!round_two_first.source_exhausted);
+    assert!(round_two_second.source_exhausted);
+}
+
+#[test]
+fn controller_rejects_duplicate_dynamic_map_keys() {
+    // Pins: duplicate item identities fail materialization before any task can be returned,
+    // because two items sharing an item key would collide on one derived task ID.
     let plan = canonical(vec![
         ExecutionNode {
             id: "inspect".to_string(),
@@ -185,53 +320,109 @@ fn scheduler_rejects_duplicate_dynamic_map_keys() {
         },
         output_node("inspect"),
     ]);
-    assert!(schedule(request(Uuid::from_u128(12), plan, BTreeMap::new(), vec![])).is_err());
+    let error = materialize_node_page(
+        &request(Uuid::from_u128(12), plan, BTreeMap::new(), vec![]),
+        "inspect",
+        &BTreeMap::new(),
+        0,
+        2,
+        None,
+    )
+    .expect_err("duplicate item keys must fail the page");
+    assert!(
+        error.to_string().contains("duplicate item key"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
-fn scheduler_does_not_validate_a_partial_map_as_its_terminal_aggregate() {
-    // Pins: an in-flight map is not validated against its completed aggregate schema.
-    let run_uid = Uuid::from_u128(120);
-    let mut map = node(
-        "inspect",
-        &[],
-        ExecutionOperation::Map {
-            items: json!(["one", "two"]),
-            item_key: "".to_string(),
-            max_items: 2,
-            item_output_schema: json!({ "type": "object" }),
-            task: MapTask::Capability {
-                reference: capability(),
+fn a_false_condition_short_circuits_before_map_or_reduce_paging() {
+    // Pins: `when` is evaluated in the wrapper, so a false branch never resolves map items
+    // and never opens a reduce round. Both sources below are deliberately unmaterializable —
+    // the map exceeds its own `max_items` and the reduce is handed no round cursor — so a
+    // condition consulted anywhere later than the wrapper surfaces as a hard error here.
+    let condition = |value: &str| {
+        Some(ExecutionCondition::Equals {
+            reference: ExecutionReference {
+                path: "$.input.route".to_string(),
             },
-        },
-    );
-    map.output_schema = json!({
-        "type": "object",
-        "required": ["items"],
-        "properties": { "items": { "type": "array", "minItems": 2 } }
-    });
-    let plan = canonical(vec![map, output_node("inspect")]);
-    let statuses = BTreeMap::from([("inspect".to_string(), ExecutionNodeStatus::Running)]);
-    let tasks = vec![completed_item_task(
-        run_uid,
-        "inspect",
-        "string:\"one\"",
-        json!({}),
-        json!({ "ok": true }),
-    )];
+            value: json!(value),
+        })
+    };
+    let build = |when, is_reduce: bool| {
+        let mut node = ExecutionNode {
+            id: "branch".to_string(),
+            requirement_ids: vec!["req_one".to_string()],
+            depends_on: vec![],
+            when,
+            input: json!({ "$item": true }),
+            output_schema: json!({ "type": "object" }),
+            operation: ExecutionOperation::Map {
+                items: json!([{ "id": "a" }, { "id": "b" }, { "id": "c" }]),
+                item_key: "/id".to_string(),
+                max_items: 1,
+                item_output_schema: json!({ "type": "object" }),
+                task: MapTask::Capability {
+                    reference: capability(),
+                },
+            },
+            compensation: None,
+            retry: retry(),
+            budget: None,
+        };
+        if is_reduce {
+            node.input = json!({});
+            node.operation = ExecutionOperation::Reduce {
+                items: json!([1, 2, 3, 4]),
+                max_items: 4,
+                reducer: ExecutionReducer::Capability {
+                    reference: capability(),
+                },
+                batch_size: 2,
+            };
+        }
+        node
+    };
 
-    let decision = schedule(request(run_uid, plan, statuses, tasks))
-        .expect("partial map must not be validated as a terminal aggregate");
-    assert_eq!(
-        decision,
-        ScheduleDecision::Waiting(vec![moa_execution::state::WaitingReason::Dependencies {
-            node_ids: vec!["output".to_string()]
-        }])
-    );
+    for is_reduce in [false, true] {
+        let mut skipped = request(
+            Uuid::from_u128(41),
+            canonical(vec![
+                build(condition("taken"), is_reduce),
+                output_node("branch"),
+            ]),
+            BTreeMap::new(),
+            vec![],
+        );
+        skipped.run_input = json!({ "route": "not-taken" });
+        let page = materialize_node_page(&skipped, "branch", &BTreeMap::new(), 0, 8, None)
+            .expect("a false condition must page without touching the node source");
+        assert!(page.condition_skipped);
+        assert!(page.tasks.is_empty());
+        assert!(page.source_exhausted);
+        assert_eq!(page.next_cursor, 0);
+        assert!(page.terminal_output.is_none());
+        assert!(page.reduce_cursor.is_none());
+
+        let mut taken = request(
+            Uuid::from_u128(42),
+            canonical(vec![
+                build(condition("taken"), is_reduce),
+                output_node("branch"),
+            ]),
+            BTreeMap::new(),
+            vec![],
+        );
+        taken.run_input = json!({ "route": "taken" });
+        assert!(
+            materialize_node_page(&taken, "branch", &BTreeMap::new(), 0, 8, None).is_err(),
+            "the same source must still be reached when the condition holds"
+        );
+    }
 }
 
 #[test]
-fn scheduler_builds_exact_hierarchical_reducer_batch_inputs() {
+fn controller_builds_exact_hierarchical_reducer_batch_inputs() {
     // Pins: reducer tasks use r{round}:b{batch} keys and exact structured batch input.
     let mut reduce = node(
         "reduce",
@@ -247,124 +438,42 @@ fn scheduler_builds_exact_hierarchical_reducer_batch_inputs() {
     );
     reduce.output_schema = json!({});
     let plan = canonical(vec![reduce, output_node("reduce")]);
-    let decision = schedule(request(Uuid::from_u128(13), plan, BTreeMap::new(), vec![]))
-        .expect("schedule reduce");
-    let ScheduleDecision::Ready(tasks) = decision else {
-        panic!("expected reducer tasks, got {decision:?}");
-    };
+    let page = materialize_node_page(
+        &request(Uuid::from_u128(13), plan, BTreeMap::new(), vec![]),
+        "reduce",
+        &BTreeMap::new(),
+        0,
+        1_000,
+        Some(&ReduceMaterializationPageInput {
+            round: 1,
+            batch_cursor: 0,
+            round_input_count: None,
+            page_inputs: Vec::new(),
+        }),
+    )
+    .expect("materialize first reduce round");
     assert_eq!(
-        tasks
+        page.tasks
             .iter()
             .map(|task| task.item_key.as_str())
             .collect::<Vec<_>>(),
         ["r1:b0", "r1:b1", "r1:b2"]
     );
     assert_eq!(
-        tasks[0].input,
+        page.tasks[0].input,
         json!({ "round": 1, "batch_index": 0, "items": [1, 2] })
     );
-}
-
-#[test]
-fn scheduler_propagates_fixed_dependency_failed_terminal() {
-    // Pins: terminal predecessor failure uses dependency_failed without configurable policy.
-    let plan = canonical(vec![node(
-        "output",
-        &["lookup"],
-        ExecutionOperation::Output { value: json!({}) },
-    )]);
-    let statuses = BTreeMap::from([
-        ("lookup".to_string(), ExecutionNodeStatus::Failed),
-        ("output".to_string(), ExecutionNodeStatus::Pending),
-    ]);
-    let decision = schedule(request(Uuid::from_u128(14), plan, statuses, vec![]))
-        .expect("schedule dependency failure");
-    let ScheduleDecision::Terminal(TerminalProjection::Failed { failure }) = decision else {
-        panic!("expected failed terminal, got {decision:?}");
-    };
     assert_eq!(
-        failure.class,
-        moa_artifacts::execution_plan::ExecutionFailureClass::DependencyFailed
+        page.tasks[2].input,
+        json!({ "round": 1, "batch_index": 2, "items": [5] })
     );
 }
 
 #[test]
-fn scheduler_materializes_completion_verifier_after_ordinary_nodes_finish() {
-    // Pins: verifier is one synthetic stable task with summaries but no embedded raw outputs.
-    let run_uid = Uuid::from_u128(15);
-    let plan = canonical(vec![
-        node(
-            "lookup",
-            &[],
-            ExecutionOperation::Capability {
-                reference: capability(),
-            },
-        ),
-        output_node("lookup"),
-    ]);
-    let statuses = BTreeMap::from([
-        ("lookup".to_string(), ExecutionNodeStatus::Completed),
-        ("output".to_string(), ExecutionNodeStatus::Completed),
-    ]);
-    let tasks = vec![
-        completed_task(run_uid, "lookup", json!({ "secret": "raw" })),
-        completed_task(run_uid, "output", json!({ "ok": true })),
-    ];
-    let decision = schedule(request(run_uid, plan, statuses, tasks)).expect("schedule verifier");
-    let ScheduleDecision::Ready(tasks) = decision else {
-        panic!("expected verifier task, got {decision:?}");
-    };
-    assert_eq!(tasks.len(), 1);
-    let verifier = &tasks[0];
-    assert_eq!(verifier.node_id, "@check/semantic");
-    assert_eq!(verifier.item_key, "check:semantic");
-    assert_eq!(verifier.retry.max_attempts, 1);
-    assert_eq!(
-        verifier.reservation,
-        ExecutionEstimate {
-            cost_microusd: 400_000,
-            tokens: 32_000,
-            tool_calls: 8,
-            retrieved_bytes: 2_000_000,
-            tasks: 1,
-        }
-    );
-    assert!(matches!(
-        verifier.kind,
-        LogicalTaskKind::CompletionVerifier { .. }
-    ));
-    let object = verifier
-        .input
-        .as_object()
-        .expect("verifier input should be an object");
-    assert_eq!(
-        object.keys().map(String::as_str).collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "check_id",
-            "description",
-            "goal",
-            "task_summaries",
-            "terminal_output"
-        ])
-    );
-    assert_eq!(object.get("check_id"), Some(&json!("semantic")));
-    assert_eq!(object.get("terminal_output"), Some(&json!({ "ok": true })));
-    let summaries = object
-        .get("task_summaries")
-        .and_then(Value::as_array)
-        .expect("verifier summaries should be an array");
-    assert_eq!(summaries.len(), 2);
-    assert!(
-        summaries
-            .iter()
-            .all(|summary| summary.get("output_hash").is_some())
-    );
-    assert!(!verifier.input.to_string().contains("secret"));
-}
-
-#[test]
-fn scheduler_rejects_catalog_drift_and_validates_capability_input() {
-    // Pins: a run revision uses only the catalog snapshot whose canonical hash is pinned by the plan.
+fn controller_validates_capability_input_and_reservation_against_the_pinned_catalog() {
+    // Pins: materialization resolves a capability task's reservation and input schema from the
+    // catalog snapshot pinned to the run, and refuses a catalog whose estimates would let one
+    // logical task consume more than one task budget unit.
     let run_uid = Uuid::from_u128(16);
     let mut capability_node = node(
         "lookup",
@@ -376,13 +485,17 @@ fn scheduler_rejects_catalog_drift_and_validates_capability_input() {
     capability_node.input = json!({ "order_id": "ord-1" });
     capability_node.retry.max_attempts = 2;
     let plan = canonical(vec![capability_node, output_node("lookup")]);
-    let decision = schedule(request(run_uid, plan.clone(), BTreeMap::new(), vec![]))
-        .expect("matching catalog should schedule");
-    let ScheduleDecision::Ready(tasks) = decision else {
-        panic!("expected ready capability task, got {decision:?}");
-    };
+    let page = materialize_node_page(
+        &request(run_uid, plan.clone(), BTreeMap::new(), vec![]),
+        "lookup",
+        &BTreeMap::new(),
+        0,
+        1,
+        None,
+    )
+    .expect("matching catalog should materialize");
     assert_eq!(
-        tasks[0].reservation,
+        page.tasks[0].reservation,
         ExecutionEstimate {
             cost_microusd: 14,
             tokens: 22,
@@ -390,16 +503,6 @@ fn scheduler_rejects_catalog_drift_and_validates_capability_input() {
             retrieved_bytes: 26,
             tasks: 1,
         }
-    );
-
-    let mut drifted = request(run_uid, plan.clone(), BTreeMap::new(), vec![]);
-    drifted.catalog.capabilities[0].estimate.tokens = 12;
-    drifted.catalog.catalog_hash =
-        catalog_hash(&drifted.catalog.capabilities).expect("drifted catalog should hash");
-    let error = schedule(drifted).expect_err("catalog content drift must be rejected");
-    assert_eq!(
-        error.to_string(),
-        "invalid execution projection: scheduler capability catalog hash does not match the canonical plan"
     );
 
     let mut invalid_input = request(run_uid, plan.clone(), BTreeMap::new(), vec![]);
@@ -410,7 +513,8 @@ fn scheduler_rejects_catalog_drift_and_validates_capability_input() {
     invalid_input.catalog.catalog_hash =
         catalog_hash(&invalid_input.catalog.capabilities).expect("catalog should hash");
     invalid_input.plan.catalog_hash = invalid_input.catalog.catalog_hash;
-    let error = schedule(invalid_input).expect_err("resolved capability input must validate");
+    let error = materialize_node_page(&invalid_input, "lookup", &BTreeMap::new(), 0, 1, None)
+        .expect_err("resolved capability input must validate");
     assert!(matches!(error, moa_execution::Error::Schema { .. }));
 
     let mut invalid_task_count = request(run_uid, plan, BTreeMap::new(), vec![]);
@@ -418,239 +522,89 @@ fn scheduler_rejects_catalog_drift_and_validates_capability_input() {
     invalid_task_count.catalog.catalog_hash =
         catalog_hash(&invalid_task_count.catalog.capabilities).expect("catalog should hash");
     invalid_task_count.plan.catalog_hash = invalid_task_count.catalog.catalog_hash;
-    let error = schedule(invalid_task_count)
+    let error = materialize_node_page(&invalid_task_count, "lookup", &BTreeMap::new(), 0, 1, None)
         .expect_err("catalog capability estimates must reserve one task");
     assert!(error.to_string().contains("exactly one logical task"));
 }
 
 #[test]
-fn scheduler_skips_false_condition_and_resolves_downstream_null() {
-    // Pins: a false condition is an effective skipped node with JSON null output.
-    let mut conditional = node(
-        "conditional",
-        &[],
-        ExecutionOperation::Capability {
-            reference: capability(),
-        },
-    );
-    conditional.when = Some(ExecutionCondition::Equals {
-        reference: ExecutionReference {
-            path: "$.input.run".to_string(),
-        },
-        value: json!(true),
-    });
-    let mut output = output_node("conditional");
-    output.output_schema = json!({});
-    let mut plan = canonical(vec![conditional, output]);
-    plan.definition.output_schema = json!({});
-    let mut request = request(Uuid::from_u128(17), plan, BTreeMap::new(), vec![]);
-    request.run_input = json!({ "run": false });
-
-    let decision = schedule(request).expect("false condition should be deterministic");
-    let ScheduleDecision::Ready(tasks) = decision else {
-        panic!("expected only the downstream output task, got {decision:?}");
-    };
-    assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0].node_id, "output");
-    assert!(matches!(
-        &tasks[0].kind,
-        LogicalTaskKind::Output { value } if value.is_null()
-    ));
-}
-
-#[test]
-fn scheduler_advances_every_hierarchical_reducer_round_to_final_output() {
-    // Pins: completed reducer batches feed deterministic subsequent rounds until one output remains.
-    let run_uid = Uuid::from_u128(18);
-    let mut reduce = node(
-        "reduce",
-        &[],
-        ExecutionOperation::Reduce {
-            items: json!([1, 2, 3, 4, 5]),
-            max_items: 5,
-            reducer: moa_artifacts::execution_plan::ExecutionReducer::Capability {
-                reference: capability(),
+fn relative_temporal_targets_resolve_at_wait_entry_and_fence_on_the_run_deadline() {
+    // Pins: a wait-entry-relative target is resolved once against the exact entry instant and
+    // fails closed rather than persisting a due time the run deadline would never reach.
+    let entered_at = Utc
+        .with_ymd_and_hms(2026, 7, 13, 2, 0, 0)
+        .single()
+        .expect("wait entry");
+    let deadline_at = Utc
+        .with_ymd_and_hms(2026, 7, 13, 4, 0, 0)
+        .single()
+        .expect("run deadline");
+    assert_eq!(
+        resolve_temporal_target(
+            &ExecutionTemporalTarget::After {
+                delay_seconds: 3_600
             },
-            batch_size: 2,
-        },
+            entered_at,
+            deadline_at,
+        )
+        .expect("relative target should fit"),
+        Utc.with_ymd_and_hms(2026, 7, 13, 3, 0, 0)
+            .single()
+            .expect("resolved due time")
     );
-    reduce.output_schema = json!({});
-    let mut output = output_node("reduce");
-    output.output_schema = json!({});
-    let mut plan = canonical(vec![reduce, output]);
-    plan.definition.output_schema = json!({});
-    let statuses = BTreeMap::from([
-        ("reduce".to_string(), ExecutionNodeStatus::Pending),
-        ("output".to_string(), ExecutionNodeStatus::Pending),
-    ]);
-    let mut completed = vec![
-        completed_item_task(run_uid, "reduce", "r1:b0", json!({}), json!(3)),
-        completed_item_task(run_uid, "reduce", "r1:b1", json!({}), json!(7)),
-        completed_item_task(run_uid, "reduce", "r1:b2", json!({}), json!(5)),
-    ];
-
-    let decision = schedule(request(
-        run_uid,
-        plan.clone(),
-        statuses.clone(),
-        completed.clone(),
-    ))
-    .expect("second reducer round should schedule");
-    let ScheduleDecision::Ready(round_two) = decision else {
-        panic!("expected second reducer round, got {decision:?}");
-    };
-    assert_eq!(round_two.len(), 2);
-    assert_eq!(round_two[0].item_key, "r2:b0");
-    assert_eq!(
-        round_two[0].input,
-        json!({ "round": 2, "batch_index": 0, "items": [3, 7] })
-    );
-    assert_eq!(
-        round_two[1].input,
-        json!({ "round": 2, "batch_index": 1, "items": [5] })
-    );
-    completed.push(completed_item_task(
-        run_uid,
-        "reduce",
-        "r2:b0",
-        round_two[0].input.clone(),
-        json!(10),
-    ));
-    completed.push(completed_item_task(
-        run_uid,
-        "reduce",
-        "r2:b1",
-        round_two[1].input.clone(),
-        json!(5),
-    ));
-
-    let decision = schedule(request(
-        run_uid,
-        plan.clone(),
-        statuses.clone(),
-        completed.clone(),
-    ))
-    .expect("final reducer round should schedule");
-    let ScheduleDecision::Ready(round_three) = decision else {
-        panic!("expected final reducer round, got {decision:?}");
-    };
-    assert_eq!(round_three.len(), 1);
-    assert_eq!(round_three[0].item_key, "r3:b0");
-    assert_eq!(
-        round_three[0].input,
-        json!({ "round": 3, "batch_index": 0, "items": [10, 5] })
-    );
-    completed.push(completed_item_task(
-        run_uid,
-        "reduce",
-        "r3:b0",
-        round_three[0].input.clone(),
-        json!(15),
-    ));
-
-    let decision = schedule(request(run_uid, plan, statuses, completed))
-        .expect("completed hierarchy should unlock output");
-    let ScheduleDecision::Ready(tasks) = decision else {
-        panic!("expected terminal output task, got {decision:?}");
-    };
-    assert_eq!(tasks.len(), 1);
-    assert!(matches!(
-        &tasks[0].kind,
-        LogicalTaskKind::Output { value } if value == &json!(15)
-    ));
-}
-
-#[test]
-fn scheduler_returns_the_effective_projection_used_for_terminal_completion() {
-    // Pins: callers finalize against the same derived aggregate statuses that selected terminal.
-    let run_uid = Uuid::from_u128(181);
-    let mut map = node(
-        "inspect",
-        &[],
-        ExecutionOperation::Map {
-            items: json!([1]),
-            item_key: "".to_string(),
-            max_items: 1,
-            item_output_schema: json!({ "type": "object" }),
-            task: MapTask::Capability {
-                reference: capability(),
+    assert!(
+        resolve_temporal_target(
+            &ExecutionTemporalTarget::After {
+                delay_seconds: 7_200
             },
-        },
+            entered_at,
+            deadline_at,
+        )
+        .is_err(),
+        "a relative target at the deadline must fail closed"
     );
-    map.output_schema = json!({
-        "type": "object",
-        "required": ["items"],
-        "properties": {
-            "items": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 1
-            }
-        }
-    });
-    let plan = canonical(vec![map, output_node("inspect")]);
-    let statuses = BTreeMap::from([
-        ("inspect".to_string(), ExecutionNodeStatus::Pending),
-        ("output".to_string(), ExecutionNodeStatus::Completed),
-    ]);
-    let tasks = vec![
-        completed_item_task(
-            run_uid,
-            "inspect",
-            "number:1",
-            json!({}),
-            json!({ "ok": true }),
-        ),
-        completed_task(run_uid, "output", json!({ "ok": true })),
-    ];
-    let mut request = request(run_uid, plan, statuses, tasks);
-    request
-        .goal
-        .completion_checks
-        .retain(|check| matches!(check.kind, CompletionCheckKind::OutputSchema));
-
-    let outcome = schedule_outcome(request.clone()).expect("schedule completed map run");
-    let ScheduleDecision::Terminal(TerminalProjection::Completed { output }) = &outcome.decision
-    else {
-        panic!("expected completed terminal, got {:?}", outcome.decision);
-    };
-    assert_eq!(
-        outcome.effective_projection.node_statuses.get("inspect"),
-        Some(&ExecutionNodeStatus::Completed)
-    );
-    let evaluation = evaluate_completion(CompletionEvaluationRequest {
-        goal: request.goal,
-        plan: request.plan,
-        run_input: request.run_input,
-        projection: outcome.effective_projection,
-        terminal_output: Some(output.clone()),
-        budget_ledger: request.budget_ledger,
-        now: request.now,
-    })
-    .expect("evaluate the scheduler's effective terminal projection");
-    assert_eq!(evaluation.status, CompletionStatus::Completed);
 }
 
 #[test]
-fn scheduler_returns_no_progress_for_unbacked_nonterminal_state() {
-    // Pins: unfinished state with no runnable or durably waiting task is surfaced as NoProgress.
-    let plan = canonical(vec![node(
-        "lookup",
-        &[],
-        ExecutionOperation::Capability {
-            reference: capability(),
-        },
-    )]);
-    let statuses = BTreeMap::from([("lookup".to_string(), ExecutionNodeStatus::Running)]);
-
-    let decision = schedule(request(Uuid::from_u128(121), plan, statuses, vec![]))
-        .expect("unbacked running state should remain inspectable");
-    assert_eq!(
-        decision,
-        ScheduleDecision::NoProgress {
-            pending_node_ids: vec!["lookup".to_string()]
-        }
-    );
+fn long_horizon_statuses_use_canonical_snake_case_labels() {
+    // Pins: persistence and wire projections use one closed label for each new lifecycle state.
+    for (status, label) in [
+        (ExecutionRunStatus::WaitingSignal, "waiting_signal"),
+        (ExecutionRunStatus::WaitingTimer, "waiting_timer"),
+        (ExecutionRunStatus::WaitingExternal, "waiting_external"),
+        (ExecutionRunStatus::PauseRequested, "pause_requested"),
+        (ExecutionRunStatus::Pausing, "pausing"),
+        (ExecutionRunStatus::Paused, "paused"),
+    ] {
+        assert_eq!(status.as_str(), label);
+        assert_eq!(
+            ExecutionRunStatus::from_str(label).expect("run label"),
+            status
+        );
+        assert_eq!(
+            serde_json::to_value(status).expect("serialize run status"),
+            label
+        );
+    }
+    for (status, label) in [
+        (ExecutionTaskStatus::Ready, "ready"),
+        (ExecutionTaskStatus::Dispatching, "dispatching"),
+        (ExecutionTaskStatus::WaitingReview, "waiting_review"),
+        (ExecutionTaskStatus::WaitingSignal, "waiting_signal"),
+        (ExecutionTaskStatus::WaitingTimer, "waiting_timer"),
+        (ExecutionTaskStatus::WaitingExternal, "waiting_external"),
+        (ExecutionTaskStatus::UnknownOutcome, "unknown_outcome"),
+    ] {
+        assert_eq!(status.as_str(), label);
+        assert_eq!(
+            ExecutionTaskStatus::from_str(label).expect("task label"),
+            status
+        );
+        assert_eq!(
+            serde_json::to_value(status).expect("serialize task status"),
+            label
+        );
+    }
 }
 
 #[test]
@@ -737,6 +691,31 @@ fn task_transition_helpers_pin_retry_resume_generation_and_replan_supersession()
         ),
         ExecutionTaskStatus::Cancelled
     );
+    assert_eq!(
+        task_status_from_outcome(
+            &outcome(ExecutionTaskResult::UnknownOutcome {
+                message: "provider outcome is ambiguous".to_string(),
+            }),
+            false,
+        ),
+        ExecutionTaskStatus::UnknownOutcome
+    );
+    let completed = outcome(ExecutionTaskResult::Completed {
+        output: json!({}),
+        citations: vec![],
+    });
+    for waiting in [
+        ExecutionRunStatus::WaitingInput,
+        ExecutionRunStatus::WaitingReview,
+        ExecutionRunStatus::WaitingSignal,
+        ExecutionRunStatus::WaitingTimer,
+        ExecutionRunStatus::WaitingExternal,
+    ] {
+        assert_eq!(
+            run_status_after_task_outcome(waiting, &completed),
+            ExecutionRunStatus::Running
+        );
+    }
 
     let run_uid = Uuid::from_u128(19);
     let waiting = ExecutionTaskProjection {
@@ -775,50 +754,6 @@ fn task_transition_helpers_pin_retry_resume_generation_and_replan_supersession()
         Some(ExecutionTaskResult::Cancelled { reason })
             if reason == "superseded_by_plan_revision"
     ));
-}
-
-#[test]
-fn scheduler_ignores_cancelled_tasks_from_superseded_plan_revisions() {
-    // Pins: amendment history keeps cancelled task rows whose nodes are absent from the active
-    // plan, while the scheduler advances only the replacement branch.
-    let run_uid = Uuid::from_u128(20);
-    let replacement = node(
-        "replacement",
-        &[],
-        ExecutionOperation::Capability {
-            reference: capability(),
-        },
-    );
-    let plan = canonical(vec![replacement, output_node("replacement")]);
-    let superseded = ExecutionTaskProjection {
-        task_id: ExecutionTaskId::derive(run_uid, "superseded", "").expect("task id"),
-        node_id: "superseded".to_string(),
-        item_key: String::new(),
-        status: ExecutionTaskStatus::Cancelled,
-        attempt: 1,
-        generation: 1,
-        input: json!({}),
-        outcome: Some(ExecutionTaskOutcome {
-            schema_version: 1,
-            usage: ExecutionUsage {
-                cost_microusd: 0,
-                tokens: 0,
-                tool_calls: 0,
-                retrieved_bytes: 0,
-            },
-            result: ExecutionTaskResult::Cancelled {
-                reason: "superseded_by_plan_revision".to_string(),
-            },
-        }),
-    };
-
-    let decision = schedule(request(run_uid, plan, BTreeMap::new(), vec![superseded]))
-        .expect("cancelled superseded history must not invalidate the active plan");
-    let ScheduleDecision::Ready(tasks) = decision else {
-        panic!("expected replacement task, got {decision:?}");
-    };
-    assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0].node_id, "replacement");
 }
 
 fn request(
@@ -931,41 +866,6 @@ fn output_node(dependency: &str) -> ExecutionNode {
     )
 }
 
-fn completed_task(run_uid: Uuid, node_id: &str, output: Value) -> ExecutionTaskProjection {
-    completed_item_task(run_uid, node_id, "", json!({}), output)
-}
-
-fn completed_item_task(
-    run_uid: Uuid,
-    node_id: &str,
-    item_key: &str,
-    input: Value,
-    output: Value,
-) -> ExecutionTaskProjection {
-    ExecutionTaskProjection {
-        task_id: ExecutionTaskId::derive(run_uid, node_id, item_key).expect("task id"),
-        node_id: node_id.to_string(),
-        item_key: item_key.to_string(),
-        status: ExecutionTaskStatus::Completed,
-        attempt: 1,
-        generation: 1,
-        input,
-        outcome: Some(ExecutionTaskOutcome {
-            schema_version: 1,
-            usage: ExecutionUsage {
-                cost_microusd: 0,
-                tokens: 0,
-                tool_calls: 0,
-                retrieved_bytes: 0,
-            },
-            result: ExecutionTaskResult::Completed {
-                output,
-                citations: vec![],
-            },
-        }),
-    }
-}
-
 fn retry() -> RetryPolicy {
     RetryPolicy {
         max_attempts: 1,
@@ -995,7 +895,9 @@ fn catalog() -> ExecutionCapabilityCatalog {
         risk_level: RiskLevel::Low,
         default_effect: ActionPolicyEffect::Allow,
         idempotency_class: IdempotencyClass::Idempotent,
+        async_mode: moa_core::types::tools::ToolAsyncMode::SynchronousOnly,
         execution_class: ExecutionClass::Data,
+        requires_sandbox: false,
         policy_context: CapabilityPolicyContext::registered(source.clone()),
         source,
         estimate: ExecutionEstimate {

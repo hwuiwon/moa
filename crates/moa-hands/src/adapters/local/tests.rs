@@ -3,10 +3,11 @@
 use moa_core::{
     error::MoaError,
     traits::{HandProvider, SandboxStorageProvider},
-    types::hands::{HandHandle, HandSpec, SandboxProfile, SandboxTier},
+    types::hands::{HandHandle, HandSpec, HandStatus, SandboxProfile, SandboxTier},
     types::identifiers::{ProviderAccountId, WorkspaceCheckpointId, WorkspaceOperationId},
     types::sandbox_workspace::{
         ProviderInventoryOwner, WorkspaceCheckpointPublishRequest, WorkspaceOperationKind,
+        WorkspaceOperationOutcome, WorkspacePostCommitState, WorkspaceReconcileRequest,
         WorkspaceRevisionRef, WorkspaceStorageOperation,
     },
 };
@@ -228,9 +229,86 @@ async fn local_commit_rejects_a_parent_at_generation_zero_before_storage_work() 
             operation,
             hand: HandHandle::local(dir.path().join("missing-compute")),
             parent_revision: Some(parent),
+            release_compute: false,
         })
         .await
         .expect_err("generation-zero parent must fail before compute/storage access");
 
     assert!(matches!(error, MoaError::ValidationError(message) if message.contains("parent")));
+}
+
+// Pins: the local adapter answers an ambiguous non-yield commit exactly as E2B
+// and Daytona do — published bytes confirmed, compute untouched — so no future
+// adapter can turn reconciliation into a compute-release path.
+#[tokio::test]
+async fn local_commit_reconciliation_retains_the_hand_it_reconciles() {
+    let dir = tempdir().expect("create tempdir");
+    let store = std::sync::Arc::new(
+        crate::core::sandbox_workspace::checkpoint::store::CheckpointObjectStore::new(
+            std::sync::Arc::new(object_store::memory::InMemory::new()),
+            std::sync::Arc::new(moa_crypto::LocalKmsProvider::new()),
+            "local-reconcile-retention",
+            crate::core::sandbox_workspace::checkpoint::archive::ArchiveLimits::default(),
+            crate::core::sandbox_workspace::checkpoint::store::ObservedCheckpointBucketVersioning::Unversioned,
+        )
+        .expect("offline checkpoint store should construct"),
+    );
+    let provider = LocalHandProvider::new_with_docker_detection(dir.path(), false)
+        .await
+        .expect("create local hand provider")
+        .with_checkpoint_store(store);
+    let mut spec = hand_spec(SandboxTier::Local);
+    spec.workspace.current_revision = None;
+    let binding = spec.workspace.clone();
+    let handle = provider
+        .provision(spec)
+        .await
+        .expect("provision local sandbox");
+
+    let operation = WorkspaceStorageOperation {
+        operation_id: WorkspaceOperationId::new(),
+        kind: WorkspaceOperationKind::Commit,
+        binding,
+        deadline: chrono::Utc::now() + chrono::Duration::minutes(1),
+        request_hash: "c".repeat(64),
+    };
+    let published = provider
+        .publish_workspace_checkpoint(WorkspaceCheckpointPublishRequest {
+            operation: operation.clone(),
+            hand: handle.clone(),
+            parent_revision: None,
+            release_compute: false,
+        })
+        .await
+        .expect("publish a non-yield commit checkpoint");
+    let storage = published
+        .storage
+        .expect("a confirmed commit publishes portable checkpoint storage");
+
+    let reconciled = provider
+        .reconcile_workspace_operation(
+            WorkspaceReconcileRequest::new(operation, Some(handle.clone()), Some(storage))
+                .expect("exact-resource reconciliation request validates"),
+        )
+        .await
+        .expect("reconcile the ambiguous commit against published bytes");
+
+    assert_eq!(reconciled.outcome, WorkspaceOperationOutcome::Confirmed);
+    assert_eq!(
+        reconciled.post_commit_state,
+        Some(WorkspacePostCommitState::AttachmentRetained),
+        "reconciliation must never report a compute release it was not asked for"
+    );
+    assert_eq!(
+        provider
+            .status(&handle)
+            .await
+            .expect("inspect reconciled hand"),
+        HandStatus::Running,
+        "reconciling a commit must leave the caller's compute alive"
+    );
+    provider
+        .destroy(&handle)
+        .await
+        .expect("destroy local sandbox");
 }

@@ -1,16 +1,19 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use moa_config::CloudHandProviderKind;
 use moa_core::{
     error::MoaError,
     traits::{HandProvider, SandboxStorageProvider},
     types::{
-        hands::{EgressPolicy, HandHandle, SandboxTier},
+        hands::{EgressPolicy, HandHandle, HandStatus, SandboxTier},
         identifiers::{HandProvisioningOperationId, WorkspaceCheckpointId, WorkspaceOperationId},
+        resource::ResourceBudget,
         sandbox_workspace::{
-            WorkspaceCheckpointPublishRequest, WorkspaceOperationKind, WorkspaceRevisionRef,
+            WorkspaceCheckpointPublishRequest, WorkspaceOperationKind, WorkspaceOperationOutcome,
+            WorkspacePostCommitState, WorkspaceReconcileRequest, WorkspaceRevisionRef,
             WorkspaceStorageOperation,
         },
     },
@@ -20,10 +23,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
-use super::{E2B_PROVISIONING_OPERATION_METADATA_KEY, E2BHandProvider};
+use super::{E2B_PROVISIONING_OPERATION_METADATA_KEY, E2BHandProvider, bounded_execution_input};
 
 struct FixtureE2BApi {
     addr: std::net::SocketAddr,
+    sandbox_id: String,
     create_requests: mpsc::UnboundedReceiver<Value>,
     discovery_requests: mpsc::UnboundedReceiver<String>,
 }
@@ -38,6 +42,8 @@ impl FixtureE2BApi {
             .expect("fixture E2B API should expose its local address");
         let (create_request_tx, create_requests) = mpsc::unbounded_channel();
         let (discovery_request_tx, discovery_requests) = mpsc::unbounded_channel();
+        let sandbox_id = format!("sbx-{}", uuid::Uuid::new_v4());
+        let fixture_sandbox_id = sandbox_id.clone();
 
         tokio::spawn(async move {
             let mut created_metadata = None;
@@ -58,6 +64,7 @@ impl FixtureE2BApi {
                     &mut created_metadata,
                     &create_request_tx,
                     &discovery_request_tx,
+                    &fixture_sandbox_id,
                 );
                 let headers = format!(
                     "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
@@ -76,6 +83,7 @@ impl FixtureE2BApi {
 
         Self {
             addr,
+            sandbox_id,
             create_requests,
             discovery_requests,
         }
@@ -106,6 +114,7 @@ fn fixture_response(
     created_metadata: &mut Option<Value>,
     create_request_tx: &mpsc::UnboundedSender<Value>,
     discovery_request_tx: &mpsc::UnboundedSender<String>,
+    sandbox_id: &str,
 ) -> (&'static str, &'static str, String) {
     if first_line.starts_with("GET /v2/sandboxes?") {
         let target = first_line
@@ -120,7 +129,7 @@ fn fixture_response(
             || "[]".to_string(),
             |metadata| {
                 serde_json::json!([{
-                    "sandboxID": "sbx-123",
+                    "sandboxID": sandbox_id,
                     "metadata": metadata,
                 }])
                 .to_string()
@@ -141,10 +150,16 @@ fn fixture_response(
         return (
             "200 OK",
             "application/json",
-            r#"{"sandboxID":"sbx-123","domain":"example.e2b.test","envdAccessToken":"envd-token","envdVersion":"0.1.1"}"#.to_string(),
+            serde_json::json!({
+                "sandboxID": sandbox_id,
+                "domain": "example.e2b.test",
+                "envdAccessToken": "envd-token",
+                "envdVersion": "0.1.1",
+            })
+            .to_string(),
         );
     }
-    if first_line.starts_with("POST /sandboxes/sbx-123/connect ") {
+    if first_line.starts_with(&format!("POST /sandboxes/{sandbox_id}/connect ")) {
         return (
             "409 Conflict",
             "application/json",
@@ -192,11 +207,11 @@ fn fixture_response(
     if first_line.starts_with("GET /files?") {
         return ("200 OK", "application/octet-stream", "marker".to_string());
     }
-    if first_line.starts_with("DELETE /sandboxes/sbx-123 ") {
+    if first_line.starts_with(&format!("DELETE /sandboxes/{sandbox_id} ")) {
         *created_metadata = None;
         return ("204 No Content", "application/json", String::new());
     }
-    if first_line.starts_with("GET /sandboxes/sbx-123 ") {
+    if first_line.starts_with(&format!("GET /sandboxes/{sandbox_id} ")) {
         return created_metadata.as_ref().map_or_else(
             || {
                 (
@@ -210,7 +225,7 @@ fn fixture_response(
                     "200 OK",
                     "application/json",
                     serde_json::json!({
-                        "sandboxID": "sbx-123",
+                        "sandboxID": sandbox_id,
                         "state": "running",
                         "metadata": metadata,
                         "domain": "example.e2b.test",
@@ -361,17 +376,56 @@ async fn provisions_executes_and_destroys_sandbox() {
         .unwrap();
     assert_eq!(output.process_stdout(), Some("hello\n"));
 
-    // Pins: E2B pause/resume retain process memory and cannot be selected by
-    // the durable filesystem path.
-    assert!(matches!(
-        provider.pause(&handle).await,
-        Err(MoaError::Unsupported(_))
-    ));
+    // Pins: E2B resume restores process memory and cannot be selected by the
+    // durable filesystem path.
     assert!(matches!(
         provider.resume(&handle).await,
         Err(MoaError::Unsupported(_))
     ));
     provider.destroy(&handle).await.unwrap();
+}
+
+#[test]
+fn e2b_effective_timeout_is_injected_and_never_exceeds_run_budget() {
+    // Pins: E2B receives the same effective bash bound the watchdog observes,
+    // while the outer provider deadline also bounds non-bash HTTP operations.
+    let timeout = crate::tools::bash::effective_synchronous_timeout(
+        "bash",
+        r#"{"cmd":"true","timeout_secs":300}"#,
+        crate::tools::bash::DEFAULT_BASH_TIMEOUT,
+        ResourceBudget::until(chrono::Utc::now() + chrono::Duration::seconds(10))
+            .time_remaining(chrono::Utc::now()),
+    )
+    .expect("bounded bash timeout resolves");
+    assert!(timeout <= Duration::from_secs(10));
+    let input = bounded_execution_input("bash", r#"{"cmd":"true","timeout_secs":300}"#, timeout)
+        .expect("bounded bash input rewrites");
+    assert_eq!(
+        serde_json::from_str::<Value>(&input)
+            .expect("rewritten input is JSON")
+            .get("timeout_secs")
+            .and_then(Value::as_u64),
+        Some(timeout.as_secs())
+    );
+    assert!(matches!(
+        bounded_execution_input(
+            "file_read",
+            r#"{"path":"marker.txt"}"#,
+            Duration::from_secs(10),
+        )
+        .expect("non-bash input remains valid"),
+        std::borrow::Cow::Borrowed(_)
+    ));
+    assert!(
+        crate::tools::bash::effective_synchronous_timeout(
+            "file_read",
+            r#"{"path":"marker.txt"}"#,
+            crate::tools::bash::DEFAULT_BASH_TIMEOUT,
+            ResourceBudget::until(chrono::Utc::now() - chrono::Duration::seconds(1))
+                .time_remaining(chrono::Utc::now()),
+        )
+        .is_err()
+    );
 }
 
 #[tokio::test]
@@ -447,6 +501,7 @@ async fn e2b_commit_rejects_a_parent_at_generation_zero_before_provider_io() {
             operation,
             hand,
             parent_revision: Some(parent),
+            release_compute: false,
         })
         .await
         .expect_err("generation-zero parent must fail before provider I/O");
@@ -539,7 +594,8 @@ async fn exports_reserved_data_root_through_canonical_archive_and_wipes_temp() {
         e2b_test_profile(EgressPolicy::DenyAll),
     );
     let binding = spec.workspace.clone();
-    let before = e2b_operation_temp_dirs();
+    let temp_prefix = super::storage::operation_temp_prefix("export", &fixture.sandbox_id);
+    let before = e2b_operation_temp_dirs(&temp_prefix);
     let handle = provider
         .provision(spec)
         .await
@@ -570,21 +626,106 @@ async fn exports_reserved_data_root_through_canonical_archive_and_wipes_temp() {
     assert_eq!(archive.manifest.logical_bytes, 6);
     assert_eq!(archive.manifest.entries.len(), 1);
     assert_eq!(archive.manifest.entries[0].path, "marker.txt");
-    assert_eq!(e2b_operation_temp_dirs(), before);
+    assert_eq!(e2b_operation_temp_dirs(&temp_prefix), before);
     provider
         .destroy(&handle)
         .await
         .expect("destroy fixture sandbox");
 }
 
-fn e2b_operation_temp_dirs() -> BTreeSet<PathBuf> {
+// Pins: reconciling an ambiguous non-yield commit proves the published bytes
+// without destroying compute the caller is still executing on, and reports the
+// same retained disposition the local and Daytona adapters report.
+#[tokio::test]
+async fn e2b_commit_reconciliation_retains_the_hand_it_reconciles() {
+    let mut fixture = FixtureE2BApi::start().await;
+    let store = Arc::new(
+        crate::core::sandbox_workspace::checkpoint::store::CheckpointObjectStore::new(
+            Arc::new(object_store::memory::InMemory::new()),
+            Arc::new(moa_crypto::LocalKmsProvider::new()),
+            "e2b-reconcile-retention",
+            crate::core::sandbox_workspace::checkpoint::archive::ArchiveLimits::default(),
+            crate::core::sandbox_workspace::checkpoint::store::ObservedCheckpointBucketVersioning::Unversioned,
+        )
+        .expect("offline checkpoint store should construct"),
+    );
+    let provider = E2BHandProvider::new(Arc::new(
+        crate::core::provider_credentials::TestProviderCredentialSource::new(
+            CloudHandProviderKind::E2b,
+            fixture.api_url(),
+            None,
+            Some("example.e2b.test".to_string()),
+            Some("base".to_string()),
+            "test-key",
+        ),
+    ))
+    .with_sandbox_base_url(fixture.api_url())
+    .with_checkpoint_store(store);
+    let mut spec = crate::core::profile::test_support::hand_spec(
+        SandboxTier::MicroVM,
+        e2b_test_profile(EgressPolicy::DenyAll),
+    );
+    spec.workspace.current_revision = None;
+    let binding = spec.workspace.clone();
+    let handle = provider.provision(spec).await.expect("provision E2B hand");
+    let _ = fixture.next_discovery_request().await;
+
+    let operation = WorkspaceStorageOperation {
+        operation_id: WorkspaceOperationId::new(),
+        kind: WorkspaceOperationKind::Commit,
+        binding,
+        deadline: chrono::Utc::now() + chrono::Duration::minutes(1),
+        request_hash: "b".repeat(64),
+    };
+    let published = provider
+        .publish_workspace_checkpoint(WorkspaceCheckpointPublishRequest {
+            operation: operation.clone(),
+            hand: handle.clone(),
+            parent_revision: None,
+            release_compute: false,
+        })
+        .await
+        .expect("publish a non-yield commit checkpoint");
+    let storage = published
+        .storage
+        .expect("a confirmed commit publishes portable checkpoint storage");
+
+    let reconciled = provider
+        .reconcile_workspace_operation(
+            WorkspaceReconcileRequest::new(operation, Some(handle.clone()), Some(storage))
+                .expect("exact-resource reconciliation request validates"),
+        )
+        .await
+        .expect("reconcile the ambiguous commit against published bytes");
+
+    assert_eq!(reconciled.outcome, WorkspaceOperationOutcome::Confirmed);
+    assert_eq!(
+        reconciled.post_commit_state,
+        Some(WorkspacePostCommitState::AttachmentRetained),
+        "reconciliation must never report a compute release it was not asked for"
+    );
+    assert_eq!(
+        provider
+            .status(&handle)
+            .await
+            .expect("inspect reconciled hand"),
+        HandStatus::Running,
+        "reconciling a commit must leave the caller's compute alive"
+    );
+    provider
+        .destroy(&handle)
+        .await
+        .expect("destroy fixture hand");
+}
+
+fn e2b_operation_temp_dirs(prefix: &str) -> BTreeSet<PathBuf> {
     std::fs::read_dir(std::env::temp_dir())
         .expect("read host temp directory")
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(".moa-e2b-"))
+                .is_some_and(|name| name.starts_with(prefix))
         })
         .collect()
 }

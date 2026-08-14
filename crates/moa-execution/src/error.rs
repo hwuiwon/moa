@@ -54,6 +54,12 @@ pub enum Error {
         /// Resource dimension that overran.
         dimension: &'static str,
     },
+    /// Fleet or tenant admission has no room for one durable execution resource.
+    #[error("execution capacity saturated for {dimension}")]
+    CapacitySaturated {
+        /// Closed execution-capacity dimension; never includes owner labels.
+        dimension: &'static str,
+    },
     /// A ledger transition supplied an invalid reservation or usage counter.
     #[error("invalid budget ledger transition: {message}")]
     InvalidBudgetLedger {
@@ -90,4 +96,73 @@ pub enum Error {
         /// Database failure with operation context.
         message: String,
     },
+    /// A database operation failed with its SQLx provenance intact.
+    #[error("execution repository database error: {source}")]
+    Database {
+        /// Original SQLx failure used to determine whether replay is safe.
+        #[source]
+        source: sqlx::Error,
+    },
+    /// A shared database helper reported transient storage unavailability.
+    #[error("execution repository storage unavailable: {message}")]
+    StorageUnavailable {
+        /// Human-readable failure context retained by the shared database boundary.
+        message: String,
+    },
+}
+
+impl Error {
+    /// Returns whether a retry-owning boundary may safely replay this storage failure.
+    #[must_use]
+    pub fn is_retryable_storage(&self) -> bool {
+        match self {
+            Self::Database { source } => moa_db::is_retryable_sqlx_error(source),
+            Self::StorageUnavailable { .. } => true,
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repository_error_keeps_sqlx_retry_provenance() {
+        // Pins: the execution repository preserves a concrete transient SQLx
+        // failure until the Restate boundary makes the retry decision.
+        let error = Error::Database {
+            source: sqlx::Error::PoolClosed,
+        };
+
+        assert!(error.is_retryable_storage());
+        assert!(matches!(
+            error,
+            Error::Database {
+                source: sqlx::Error::PoolClosed
+            }
+        ));
+    }
+
+    #[test]
+    fn repository_error_does_not_retry_terminal_storage_or_decode_failures() {
+        // Pins: repository invariants and corrupt row projections remain terminal
+        // even though they originate at the database boundary.
+        for error in [
+            Error::Storage {
+                message: "missing required row".to_string(),
+            },
+            Error::InvalidRepositoryData {
+                message: "invalid persisted status".to_string(),
+            },
+            Error::Database {
+                source: sqlx::Error::RowNotFound,
+            },
+        ] {
+            assert!(
+                !error.is_retryable_storage(),
+                "classified {error} as retryable"
+            );
+        }
+    }
 }

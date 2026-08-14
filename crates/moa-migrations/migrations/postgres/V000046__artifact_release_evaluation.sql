@@ -186,7 +186,7 @@ LANGUAGE sql
 IMMUTABLE
 PARALLEL SAFE
 AS $$
-    SELECT digest(
+    SELECT public.digest(
         jsonb_build_object(
             'schema', 'moa.artifact_release_case_pack/v1',
             'name', p_name,

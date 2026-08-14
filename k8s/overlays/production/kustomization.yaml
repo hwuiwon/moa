@@ -21,6 +21,12 @@ patches:
       name: moa-orchestrator
     path: patches/orchestrator-security-profile.yaml
   - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: moa-maintenance
+    path: patches/orchestrator-security-profile.yaml
+  - target:
       group: restate.dev
       version: v1
       kind: RestateCluster
@@ -31,6 +37,12 @@ patches:
       version: v1beta1
       kind: RestateDeployment
       name: moa-orchestrator
+    path: patches/orchestrator-observability.yaml
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: moa-maintenance
     path: patches/orchestrator-observability.yaml
   - target:
       group: apps

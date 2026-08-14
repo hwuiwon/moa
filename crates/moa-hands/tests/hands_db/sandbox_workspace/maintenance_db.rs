@@ -11,6 +11,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
+use metrics_exporter_prometheus::PrometheusBuilder;
 use moa_core::{
     error::Result,
     types::{
@@ -57,6 +58,9 @@ use moa_hands::core::{
 };
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 
+use super::sandbox_workspace_retention_db::{
+    create_workspace, maintenance_fixture, pools, seed_account as seed_workspace_account,
+};
 use super::seed_session;
 
 fn required_url(name: &str) -> String {
@@ -259,6 +263,138 @@ async fn workspace_maintenance_pool_requires_noninheriting_member_login_db() {
     maintenance.close().await;
 }
 
+fn quota_ratio(rendered: &str, dimension: &str) -> f64 {
+    let prefix =
+        format!("moa_sandbox_workspace_quota_utilization_ratio{{dimension=\"{dimension}\"}} ");
+    rendered
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("quota scrape is missing {dimension}:\n{rendered}"))
+        .parse::<f64>()
+        .unwrap_or_else(|error| panic!("quota ratio for {dimension} is not numeric: {error}"))
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a fresh V60 database and distinct runtime/workspace-maintenance logins"]
+async fn workspace_quota_metrics_use_json_limits_and_highest_enforced_scope_db() {
+    // Pins: fleet quota telemetry reads the JSONB limit schema used by admission,
+    // reports the highest tenant/provider-account pressure, distinguishes an
+    // explicit zero ceiling from an absent unbounded ceiling, and zero-fills it.
+    let (runtime, maintenance) = pools().await;
+    let tenant_id = TenantId::new();
+    let account_id = ProviderAccountId::new();
+    seed_workspace_account(&runtime, account_id).await;
+    sqlx::query(
+        "UPDATE moa.sandbox_provider_accounts \
+         SET configured_limits = '{\"workspaces\": 10}'::jsonb \
+         WHERE provider_account_id = $1 AND generation = 1",
+    )
+    .bind(account_id)
+    .execute(&runtime)
+    .await
+    .expect("seed provider-account workspace ceiling");
+    sqlx::query(
+        "INSERT INTO moa.sandbox_tenant_capacity_limits (tenant_id, configured_limits) \
+         VALUES ($1, '{\"workspaces\": 4}'::jsonb)",
+    )
+    .bind(tenant_id)
+    .execute(&runtime)
+    .await
+    .expect("seed tenant workspace ceiling");
+    for _ in 0..3 {
+        create_workspace(&runtime, tenant_id, account_id).await;
+    }
+
+    let fixture = maintenance_fixture(
+        &runtime,
+        &maintenance,
+        account_id,
+        moa_config::CheckpointRetentionConfig::default(),
+    )
+    .await;
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+    fixture
+        .coordinator
+        .emit_fleet_metrics()
+        .await
+        .expect("emit tenant-dominated quota snapshot");
+    assert_eq!(quota_ratio(&handle.render(), "workspaces"), 0.75);
+
+    sqlx::query(
+        "UPDATE moa.sandbox_tenant_capacity_limits \
+         SET configured_limits = '{\"workspaces\": 30}'::jsonb \
+         WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .execute(&runtime)
+    .await
+    .expect("lower tenant pressure below provider-account pressure");
+    fixture
+        .coordinator
+        .emit_fleet_metrics()
+        .await
+        .expect("emit provider-account-dominated quota snapshot");
+    assert_eq!(quota_ratio(&handle.render(), "workspaces"), 0.3);
+
+    sqlx::query(
+        "UPDATE moa.sandbox_provider_accounts \
+         SET configured_limits = '{\"workspaces\": 0}'::jsonb \
+         WHERE provider_account_id = $1 AND generation = 1",
+    )
+    .bind(account_id)
+    .execute(&runtime)
+    .await
+    .expect("set explicit zero provider-account ceiling");
+    fixture
+        .coordinator
+        .emit_fleet_metrics()
+        .await
+        .expect("emit over-zero-ceiling quota snapshot");
+    assert_eq!(quota_ratio(&handle.render(), "workspaces"), 1.0);
+
+    sqlx::query(
+        "UPDATE moa.sandbox_provider_accounts \
+         SET configured_limits = '{}'::jsonb \
+         WHERE provider_account_id = $1 AND generation = 1",
+    )
+    .bind(account_id)
+    .execute(&runtime)
+    .await
+    .expect("remove provider-account ceiling");
+    sqlx::query("DELETE FROM moa.sandbox_tenant_capacity_limits WHERE tenant_id = $1")
+        .bind(tenant_id)
+        .execute(&runtime)
+        .await
+        .expect("remove tenant ceiling");
+    fixture
+        .coordinator
+        .emit_fleet_metrics()
+        .await
+        .expect("emit unbounded quota snapshot");
+    assert_eq!(quota_ratio(&handle.render(), "workspaces"), 0.0);
+
+    sqlx::query("DELETE FROM moa.sandbox_capacity_reservations WHERE tenant_id = $1")
+        .bind(tenant_id)
+        .execute(&runtime)
+        .await
+        .expect("clean isolated capacity reservations");
+    sqlx::query("DELETE FROM moa.sandbox_workspaces WHERE tenant_id = $1")
+        .bind(tenant_id)
+        .execute(&runtime)
+        .await
+        .expect("clean isolated workspaces");
+    sqlx::query("DELETE FROM moa.sandbox_provider_accounts WHERE provider_account_id = $1")
+        .bind(account_id)
+        .execute(&runtime)
+        .await
+        .expect("clean isolated provider account");
+    runtime.close().await;
+    maintenance.close().await;
+}
+
 #[tokio::test]
 #[ignore = "requires distinct runtime and workspace-maintenance Postgres logins"]
 async fn delayed_checkpoint_reconciliation_atomically_publishes_without_resend_db() {
@@ -367,10 +503,16 @@ async fn delayed_checkpoint_reconciliation_atomically_publishes_without_resend_d
             provider_account_generation: 1,
             expected_writer_epoch: active.writer_epoch,
             expected_instance_generation: active.instance_generation,
-            quantities: vec![CapacityQuantity {
-                dimension: WorkspaceCapacityDimension::Checkpoints,
-                quantity: 1,
-            }],
+            quantities: vec![
+                CapacityQuantity {
+                    dimension: WorkspaceCapacityDimension::Checkpoints,
+                    quantity: 1,
+                },
+                CapacityQuantity {
+                    dimension: WorkspaceCapacityDimension::LogicalBytes,
+                    quantity: 17,
+                },
+            ],
         })
         .await
         .expect("reserve checkpoint capacity");

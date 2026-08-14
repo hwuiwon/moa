@@ -140,6 +140,69 @@ pub(in crate::objects::session::handlers) async fn forward_user_input_reply(
     Ok(())
 }
 
+/// Reacquires shared coordinator admission under the exact pending-input fence.
+///
+/// This runs before the matching awakeable is resolved so resumed work can never
+/// perform provider or tool I/O while its fleet and tenant admission is parked.
+pub(in crate::objects::session::handlers) async fn reacquire_coordinator_reply_admission(
+    ctx: &ObjectContext<'_>,
+    state: &SessionVoState,
+    pending_state: &mut SessionPendingState,
+    turn_admission: &crate::objects::session::admission::TurnAdmission,
+    session_id: SessionId,
+    target: &PendingUserReplyTarget,
+) -> Result<(), HandlerError> {
+    let PendingUserReplyTarget::CoordinatorInput {
+        turn_id,
+        generation,
+        input_request_id,
+    } = target
+    else {
+        return Ok(());
+    };
+    let exact_input_is_pending = state.pending_coordinator_inputs.iter().any(|pending| {
+        pending.turn_id == *turn_id
+            && pending.generation == *generation
+            && pending.input_request_id == *input_request_id
+    });
+    if !exact_input_is_pending {
+        return Ok(());
+    }
+    if pending_state.active_turn_id.as_deref() != Some(turn_id)
+        || pending_state.turn_admission_parked.as_ref()
+            != Some(&ParkedCoordinatorAdmission {
+                turn_id: turn_id.clone(),
+                generation: *generation,
+            })
+    {
+        return Err(TerminalError::new_with_code(
+            409,
+            "coordinator input target does not match the parked turn admission",
+        )
+        .into());
+    }
+
+    let tenant_id = state
+        .ensure_initialized()
+        .map_err(moa_error_to_handler_error)?
+        .tenant_id;
+    turn_admission
+        .acquire(ctx, session_id, tenant_id, "turn_admission_human_resume")
+        .await?;
+    // The exact predicate above is evaluated inside this single-writer virtual
+    // object handler, so the matching parked fence cannot change before clearing.
+    if !pending_state.resume_turn_admission(turn_id, *generation) {
+        return Err(TerminalError::new_with_code(
+            409,
+            "coordinator turn admission changed while resuming human input",
+        )
+        .into());
+    }
+    arm_turn_admission_heartbeat(ctx, pending_state, turn_admission);
+    persist_pending_state(ctx, pending_state);
+    Ok(())
+}
+
 /// Builds the exact worker input payload for a routed user reply.
 pub(in crate::objects::session::handlers) fn worker_provide_input_request(
     parent_session: SessionId,

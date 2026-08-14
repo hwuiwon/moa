@@ -9,6 +9,8 @@ mod admission_replay;
 mod bulk_and_recovery;
 #[path = "execution_run_service_e2e/compensation_recovery.rs"]
 mod compensation_recovery;
+#[path = "execution_run_service_e2e/controller_activation.rs"]
+mod controller_activation;
 #[path = "execution_run_service_e2e/evaluation.rs"]
 mod evaluation;
 #[path = "execution_run_service_e2e/observability.rs"]
@@ -46,15 +48,16 @@ use moa_execution::{
     capability::{ExecutionAuthorizationEnvelope, ExecutionCapabilityCatalog, ExecutionHash},
     compiler::{CompileExecutionRequest, compile},
     repository::{
-        ConfirmationOutcome, ExecutionRepository, ExecutionScope, NewExecutionPlanningContext,
-        NewExecutionRun, PlanningContextWriteOutcome,
+        ExecutionRepository, ExecutionScope, NewExecutionRun,
+        audit::{NewExecutionPlanningContext, PlanningContextWriteOutcome},
+        run::RunAdmissionOutcome,
     },
     state::{ExecutionRunStatus, ExecutionTerminalCause},
     wire::{
-        ExecutionCancelRequest, ExecutionConfirmRequest, ExecutionMutationResponse,
-        ExecutionPlanningContextRequest, ExecutionPlanningContextResponse,
-        ExecutionPlanningContextSnapshot, ExecutionRunRequest, ExecutionStartRequest,
-        ExecutionStartResponse, ExecutionStatusResponse, planning_context_hash,
+        ExecutionCancelRequest, ExecutionMutationResponse, ExecutionPlanningContextRequest,
+        ExecutionPlanningContextResponse, ExecutionPlanningContextSnapshot, ExecutionRunRequest,
+        ExecutionStartRequest, ExecutionStartResponse, ExecutionStatusResponse,
+        planning_context_hash,
     },
 };
 use moa_orchestrator::objects::session::ExecutionRunStartedDelivery;
@@ -101,6 +104,7 @@ async fn output_only_run_is_durable_detached_and_reaches_terminal_state() -> Res
                 contact_id: None,
                 session_id,
                 originating_user_sequence_num,
+                deadline_at: chrono::Utc::now() + chrono::TimeDelta::days(1),
                 requested_template: None,
             },
         )
@@ -410,6 +414,7 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
     let awaiting = repository
         .create_run(
             scope,
+            &ExecutionConfig::default(),
             NewExecutionRun {
                 tenant_id: session.tenant_id,
                 contact_id: None,
@@ -418,6 +423,11 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
                 planning_context_uid: awaiting_context_uid,
                 planning_context_hash: awaiting_context_hash,
                 owner_user_id: owner_user_id.clone(),
+                admitted_identity: test
+                    .client()
+                    .identity()
+                    .cloned()
+                    .context("fixture client must carry an admitted identity")?,
                 goal: compiled.goal.clone(),
                 plan: compiled.plan.clone(),
                 catalog: catalog.clone(),
@@ -431,6 +441,9 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
             },
         )
         .await?;
+    let RunAdmissionOutcome::Admitted(awaiting) = awaiting else {
+        anyhow::bail!("preconfirmation run was not admitted: {awaiting:?}")
+    };
     let preconfirm_request = ExecutionCancelRequest {
         run: ExecutionRunRequest {
             tenant_id: session.tenant_id,
@@ -524,6 +537,7 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
     let queued = repository
         .create_run(
             scope,
+            &ExecutionConfig::default(),
             NewExecutionRun {
                 tenant_id: session.tenant_id,
                 contact_id: None,
@@ -532,6 +546,11 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
                 planning_context_uid: queued_context_uid,
                 planning_context_hash: queued_context_hash,
                 owner_user_id,
+                admitted_identity: test
+                    .client()
+                    .identity()
+                    .cloned()
+                    .context("fixture client must carry an admitted identity")?,
                 goal: compiled.goal,
                 plan: compiled.plan,
                 catalog,
@@ -545,6 +564,9 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
             },
         )
         .await?;
+    let RunAdmissionOutcome::Admitted(queued) = queued else {
+        anyhow::bail!("postqueue run was not admitted: {queued:?}")
+    };
     let queued_at = queued
         .queued_at
         .context("direct queued run must have a queue timestamp")?;
@@ -605,264 +627,5 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
     assert_eq!(postqueue.queued_at, Some(queued_at));
     assert!(postqueue.confirmed_at.is_none());
     assert!(postqueue.started_at.is_none());
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires local Restate, Postgres, OpenFGA, and the service-e2e feature lane"]
-async fn wake_after_db_ack_before_workflow_state_advance_is_not_lost() -> Result<()> {
-    // Pins: a persisted wake delivered in the exact ack-to-workflow-state gap
-    // either prevents parking or resolves the promise advertised before the CAS.
-    run_wake_handoff_case("delay").await
-}
-
-#[tokio::test]
-#[ignore = "requires local Restate, Postgres, OpenFGA, and the service-e2e feature lane"]
-async fn wake_after_db_ack_survives_execution_run_failure_and_restart() -> Result<()> {
-    // Pins: a wake committed after DB acknowledgement remains attached to the
-    // same promise across one forced handler failure and Restate replay/restart.
-    run_wake_handoff_case("crash_once").await
-}
-
-async fn run_wake_handoff_case(mode: &str) -> Result<()> {
-    let fixture = OrchestratorTestFixture::with_script_and_env(
-        json!({
-            "default": {
-                "completion": {
-                    "content": "ok",
-                    "duration_ms": 1,
-                    "input_tokens": 1,
-                    "cached_input_tokens": 0,
-                    "cache_write_input_tokens": 0,
-                    "tool_calls": []
-                }
-            }
-        }),
-        vec![(
-            "MOA_EXECUTION_TEST_WAKE_HANDOFF".to_string(),
-            mode.to_string(),
-        )],
-    )
-    .await?;
-    let test = fixture.isolated().await;
-    let session_id = test
-        .create_session(&format!("execution-wake-handoff-{mode}"))
-        .await?;
-    let session = test.client().get_session(session_id).await?;
-    let originating_user_sequence_num = test
-        .client()
-        .append_event(
-            session_id,
-            Event::UserMessage {
-                text: "complete after a wake handoff".to_string(),
-                attachments: Vec::new(),
-            },
-        )
-        .await?;
-    let owner_user_id = match session.created_by {
-        Some(SessionActorRef::Identity { id }) => UserId::new(id.to_string()),
-        other => anyhow::bail!("fixture session has no identity owner: {other:?}"),
-    };
-    let catalog = ExecutionCapabilityCatalog::build(Vec::new())?;
-    let authorization = ExecutionAuthorizationEnvelope {
-        capability_refs: Vec::new(),
-        skill_refs: Vec::new(),
-    };
-    let approved_budget = ExecutionBudgetLimit {
-        max_cost_microusd: Some(1),
-        max_tokens: Some(1),
-        max_tasks: Some(1),
-        max_tool_calls: Some(1),
-        max_retrieved_bytes: Some(1),
-        deadline_at: Some(moa_test_support::fixtures::pg_now() + chrono::Duration::minutes(5)),
-    };
-    let compiled = compile(CompileExecutionRequest {
-        goal: ExecutionGoalContract {
-            objective: "complete after a wake handoff".to_string(),
-            requirements: vec![ExecutionRequirement {
-                id: "result".to_string(),
-                description: "persist the handoff result".to_string(),
-            }],
-            deliverables: Vec::new(),
-            coverage: Vec::new(),
-            constraints: Vec::new(),
-            completion_checks: vec![CompletionCheck {
-                id: "output-schema".to_string(),
-                description: "terminal output matches its schema".to_string(),
-                requirement_ids: vec!["result".to_string()],
-                constraint_ids: Vec::new(),
-                kind: CompletionCheckKind::OutputSchema,
-            }],
-        },
-        plan: ExecutionPlanDefinition {
-            cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-            input_schema: json!({"type": "object"}),
-            output_schema: json!({"type": "object"}),
-            nodes: vec![ExecutionNode {
-                id: "output".to_string(),
-                requirement_ids: vec!["result".to_string()],
-                depends_on: Vec::new(),
-                when: None,
-                input: json!({}),
-                output_schema: json!({"type": "object"}),
-                operation: ExecutionOperation::Output {
-                    value: json!({"handoff": "completed"}),
-                },
-                compensation: None,
-                retry: RetryPolicy {
-                    max_attempts: 1,
-                    initial_backoff_ms: 0,
-                    max_backoff_ms: 0,
-                },
-                budget: None,
-            }],
-        },
-        run_input: json!({}),
-        catalog: catalog.clone(),
-        authorization: authorization.clone(),
-        approved_budget: approved_budget.clone(),
-        config: ExecutionConfig::default(),
-        now: moa_test_support::fixtures::pg_now(),
-    })
-    .compiled
-    .context("wake handoff plan should compile")?;
-    let pool = sqlx::PgPool::connect(&fixture.postgres_url).await?;
-    let repository = ExecutionRepository::new(pool);
-    let scope = ExecutionScope::Tenant {
-        tenant_id: session.tenant_id,
-    };
-    let (planning_context_uid, planning_context_hash) = create_test_planning_context(
-        &repository,
-        scope,
-        session.tenant_id,
-        session_id,
-        originating_user_sequence_num,
-        owner_user_id.clone(),
-        catalog.clone(),
-        authorization.clone(),
-        approved_budget.clone(),
-    )
-    .await?;
-    let source_provenance = test_source_provenance(&compiled.plan.plan_hash.to_string());
-    let run = repository
-        .create_run(
-            scope,
-            NewExecutionRun {
-                tenant_id: session.tenant_id,
-                contact_id: None,
-                session_id,
-                originating_user_sequence_num,
-                planning_context_uid,
-                planning_context_hash,
-                owner_user_id,
-                goal: compiled.goal,
-                plan: compiled.plan,
-                catalog,
-                authorization,
-                pinned_instruction_skills: Vec::new(),
-                source_provenance,
-                input: json!({}),
-                status: ExecutionRunStatus::AwaitingConfirmation,
-                approved_budget: approved_budget.clone(),
-                idempotency_key: Some(format!("wake-handoff-{mode}-{session_id}")),
-            },
-        )
-        .await?;
-    assert!(run.queued_at.is_none());
-    let initial_epoch = run.wake_epoch;
-    test.client()
-        .post_void(
-            &format!("/Session/{session_id}/execution_run_started"),
-            &ExecutionRunStartedDelivery {
-                started: ExecutionRunStarted {
-                    run_uid: run.run_uid,
-                    originating_user_sequence_num,
-                    plan_revision: run.plan_revision,
-                    status: ExecutionRunAdmissionStatus::AwaitingConfirmation,
-                    confirmation: Some(ExecutionConfirmationEvidence {
-                        active_plan_hash: run.active_plan_hash.to_string(),
-                        estimate: ExecutionAdmissionEstimate {
-                            cost_microusd: run.active_plan.estimate.cost_microusd,
-                            tokens: run.active_plan.estimate.tokens,
-                            tasks: run.active_plan.estimate.tasks,
-                            tool_calls: run.active_plan.estimate.tool_calls,
-                            retrieved_bytes: run.active_plan.estimate.retrieved_bytes,
-                        },
-                        methodology: ExecutionEstimateMethodology::ConservativeWorstCase,
-                    }),
-                },
-                approved_budget: run.approved_budget.clone(),
-            },
-        )
-        .await
-        .context("activate the wake-handoff run through Session")?;
-
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let observed = repository
-                .load_run(scope, run.run_uid)
-                .await?
-                .context("wake handoff run disappeared")?;
-            if observed.processed_wake_epoch == initial_epoch {
-                return Ok::<(), anyhow::Error>(());
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .context("driver never reached the post-ack injection checkpoint")??;
-
-    let ConfirmationOutcome::Confirmed(confirmed) = repository
-        .confirm_run(
-            scope,
-            run.run_uid,
-            &run.active_plan_hash,
-            approved_budget.clone(),
-        )
-        .await?
-    else {
-        anyhow::bail!("wake handoff confirmation did not apply");
-    };
-    let queued_at = confirmed
-        .queued_at
-        .context("confirmation must persist queued_at")?;
-    let replay: ExecutionMutationResponse = test
-        .client()
-        .post_call(
-            "/Execution/confirm",
-            &ExecutionConfirmRequest {
-                run: ExecutionRunRequest {
-                    tenant_id: session.tenant_id,
-                    contact_id: None,
-                    session_id,
-                    run_uid: run.run_uid,
-                },
-                expected_plan_hash: run.active_plan_hash,
-                approved_budget,
-            },
-        )
-        .await?;
-    assert!(matches!(
-        replay,
-        ExecutionMutationResponse::Replayed { ref run }
-            if run.run_uid == confirmed.run_uid && run.queued_at == Some(queued_at)
-    ));
-
-    let terminal = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let current = repository
-                .load_run(scope, run.run_uid)
-                .await?
-                .context("completed wake handoff run disappeared")?;
-            if current.status.is_terminal() {
-                return Ok::<_, anyhow::Error>(current);
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .context("wake was lost across the handoff checkpoint")??;
-    assert_eq!(terminal.status, ExecutionRunStatus::Completed);
-    assert_eq!(terminal.output, Some(json!({"handoff": "completed"})));
     Ok(())
 }

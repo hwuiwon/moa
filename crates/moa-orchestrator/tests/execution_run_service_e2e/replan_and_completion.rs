@@ -17,10 +17,13 @@ use moa_execution::compiler::{
     CompileExecutionRequest, ValidateAmendmentRequest, compile, validate_amendment,
 };
 use moa_execution::completion::CompletionCheckResult;
-use moa_execution::repository::{ExecutionRepository, ExecutionScope};
+use moa_execution::repository::{
+    ExecutionRepository, ExecutionScope,
+    amendment::{AmendmentProjectionOutcome, AmendmentProjectionRequest},
+};
 use moa_execution::state::{
     ExecutionRunStatus, ExecutionTaskProjection, ExecutionTaskStatus, ExecutionTerminalCause,
-    ExecutionTerminalEvidence,
+    ExecutionTerminalEvidence, ExecutionTerminalReason,
 };
 use moa_execution::wire::{
     ExecutionAmendmentRequest, ExecutionCancelRequest, ExecutionConflictReason,
@@ -50,6 +53,8 @@ const USEFUL_OUTPUT_INSTRUCTION: &str = "USEFUL_REPLAN_OUTPUT_AGENT";
 const USEFUL_OUTPUT_REQUIREMENT: &str = "useful_result";
 const REPAIR_REQUIREMENT: &str = "repair_result";
 const USEFUL_OUTPUT: &str = "preserved-useful-output";
+const FIXTURE_RELEASE_BATCH_SIZE: usize = 1;
+const FIXTURE_EXECUTION_WINDOW: usize = 8;
 
 struct StartedExecution {
     originating_user_sequence_num: u64,
@@ -618,9 +623,9 @@ async fn useful_amendment_preserves_completed_work_service_e2e() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn amendment_retries_after_persisted_epoch_before_wake_ack_service_e2e() -> Result<()> {
+async fn amendment_retries_after_persisted_epoch_before_dispatch_service_e2e() -> Result<()> {
     // Pins: a public amendment interrupted after its revision and wake epoch commit
-    // retries through the joined run wake without applying or resuming the plan twice.
+    // retries through the outbox dispatcher without applying or resuming the plan twice.
     let agent_a = agent_node("agent_a", "AMENDMENT_HANDOFF_AGENT_A");
     let amendment = replacement_amendment(
         1,
@@ -650,7 +655,7 @@ async fn amendment_retries_after_persisted_epoch_before_wake_ack_service_e2e() -
         &fixture,
         &test,
         "amendment-handoff-recovery",
-        "recover a committed amendment before its wake acknowledgement",
+        "recover a committed amendment before its dispatcher handoff",
         None,
         move |_| Ok(useful_replan_contract(agent_a)),
     )
@@ -695,13 +700,13 @@ async fn amendment_retries_after_persisted_epoch_before_wake_ack_service_e2e() -
             .await?;
     assert!(
         !interrupted.is_finished(),
-        "public amendment returned before its joined run wake acknowledgement"
+        "public amendment returned before its dispatcher handoff"
     );
 
     fixture
         .hard_crash_and_restart_orchestrator()
         .await
-        .context("crash in the persisted-amendment/pre-wake acknowledgement window")?;
+        .context("crash in the persisted-amendment/pre-dispatch window")?;
     let recovered = tokio::time::timeout(SERVICE_TIMEOUT, interrupted)
         .await
         .context("amendment request did not retry after orchestrator recovery")???;
@@ -767,15 +772,21 @@ async fn completion_gate_missing_company_service_e2e() -> Result<()> {
         .map(|item| extract_map_key(item, "/ticker"))
         .collect::<Result<Vec<_>, _>>()?;
     let missing_key = extract_map_key(&json!({"ticker": MISSING_COMPANY}), "/ticker")?;
-    let max_in_flight_tasks = ExecutionConfig::default().max_in_flight_tasks;
+    let max_in_flight_tasks = FIXTURE_EXECUTION_WINDOW;
     let fixture = replan_fixture(
         default_script(),
         FixtureCapabilityOptions {
             tools: vec![map_tool(TOOL, "/ticker")],
-            orchestrator_env: vec![(
-                "MOA_EXECUTION_MAX_IN_FLIGHT_TASKS".to_string(),
-                max_in_flight_tasks.to_string(),
-            )],
+            orchestrator_env: vec![
+                (
+                    "MOA_EXECUTION_MAX_IN_FLIGHT_TASKS".to_string(),
+                    max_in_flight_tasks.to_string(),
+                ),
+                (
+                    "MOA_EXECUTION_DISPATCH_BATCH_SIZE".to_string(),
+                    max_in_flight_tasks.to_string(),
+                ),
+            ],
         },
     )
     .await?;
@@ -895,15 +906,21 @@ async fn run_silent_incomplete_universe(universe_size: usize, tool_name: &str) -
         .map(|item| extract_map_key(item, "/ticker"))
         .collect::<Result<Vec<_>, _>>()?;
     let missing_keys = expected_keys[returned_count..].to_vec();
-    let max_in_flight_tasks = ExecutionConfig::default().max_in_flight_tasks;
+    let max_in_flight_tasks = FIXTURE_EXECUTION_WINDOW;
     let fixture = replan_fixture(
         default_script(),
         FixtureCapabilityOptions {
             tools: vec![map_tool(tool_name, "/ticker")],
-            orchestrator_env: vec![(
-                "MOA_EXECUTION_MAX_IN_FLIGHT_TASKS".to_string(),
-                max_in_flight_tasks.to_string(),
-            )],
+            orchestrator_env: vec![
+                (
+                    "MOA_EXECUTION_MAX_IN_FLIGHT_TASKS".to_string(),
+                    max_in_flight_tasks.to_string(),
+                ),
+                (
+                    "MOA_EXECUTION_DISPATCH_BATCH_SIZE".to_string(),
+                    max_in_flight_tasks.to_string(),
+                ),
+            ],
         },
     )
     .await?;
@@ -993,7 +1010,7 @@ async fn release_fixture_calls_in_window(
     }
     let mut released = 0;
     while released < total {
-        let batch_size = max_in_flight_tasks.min(total - released);
+        let batch_size = FIXTURE_RELEASE_BATCH_SIZE.min(total - released);
         controller
             .wait_for_calls(released + batch_size, SERVICE_TIMEOUT)
             .await?;
@@ -1096,8 +1113,21 @@ async fn completion_gate_missing_citation_service_e2e() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
 async fn completion_gate_missing_deliverable_service_e2e() -> Result<()> {
-    // Pins: useful terminal output cannot hide a skipped required node or missing report pointer.
-    let fixture = replan_fixture(default_script(), FixtureCapabilityOptions::default()).await?;
+    // Pins: every declared completion check passing is not enough to complete a run. The
+    // required node runs and passes, the terminal output validates against both declared
+    // schemas, and the run must still end Partial because the goal's `report` deliverable
+    // has no value at its declared output pointer.
+    let fixture = replan_fixture(
+        replan_script_with_text_agents(
+            &[],
+            &[(
+                "BUILD_PARTIAL_REPORT",
+                serde_json::to_string(&json!({"body": "drafted"}))?,
+            )],
+        )?,
+        FixtureCapabilityOptions::default(),
+    )
+    .await?;
     let test = fixture.isolated().await;
     let started = start_compiled_run(
         &fixture,
@@ -1110,15 +1140,10 @@ async fn completion_gate_missing_deliverable_service_e2e() -> Result<()> {
     .await?;
 
     let terminal = await_execution_terminal(test.client(), &started.run).await?;
-    assert_completion_partial(&terminal, 1, 2, 1);
+    assert_completion_partial(&terminal, 2, 2, 2);
     assert_eq!(
         terminal.output,
         Some(json!({"summary": "useful but incomplete"}))
-    );
-    assert!(
-        terminal
-            .gaps
-            .contains(&"completion check deliverable_report failed".to_string())
     );
     assert!(
         terminal
@@ -1127,11 +1152,12 @@ async fn completion_gate_missing_deliverable_service_e2e() -> Result<()> {
     );
     let evidence = synthesis_evidence(test.client(), &started).await?;
     let check = completion_result(&evidence, "deliverable_report")?;
-    assert!(!check.passed);
-    assert_eq!(
-        check.evidence,
-        json!({"incomplete_node_ids": ["report_builder"]})
+    assert!(
+        check.passed,
+        "the required node completed, so its check must pass and the deliverable must be \
+         the only thing standing between this run and completion"
     );
+    assert_eq!(check.evidence, json!({"incomplete_node_ids": []}));
     assert_execution_eval_case(
         &fixture,
         test.client(),
@@ -1142,9 +1168,6 @@ async fn completion_gate_missing_deliverable_service_e2e() -> Result<()> {
             ExecutionInvariantSpec::MustNotComplete,
             ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Partial],
-            },
-            ExecutionInvariantSpec::CompletionCheckFailed {
-                check_id: "deliverable_report".to_string(),
             },
             ExecutionInvariantSpec::TerminalGapContains {
                 text: "deliverable report is missing".to_string(),
@@ -1160,90 +1183,84 @@ async fn completion_gate_missing_deliverable_service_e2e() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn execution_eval_declared_contradiction_check_prevents_completion_service_e2e() -> Result<()>
-{
-    // Pins: contradiction is enforced only because this goal declares a named conflict verifier;
-    // two useful but opposing source outputs cannot be reported as complete when it is skipped.
-    let fixture = replan_fixture(
-        replan_script_with_text_agents(
-            &[],
-            &[
-                (
-                    "CONTRADICTION_SOURCE_A",
-                    serde_json::to_string(&json!({"position": "raise"}))?,
-                ),
-                (
-                    "CONTRADICTION_SOURCE_B",
-                    serde_json::to_string(&json!({"position": "cut"}))?,
-                ),
-            ],
-        )?,
-        FixtureCapabilityOptions::default(),
-    )
-    .await?;
+async fn declared_contradiction_contract_is_rejected_against_the_service_catalog_service_e2e()
+-> Result<()> {
+    // Pins: this goal declares `conflict_verifier` as a required node while the plan makes it
+    // conditional, so a false condition would skip the very node completion requires. That is
+    // now refused at compile time, against the catalog, authorization envelope, and budget the
+    // running service actually issues — not merely against a hand-built offline fixture.
+    //
+    // This scenario used to assert the runtime behavior instead: the verifier was skipped, the
+    // check counted it as failed, and the run ended Partial while both source outputs survived.
+    // That end state is unreachable without a skip. Every non-output node must be an ancestor
+    // of the output node (`validate_terminal_output`), and any node that ends neither
+    // `completed` nor `skipped` cancels its descendants, so a plan cannot both leave a
+    // required node unpassed and still emit terminal output. Rejecting the contract at compile
+    // time removes the state rather than reporting it late, which is the stronger contract.
+    let fixture = replan_fixture(default_script(), FixtureCapabilityOptions::default()).await?;
     let test = fixture.isolated().await;
-    let started = start_compiled_run(
-        &fixture,
-        &test,
-        "declared-contradiction-check",
-        "compare two sources and explicitly resolve any contradiction",
-        None,
-        |_| Ok(declared_contradiction_contract()),
-    )
-    .await?;
+    let objective = "compare two sources and explicitly resolve any contradiction";
+    let session_id = test.create_session("declared-contradiction-check").await?;
+    let session = test.client().get_session(session_id).await?;
+    let originating_user_sequence_num = test
+        .client()
+        .append_event(
+            session_id,
+            Event::UserMessage {
+                text: objective.to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await?;
+    let planning: ExecutionPlanningContextResponse = test
+        .client()
+        .post_call(
+            "/Execution/planning_context",
+            &ExecutionPlanningContextRequest {
+                tenant_id: session.tenant_id,
+                contact_id: None,
+                session_id,
+                originating_user_sequence_num,
+                deadline_at: chrono::Utc::now() + chrono::TimeDelta::days(1),
+                requested_template: None,
+            },
+        )
+        .await?;
 
-    let terminal = await_execution_terminal(test.client(), &started.run).await?;
-    assert_completion_partial(&terminal, 3, 4, 3);
-    assert_eq!(
-        terminal.output,
-        Some(json!({"summary": "sources disagree; conflict remains unresolved"}))
-    );
+    let (mut goal, plan) = declared_contradiction_contract();
+    goal.objective = objective.to_string();
+    let outcome = compile(CompileExecutionRequest {
+        goal,
+        plan,
+        run_input: run_input_for_objective(objective),
+        catalog: planning.snapshot.catalog.clone(),
+        authorization: planning.snapshot.authorization.clone(),
+        approved_budget: planning.snapshot.budget.clone(),
+        config: ExecutionConfig::default(),
+        now: moa_test_support::fixtures::pg_now(),
+    });
+
     assert!(
-        terminal
-            .gaps
-            .contains(&"completion check declared_conflict_check failed".to_string())
+        outcome.compiled.is_none(),
+        "a plan whose required node can be skipped must not compile"
     );
-    let tasks = list_execution_tasks(test.client(), started.run.clone()).await?;
-    assert_eq!(
-        task_by_node(&tasks.tasks, "source_a")?.status,
-        ExecutionTaskStatus::Completed
+    let issue = outcome
+        .report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "conditional_required_node")
+        .with_context(|| {
+            format!(
+                "expected a conditional_required_node rejection, got {:?}",
+                outcome.report.issues
+            )
+        })?;
+    assert_eq!(issue.path, "plan.nodes[2].when");
+    assert!(
+        issue.message.contains("declared_conflict_check"),
+        "the rejection must name the completion check that made the node required: {}",
+        issue.message
     );
-    assert_eq!(
-        task_by_node(&tasks.tasks, "source_b")?.status,
-        ExecutionTaskStatus::Completed
-    );
-    assert_eq!(
-        tasks
-            .tasks
-            .iter()
-            .filter(|task| task.node_id == "conflict_verifier")
-            .count(),
-        0,
-        "a false condition must not materialize the declared verifier"
-    );
-    assert_execution_eval_case(
-        &fixture,
-        test.client(),
-        &started.run,
-        None,
-        "declared-contradiction-check-prevents-completion",
-        &[
-            ExecutionInvariantSpec::MustNotComplete,
-            ExecutionInvariantSpec::TerminalStatusIn {
-                statuses: vec![ExecutionRunStatus::Partial],
-            },
-            ExecutionInvariantSpec::CompletionCheckFailed {
-                check_id: "declared_conflict_check".to_string(),
-            },
-            ExecutionInvariantSpec::TerminalGapContains {
-                text: "completion check declared_conflict_check failed".to_string(),
-            },
-            ExecutionInvariantSpec::BudgetWithinApproved,
-            ExecutionInvariantSpec::ProgressMatchesTasks,
-            ExecutionInvariantSpec::NoRawTaskOutputEvents,
-        ],
-    )
-    .await?;
     Ok(())
 }
 
@@ -1361,14 +1378,6 @@ async fn execution_eval_injected_tool_instruction_cannot_escape_envelope_service
             requirement_count: 1,
         })
     );
-    assert!(
-        terminal
-            .gaps
-            .iter()
-            .any(|gap| gap.contains("agent emitted an undeclared capability")),
-        "terminal evidence omitted the envelope rejection: {:?}",
-        terminal.gaps
-    );
     assert_eq!(
         controller
             .calls()
@@ -1395,16 +1404,24 @@ async fn execution_eval_injected_tool_instruction_cannot_escape_envelope_service
         1,
         "output must not materialize after rejection"
     );
-    assert!(matches!(
-        tasks.tasks[0]
-            .outcome
-            .as_ref()
-            .map(|outcome| &outcome.result),
-        Some(moa_artifacts::execution_plan::ExecutionTaskResult::Failed {
-            class: moa_artifacts::execution_plan::ExecutionFailureClass::Terminal,
-            ..
-        })
-    ));
+    let expected_failure = format!(
+        "agent emitted undeclared capability `{}`",
+        moa_hands::mcp_tool_reference(FIXTURE_MCP_SERVER_NAME, FORBIDDEN_TOOL)
+    );
+    match tasks.tasks[0]
+        .outcome
+        .as_ref()
+        .map(|outcome| &outcome.result)
+    {
+        Some(moa_artifacts::execution_plan::ExecutionTaskResult::Failed { class, message }) => {
+            assert_eq!(
+                class,
+                &moa_artifacts::execution_plan::ExecutionFailureClass::Terminal
+            );
+            assert_eq!(message, &expected_failure);
+        }
+        result => bail!("undeclared capability did not persist its typed failure: {result:?}"),
+    }
     assert_execution_eval_case(
         &fixture,
         test.client(),
@@ -1415,9 +1432,6 @@ async fn execution_eval_injected_tool_instruction_cannot_escape_envelope_service
             ExecutionInvariantSpec::MustNotComplete,
             ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Failed],
-            },
-            ExecutionInvariantSpec::TerminalGapContains {
-                text: "agent emitted an undeclared capability".to_string(),
             },
             ExecutionInvariantSpec::BudgetWithinApproved,
             ExecutionInvariantSpec::ProgressMatchesTasks,
@@ -1472,11 +1486,11 @@ async fn execution_eval_amendment_cannot_broaden_authorization_service_e2e() -> 
     let scope = ExecutionScope::Tenant {
         tenant_id: started.run.tenant_id,
     };
-    let snapshot = repository
-        .load_scheduling_snapshot(scope, started.run.run_uid)
+    let persisted_run = repository
+        .load_run(scope, started.run.run_uid)
         .await?
-        .context("load authorization-escalation scheduling snapshot")?;
-    let forbidden_reference = snapshot
+        .context("load authorization-escalation run")?;
+    let forbidden_reference = persisted_run
         .catalog
         .capabilities
         .iter()
@@ -1486,8 +1500,8 @@ async fn execution_eval_amendment_cannot_broaden_authorization_service_e2e() -> 
         })
         .map(|capability| capability.reference.clone())
         .context("fixture catalog omitted forbidden amendment capability")?;
-    let completed_before = snapshot
-        .projection
+    let tasks_before = list_execution_tasks(test.client(), started.run.clone()).await?;
+    let completed_before = tasks_before
         .tasks
         .iter()
         .find(|task| task.node_id == USEFUL_OUTPUT_NODE)
@@ -1508,16 +1522,31 @@ async fn execution_eval_amendment_cannot_broaden_authorization_service_e2e() -> 
         replacement,
         "attempt to broaden active-plan capability authorization",
     );
+    let config = ExecutionConfig::default();
+    let AmendmentProjectionOutcome::Ready(snapshot) = repository
+        .load_amendment_projection_for_session(
+            scope,
+            &config,
+            AmendmentProjectionRequest {
+                run_uid: started.run.run_uid,
+                session_id: started.run.session_id,
+                expected_plan_revision: amendment.base_plan_revision,
+            },
+        )
+        .await?
+    else {
+        bail!("authorization-escalation projection was not ready")
+    };
     let remaining_budget = snapshot.budget_ledger.remaining_limit()?;
     let validated = validate_amendment(ValidateAmendmentRequest {
-        goal: snapshot.run.goal,
-        active_plan: snapshot.run.active_plan,
+        goal: snapshot.run.goal.clone(),
+        active_plan: snapshot.run.active_plan.clone(),
         amendment: amendment.clone(),
-        projection: snapshot.projection,
-        catalog: snapshot.catalog,
-        authorization: snapshot.authorization,
+        projection: snapshot.projection.clone(),
+        catalog: snapshot.run.catalog.clone(),
+        authorization: snapshot.run.authorization.clone(),
         remaining_budget,
-        config: ExecutionConfig::default(),
+        config,
         now: moa_test_support::fixtures::pg_now(),
     });
     assert!(validated.plan.is_none());
@@ -1566,20 +1595,36 @@ async fn execution_eval_amendment_cannot_broaden_authorization_service_e2e() -> 
     let ExecutionMutationResponse::Applied { run: fenced } = cancelled else {
         bail!("cancellation did not install a terminal fence: {cancelled:?}");
     };
-    assert_eq!(fenced.status, ExecutionRunStatus::WaitingReplan);
+    assert_eq!(fenced.status, ExecutionRunStatus::Cancelled);
+    assert_eq!(
+        fenced.terminal_reason,
+        Some(ExecutionTerminalReason::Cancelled)
+    );
+    let cancellation_evidence = ExecutionTerminalEvidence {
+        cause: ExecutionTerminalCause::Cancellation,
+        satisfied_requirement_count: 1,
+        requirement_count: 2,
+    };
+    assert_eq!(
+        fenced.terminal_evidence.as_ref(),
+        Some(&cancellation_evidence)
+    );
+    assert!(fenced.completed_at.is_some());
     let fenced_record = repository
         .load_run(scope, started.run.run_uid)
         .await?
         .context("cancelled execution disappeared after terminal fencing")?;
-    let pending = fenced_record
-        .pending_terminal
-        .as_ref()
-        .context("applied cancellation omitted its pending terminal intent")?;
-    assert_eq!(pending.status, ExecutionRunStatus::Cancelled);
+    assert_eq!(fenced_record.status, ExecutionRunStatus::Cancelled);
+    assert!(fenced_record.pending_terminal.is_none());
     assert_eq!(
-        pending.terminal_evidence.cause,
-        ExecutionTerminalCause::Cancellation
+        fenced_record.terminal_reason,
+        Some(ExecutionTerminalReason::Cancelled)
     );
+    assert_eq!(
+        fenced_record.terminal_evidence.as_ref(),
+        Some(&cancellation_evidence)
+    );
+    assert!(fenced_record.completed_at.is_some());
     let terminal = await_execution_terminal(test.client(), &started.run).await?;
     assert_eq!(terminal.run.status, ExecutionRunStatus::Cancelled);
     assert_execution_eval_case(
@@ -1652,6 +1697,7 @@ where
                 contact_id: None,
                 session_id,
                 originating_user_sequence_num,
+                deadline_at: chrono::Utc::now() + chrono::TimeDelta::days(1),
                 requested_template: None,
             },
         )
@@ -1708,12 +1754,8 @@ where
     })
 }
 
-fn run_input_for_objective(objective: &str) -> Value {
-    if objective == "produce the required report deliverable" {
-        json!({"build_report": false})
-    } else {
-        json!({})
-    }
+fn run_input_for_objective(_objective: &str) -> Value {
+    json!({})
 }
 
 async fn await_waiting_replan(
@@ -1829,20 +1871,31 @@ async fn assert_valid_amendment(
             contact_id,
         },
     );
-    let snapshot = repository
-        .load_scheduling_snapshot(scope, started.run.run_uid)
+    let config = moa_config::ExecutionConfig::default();
+    let AmendmentProjectionOutcome::Ready(snapshot) = repository
+        .load_amendment_projection_for_session(
+            scope,
+            &config,
+            AmendmentProjectionRequest {
+                run_uid: started.run.run_uid,
+                session_id: started.run.session_id,
+                expected_plan_revision: amendment.base_plan_revision,
+            },
+        )
         .await?
-        .context("load replan validation snapshot")?;
+    else {
+        bail!("replan validation projection was not ready")
+    };
     let remaining_budget = snapshot.budget_ledger.remaining_limit()?;
     let validated = validate_amendment(ValidateAmendmentRequest {
-        goal: snapshot.run.goal,
-        active_plan: snapshot.run.active_plan,
+        goal: snapshot.run.goal.clone(),
+        active_plan: snapshot.run.active_plan.clone(),
         amendment: amendment.clone(),
-        projection: snapshot.projection,
-        catalog: snapshot.catalog,
-        authorization: snapshot.authorization,
+        projection: snapshot.projection.clone(),
+        catalog: snapshot.run.catalog.clone(),
+        authorization: snapshot.run.authorization.clone(),
         remaining_budget,
-        config: moa_config::ExecutionConfig::default(),
+        config,
         now: moa_test_support::fixtures::pg_now(),
     });
     if validated.plan.is_none() {
@@ -2333,30 +2386,25 @@ fn missing_deliverable_contract() -> (ExecutionGoalContract, ExecutionPlanDefini
                 output_schema_check("summary_schema", "summary"),
             ],
         },
+        // The deliverable is unsatisfiable by construction rather than by accident: the
+        // plan's terminal `output_schema` is `report_schema()`, which forbids additional
+        // properties, so no terminal output this plan can legally emit carries a value at
+        // the deliverable's `/report` pointer. Every node completes, every check passes,
+        // and the deliverable is the sole reason the run must not report completion.
         ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-            input_schema: json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["build_report"],
-                "properties": {"build_report": {"type": "boolean"}}
-            }),
+            input_schema: empty_input_schema(),
             output_schema: output_schema.clone(),
             nodes: vec![
                 ExecutionNode {
                     id: "report_builder".to_string(),
                     requirement_ids: vec!["report_body".to_string()],
                     depends_on: Vec::new(),
-                    when: Some(moa_artifacts::execution_plan::ExecutionCondition::Equals {
-                        reference: ExecutionReference {
-                            path: "$.input.build_report".to_string(),
-                        },
-                        value: json!(true),
-                    }),
+                    when: None,
                     input: json!({}),
                     output_schema: json!({"type": "object"}),
                     operation: ExecutionOperation::Agent {
-                        instructions: "BUILD_REPORT_ONLY_WHEN_ENABLED".to_string(),
+                        instructions: "BUILD_PARTIAL_REPORT".to_string(),
                         skill_refs: Vec::new(),
                         capability_refs: Vec::new(),
                         max_turns: 1,

@@ -1,8 +1,10 @@
 //! Durable Restate facade over the configured tool router.
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
+use moa_config::ExecutionConfig;
 use moa_connectors::executor::{
     ConnectorInvocationCompletionService, ConnectorInvocationCompletionTicket,
     SecuredConnectorOutputMetadata,
@@ -20,13 +22,21 @@ use moa_core::{
     types::events_stream::EventRecord,
     types::hands::SandboxFile,
     types::identifiers::{
-        ExecutionRunScopeId, ExecutionTaskScopeId, SessionId, TenantId, ToolCallId,
+        ExecutionCompensationScopeId, ExecutionRunScopeId, ExecutionTaskScopeId, SessionId,
+        TenantId, ToolCallId,
     },
+    types::sandbox_workspace::ExecutionHandReleaseOwner,
+    types::sandbox_workspace::ExecutionHandReleaseReceipt,
     types::sandbox_workspace::SandboxWorkspaceScope,
     types::security::ToolCapabilityId,
     types::session::SessionMeta,
+    types::tools::AsyncToolJob,
+    types::tools::AsyncToolJobCallbackOutcome,
+    types::tools::AsyncToolJobCancelOutcome,
+    types::tools::ExternalJobStartContext,
     types::tools::IdempotencyClass,
     types::tools::SecuredToolOutput,
+    types::tools::ToolAsyncMode,
     types::tools::ToolCallRequest,
     types::tools::ToolDefinition,
     types::tools::ToolOutput,
@@ -35,12 +45,32 @@ use moa_core::{
     types::tools::TrustedSandboxFileManifestRef,
 };
 use moa_execution::repository::{
-    ExecutionEffectAdmissionOutcome, ExecutionEffectOwner, ExecutionRepository, ExecutionScope,
+    ExecutionEffectAdmissionOutcome, ExecutionEffectOwner, ExecutionEffectPhase,
+    ExecutionRepository, ExecutionScope,
+    compensation::{CompensationAttemptExternalOutcome, CompensationAttemptWriteOutcome},
+    external_job::{
+        ExecutionExternalJobBinding, ExecutionExternalJobCallback,
+        ExecutionExternalJobCallbackUpdate, ExecutionExternalJobCancellation,
+        ExecutionExternalJobCancellationOutcome, ExecutionExternalJobIntentReleaseOutcome,
+        ExecutionExternalJobOwner, ExecutionExternalJobStartRecoveryAdoptionOutcome,
+        ExecutionExternalJobState, NewExecutionExternalJobIntent,
+    },
+    trigger::ExecutionExternalStartRecoveryRearmOutcome,
 };
-use moa_execution::wire::ExecutionToolDispatchRejection;
+use moa_execution::wire::{
+    ExecutionCompensationAttemptCancelRequest, ExecutionCompensationReleaseIntent,
+    ExecutionExternalJobCancelRequest, ExecutionExternalJobCancelResponse,
+    ExecutionExternalJobCancelResponseOutcome, ExecutionExternalJobReconcileRequest,
+    ExecutionExternalJobReconcileResponse, ExecutionExternalJobReconcileResponseOutcome,
+    ExecutionExternalJobStartRecoveryOwner, ExecutionExternalJobStartRecoveryRequest,
+    ExecutionExternalJobStartRecoveryResponse, ExecutionExternalJobStartRecoveryResponseOutcome,
+    ExecutionToolDispatchRejection,
+};
 use moa_hands::{
-    DeferredWorkspaceToolOutput, JournaledWorkspaceCommit, PendingConnectorToolOutput,
-    ToolCallScope, ToolCatalogPin, ToolCatalogSnapshot, ToolExecution, ToolRouter,
+    DeferredWorkspaceToolOutput, ExecutionHandReleaseRequest, JournaledWorkspaceCommit,
+    PendingConnectorToolOutput, SessionHandReleasePageOutcome, ToolCallScope, ToolCatalogPin,
+    ToolCatalogSnapshot, ToolExecution, ToolRouter, WorkerHandReleaseFence,
+    WorkerHandReleaseRequest,
 };
 use moa_security::{
     OutputClassification, ToolInputCanaryScreening, classify_tool_output,
@@ -51,17 +81,422 @@ use moa_wire::tools::{ToolDescriptor, tool_descriptor};
 use restate_sdk::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
+use crate::services::execution_dispatcher::{DispatchExecutionsRequest, ExecutionDispatcherClient};
 use crate::services::sandbox_workspaces::SandboxWorkspaceManagement;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::turn::util::{blocked_canary_message, blocked_canary_tool_output};
 use crate::workflows::errors::{
-    authz_error_to_handler_error, moa_error_to_handler_error, sqlx_error_to_handler_error,
+    authz_error_to_handler_error, execution_error_to_handler_error, moa_error_to_handler_error,
+    sqlx_error_to_handler_error,
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::connector_catalog::ScopedConnectorCatalogProvider;
+
+/// Transient authentication material presented by a provider callback.
+///
+/// This value must be consumed before entering a durable Restate handler so raw
+/// signatures and headers are never journaled. Adapters compare it with the
+/// persisted callback-authentication reference without exposing the referenced
+/// secret to execution workflows.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionExternalJobCallbackAuthentication {
+    /// Canonical lower-case provider headers selected by the ingress boundary.
+    pub headers: BTreeMap<String, String>,
+    /// SHA-256 digest of the exact callback body.
+    pub body_sha256: [u8; 32],
+}
+
+/// Bounded provider callback fields parsed only after transient authentication succeeds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecutionExternalJobAdapterCallback {
+    /// Provider-issued job identity asserted by the callback.
+    pub provider_job_id: String,
+    /// Stable provider event identity used for durable deduplication.
+    pub provider_event_id: String,
+    /// Typed progress or terminal observation.
+    pub outcome: AsyncToolJobCallbackOutcome,
+}
+
+/// Exact admitted call passed to an asynchronous provider after durable intent reservation.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionExternalJobStartRequest {
+    /// Reserved identity and provider idempotency key that must be used on the network call.
+    pub context: ExternalJobStartContext,
+    /// Fully governed tool request admitted against the pinned catalog.
+    pub call: ToolCallRequest,
+}
+
+/// Bounded result of one declared asynchronous-capable provider start.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionExternalJobStartOutcome {
+    /// The provider completed synchronously and owns no durable job.
+    Completed(Box<SecuredToolOutput>),
+    /// The provider committed asynchronous work under the reserved idempotency key.
+    ExternalJob(AsyncToolJob),
+}
+
+/// Bounded recovery observation for an unbound start intent after runtime loss.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionExternalJobStartRecovery {
+    /// Provider evidence proves that no start was committed.
+    NotStarted,
+    /// The reserved idempotency key resolves to one committed provider job.
+    Started(AsyncToolJob),
+    /// Provider evidence cannot prove whether the start committed.
+    Unknown {
+        /// Stable operator-visible reconciliation evidence.
+        error: serde_json::Value,
+    },
+}
+
+/// Provider-specific bounded operations for durable asynchronous tool jobs.
+#[async_trait::async_trait]
+pub trait ExecutionExternalJobAdapter: Send + Sync {
+    /// Stable registry key persisted in every external-job row.
+    fn provider_key(&self) -> &'static str;
+
+    /// Starts one governed asynchronous-capable call using the reserved provider identity.
+    async fn start(
+        &self,
+        request: &ExecutionExternalJobStartRequest,
+    ) -> moa_core::error::Result<ExecutionExternalJobStartOutcome>;
+
+    /// Recovers one reserved start by provider idempotency key without replaying the task.
+    async fn recover_start(
+        &self,
+        context: &ExternalJobStartContext,
+    ) -> moa_core::error::Result<ExecutionExternalJobStartRecovery>;
+
+    /// Authenticates transient callback evidence against a persisted reference.
+    async fn authenticate_callback(
+        &self,
+        callback_auth_reference: &str,
+        authentication: &ExecutionExternalJobCallbackAuthentication,
+        body: &[u8],
+    ) -> moa_core::error::Result<bool>;
+
+    /// Parses one size-bounded raw callback after authentication, before durable persistence.
+    async fn parse_callback(
+        &self,
+        authentication: &ExecutionExternalJobCallbackAuthentication,
+        body: &[u8],
+    ) -> moa_core::error::Result<ExecutionExternalJobAdapterCallback>;
+
+    /// Requests cancellation for one exact provider-job generation.
+    async fn cancel(
+        &self,
+        request: &ExecutionExternalJobCancelRequest,
+    ) -> moa_core::error::Result<AsyncToolJobCancelOutcome>;
+
+    /// Performs one bounded sparse reconciliation observation.
+    async fn reconcile(
+        &self,
+        request: &ExecutionExternalJobReconcileRequest,
+    ) -> moa_core::error::Result<AsyncToolJobCallbackOutcome>;
+}
+
+/// Immutable fail-closed registry of asynchronous provider-job adapters.
+#[derive(Clone, Default)]
+pub struct ExecutionExternalJobAdapterRegistry {
+    adapters: Arc<HashMap<String, Arc<dyn ExecutionExternalJobAdapter>>>,
+}
+
+impl ExecutionExternalJobAdapterRegistry {
+    /// Builds a registry and rejects blank or duplicate provider keys.
+    pub fn new(
+        adapters: impl IntoIterator<Item = Arc<dyn ExecutionExternalJobAdapter>>,
+    ) -> moa_core::error::Result<Self> {
+        let mut keyed = HashMap::new();
+        for adapter in adapters {
+            let provider = adapter.provider_key().trim();
+            if provider.is_empty() {
+                return Err(MoaError::ValidationError(
+                    "external-job adapter provider key must not be blank".to_string(),
+                ));
+            }
+            if keyed.insert(provider.to_string(), adapter).is_some() {
+                return Err(MoaError::ValidationError(format!(
+                    "duplicate external-job adapter provider key `{provider}`"
+                )));
+            }
+        }
+        Ok(Self {
+            adapters: Arc::new(keyed),
+        })
+    }
+
+    /// Returns the exact registered adapter or fails closed for an unknown provider.
+    pub fn require(
+        &self,
+        provider: &str,
+    ) -> moa_core::error::Result<Arc<dyn ExecutionExternalJobAdapter>> {
+        self.adapters.get(provider).cloned().ok_or_else(|| {
+            MoaError::ValidationError(format!(
+                "external-job provider `{provider}` is not registered"
+            ))
+        })
+    }
+
+    /// Returns whether no asynchronous provider adapter is registered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.adapters.is_empty()
+    }
+}
+
+/// Provider key reserved for the deterministic integration-only external-job adapter.
+#[cfg(all(feature = "provider-overrides", feature = "integration"))]
+pub const FIXTURE_EXTERNAL_JOB_PROVIDER: &str = "fixture-external-job";
+
+/// Catalog tool exposed only beside the deterministic integration adapter.
+#[cfg(all(feature = "provider-overrides", feature = "integration"))]
+pub struct FixtureExternalJobTool;
+
+#[cfg(all(feature = "provider-overrides", feature = "integration"))]
+#[async_trait::async_trait]
+impl moa_core::traits::BuiltInTool for FixtureExternalJobTool {
+    fn name(&self) -> &'static str {
+        "fixture_external_job"
+    }
+
+    fn description(&self) -> &'static str {
+        "Starts one deterministic asynchronous fixture job."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"],
+            "additionalProperties": false
+        })
+    }
+
+    fn policy_spec(&self) -> moa_core::types::tools::ToolPolicySpec {
+        moa_core::types::tools::ToolPolicySpec {
+            risk_level: moa_core::types::action_policy::RiskLevel::High,
+            default_effect: moa_core::types::action_policy::ActionPolicyEffect::Allow,
+            action_class: moa_core::types::action_policy::ActionClass::ExternalWrite,
+            input_shape: moa_core::types::tools::ToolInputShape::Json,
+            diff_strategy: moa_core::types::tools::ToolDiffStrategy::None,
+        }
+    }
+
+    fn idempotency_class(&self) -> IdempotencyClass {
+        IdempotencyClass::NonIdempotent
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: self.description().to_string(),
+            schema: self.input_schema(),
+            policy: self.policy_spec(),
+            idempotency_class: self.idempotency_class(),
+            async_mode: ToolAsyncMode::MayReturnExternalJob {
+                provider: FIXTURE_EXTERNAL_JOB_PROVIDER.to_string(),
+            },
+            rollback: None,
+            max_output_tokens: 256,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &moa_core::traits::ToolContext<'_>,
+    ) -> moa_core::error::Result<ToolOutput> {
+        Err(MoaError::ValidationError(
+            "fixture external-job tool bypassed its declared asynchronous adapter".to_string(),
+        ))
+    }
+}
+
+/// Loopback HTTP adapter used by the normal provider-override integration lane.
+///
+/// Production composition never constructs this type. It exists so spawned orchestrator E2E
+/// processes exercise the real reserve, provider-start, recovery, callback, cancellation, and
+/// reconciliation boundaries against a restart-stable parent-process fixture.
+#[cfg(all(feature = "provider-overrides", feature = "integration"))]
+#[derive(Clone)]
+pub struct FixtureHttpExecutionExternalJobAdapter {
+    client: reqwest::Client,
+    base_url: reqwest::Url,
+}
+
+#[cfg(all(feature = "provider-overrides", feature = "integration"))]
+impl FixtureHttpExecutionExternalJobAdapter {
+    /// Builds the adapter for one loopback fixture endpoint.
+    pub fn new(base_url: &str) -> moa_core::error::Result<Self> {
+        let mut base_url = reqwest::Url::parse(base_url).map_err(|error| {
+            MoaError::ConfigError(format!("parse external-job fixture URL: {error}"))
+        })?;
+        if !base_url.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }) {
+            return Err(MoaError::ConfigError(
+                "external-job fixture adapter requires a loopback URL".to_string(),
+            ));
+        }
+        if !base_url.path().ends_with('/') {
+            base_url.set_path(&format!("{}/", base_url.path()));
+        }
+        Ok(Self {
+            client: reqwest::Client::new(),
+            base_url,
+        })
+    }
+
+    async fn post_json<Request, Response>(
+        &self,
+        route: &str,
+        request: &Request,
+    ) -> moa_core::error::Result<Response>
+    where
+        Request: serde::Serialize + Sync,
+        Response: serde::de::DeserializeOwned,
+    {
+        let url = self.base_url.join(route).map_err(|error| {
+            MoaError::ConfigError(format!("join external-job fixture route: {error}"))
+        })?;
+        self.client
+            .post(url)
+            .json(request)
+            .send()
+            .await
+            .map_err(|error| MoaError::ProviderTransport(error.to_string()))?
+            .error_for_status()
+            .map_err(|error| MoaError::ProviderError(error.to_string()))?
+            .json()
+            .await
+            .map_err(|error| MoaError::SerializationError(error.to_string()))
+    }
+}
+
+#[cfg(all(feature = "provider-overrides", feature = "integration"))]
+async fn fixture_external_job_after_bind_barrier(
+    ctx: &Context<'_>,
+    provider: &str,
+    context: &ExternalJobStartContext,
+) -> Result<(), HandlerError> {
+    if provider != FIXTURE_EXTERNAL_JOB_PROVIDER {
+        return Ok(());
+    }
+    let base_url = std::env::var("MOA_FIXTURE_EXTERNAL_JOB_ADAPTER_URL").map_err(|_| {
+        TerminalError::new("fixture external-job adapter URL disappeared after runtime startup")
+    })?;
+    let adapter = FixtureHttpExecutionExternalJobAdapter::new(&base_url)
+        .map_err(moa_error_to_handler_error)?;
+    let context = context.clone();
+    let external_job_uid = context.external_job_uid;
+    ctx.run(|| async move {
+        adapter
+            .post_json::<_, ()>("after_bind", &context)
+            .await
+            .map(Json::from)
+            .map_err(moa_error_to_handler_error)
+    })
+    .name(format!(
+        "fixture_external_job_after_bind:{external_job_uid}"
+    ))
+    .retry_policy(RunRetryPolicy::new().max_attempts(1))
+    .await?;
+    Ok(())
+}
+
+#[cfg(not(all(feature = "provider-overrides", feature = "integration")))]
+async fn fixture_external_job_after_bind_barrier(
+    _ctx: &Context<'_>,
+    _provider: &str,
+    _context: &ExternalJobStartContext,
+) -> Result<(), HandlerError> {
+    Ok(())
+}
+
+#[cfg(all(feature = "provider-overrides", feature = "integration"))]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FixtureExternalJobCallbackEnvelope {
+    provider_job_id: String,
+    provider_event_id: String,
+    outcome: AsyncToolJobCallbackOutcome,
+}
+
+#[cfg(all(feature = "provider-overrides", feature = "integration"))]
+#[async_trait::async_trait]
+impl ExecutionExternalJobAdapter for FixtureHttpExecutionExternalJobAdapter {
+    fn provider_key(&self) -> &'static str {
+        FIXTURE_EXTERNAL_JOB_PROVIDER
+    }
+
+    async fn start(
+        &self,
+        request: &ExecutionExternalJobStartRequest,
+    ) -> moa_core::error::Result<ExecutionExternalJobStartOutcome> {
+        self.post_json("start", request).await
+    }
+
+    async fn recover_start(
+        &self,
+        context: &ExternalJobStartContext,
+    ) -> moa_core::error::Result<ExecutionExternalJobStartRecovery> {
+        self.post_json("recover_start", context).await
+    }
+
+    async fn authenticate_callback(
+        &self,
+        callback_auth_reference: &str,
+        authentication: &ExecutionExternalJobCallbackAuthentication,
+        body: &[u8],
+    ) -> moa_core::error::Result<bool> {
+        let presented = authentication
+            .headers
+            .get("authorization")
+            .map(String::as_str);
+        let digest: [u8; 32] = Sha256::digest(body).into();
+        Ok(callback_auth_reference == "fixture-callback-token"
+            && presented == Some("Bearer fixture-callback-token")
+            && authentication.body_sha256 == digest)
+    }
+
+    async fn parse_callback(
+        &self,
+        _authentication: &ExecutionExternalJobCallbackAuthentication,
+        body: &[u8],
+    ) -> moa_core::error::Result<ExecutionExternalJobAdapterCallback> {
+        let envelope: FixtureExternalJobCallbackEnvelope = serde_json::from_slice(body)
+            .map_err(|error| MoaError::SerializationError(error.to_string()))?;
+        Ok(ExecutionExternalJobAdapterCallback {
+            provider_job_id: envelope.provider_job_id,
+            provider_event_id: envelope.provider_event_id,
+            outcome: envelope.outcome,
+        })
+    }
+
+    async fn cancel(
+        &self,
+        request: &ExecutionExternalJobCancelRequest,
+    ) -> moa_core::error::Result<AsyncToolJobCancelOutcome> {
+        self.post_json("cancel", request).await
+    }
+
+    async fn reconcile(
+        &self,
+        request: &ExecutionExternalJobReconcileRequest,
+    ) -> moa_core::error::Result<AsyncToolJobCallbackOutcome> {
+        self.post_json("reconcile", request).await
+    }
+}
 
 /// Restate service surface for durable tool execution.
 #[restate_sdk::service]
@@ -75,6 +510,21 @@ pub trait ToolExecutor {
     async fn execute_execution(
         request: Json<ExecutionToolCallRequest>,
     ) -> Result<Json<ExecutionToolCallOutcome>, HandlerError>;
+
+    /// Cancels one exact asynchronous provider-job generation.
+    async fn cancel_external_job(
+        request: Json<ExecutionExternalJobCancelRequest>,
+    ) -> Result<Json<ExecutionExternalJobCancelResponse>, HandlerError>;
+
+    /// Reconciles one exact asynchronous provider-job generation.
+    async fn reconcile_external_job(
+        request: Json<ExecutionExternalJobReconcileRequest>,
+    ) -> Result<Json<ExecutionExternalJobReconcileResponse>, HandlerError>;
+
+    /// Recovers one expired pre-provider start intent without replaying its task attempt.
+    async fn recover_external_job_start(
+        request: Json<ExecutionExternalJobStartRecoveryRequest>,
+    ) -> Result<Json<ExecutionExternalJobStartRecoveryResponse>, HandlerError>;
 
     /// Lists tools in one authenticated session and agent catalog scope.
     async fn list_tools(
@@ -91,10 +541,25 @@ pub trait ToolExecutor {
         request: Json<ReleaseWorkerHandsRequest>,
     ) -> Result<(), HandlerError>;
 
+    /// Captures the exact worker hand generation allowed to enter a human-input wait.
+    async fn capture_worker_hand_release_fence(
+        request: Json<CaptureWorkerHandReleaseFenceRequest>,
+    ) -> Result<Json<Option<WorkerHandReleaseFence>>, HandlerError>;
+
+    /// Checkpoints and releases one exact worker hand before a human-input wait.
+    async fn checkpoint_and_release_worker_hand(
+        request: Json<CheckpointAndReleaseWorkerHandRequest>,
+    ) -> Result<(), HandlerError>;
+
     /// Releases the generation-independent hand scope owned by one execution task.
     async fn release_execution_task_hands(
         request: Json<ReleaseExecutionTaskHandsRequest>,
     ) -> Result<(), HandlerError>;
+
+    /// Releases one exact bounded execution-attempt sandbox before a durable yield.
+    async fn checkpoint_and_release_execution_hands(
+        request: Json<CheckpointAndReleaseExecutionHandsRequest>,
+    ) -> Result<Json<ExecutionHandReleaseReceipt>, HandlerError>;
 
     /// Releases the generation-independent hand scope owned by one compensation.
     async fn release_execution_compensation_hands(
@@ -132,6 +597,19 @@ pub enum ExecutionToolCallOrigin {
     Compensation(ExecutionCompensationOrigin),
 }
 
+/// Exact persisted phase authorized to begin one execution-scoped provider effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionToolCallPhase {
+    /// A currently running bounded attempt is dispatching its own effect.
+    Direct,
+    /// A storage-owned action review is dispatching the one effect it approved.
+    Reviewed {
+        /// Exact action-review identity persisted in the attempt checkpoint.
+        review_uid: uuid::Uuid,
+    },
+}
+
 /// Tool request owned by one persisted execution operation.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -140,6 +618,8 @@ pub struct ExecutionToolCallRequest {
     pub call: ToolCallRequest,
     /// Required typed execution provenance.
     pub origin: ExecutionToolCallOrigin,
+    /// Exact running or reviewed phase admitted by the row-locked repository fence.
+    pub phase: ExecutionToolCallPhase,
 }
 
 /// Typed execution-only result that keeps ambiguous external effects out of errors.
@@ -150,6 +630,13 @@ pub enum ExecutionToolCallOutcome {
     Completed {
         /// Classified tool output journaled by ToolExecutor.
         output: Box<SecuredToolOutput>,
+    },
+    /// The provider committed asynchronous work and returned its durable recovery contract.
+    ExternalJob {
+        /// MOA-owned job identity reserved before provider dispatch.
+        external_job_uid: uuid::Uuid,
+        /// Immutable provider job identity, callback reference, and reconciliation schedule.
+        job: AsyncToolJob,
     },
     /// A non-idempotent external effect may have committed and cannot be resent safely.
     UnknownOutcome {
@@ -174,6 +661,31 @@ pub struct ReleaseWorkerHandsRequest {
     pub worker_id: String,
 }
 
+/// Request to capture the exact live worker hand before registering an input wait.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureWorkerHandReleaseFenceRequest {
+    /// Admitted session metadata owning the worker sandbox.
+    pub session: SessionMeta,
+    /// Worker scope about to enter the durable wait.
+    pub worker_id: String,
+}
+
+/// Request to park the exact captured worker hand after input registration is durable.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointAndReleaseWorkerHandRequest {
+    /// Admitted session metadata owning the worker sandbox.
+    pub session: SessionMeta,
+    /// Worker scope entering the durable wait.
+    pub worker_id: String,
+    /// Exact turn, generation, and request identity that owns the wait.
+    pub input_target: moa_core::types::worker::state::WorkerInputTarget,
+    /// Exact workspace and hand generation captured before registration, or an
+    /// absence proof that forbids releasing a hand created later.
+    pub expected: Option<WorkerHandReleaseFence>,
+}
+
 /// Request to release one terminal or cancelled execution task's scoped hands.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReleaseExecutionTaskHandsRequest {
@@ -185,6 +697,24 @@ pub struct ReleaseExecutionTaskHandsRequest {
     pub run_uid: uuid::Uuid,
     /// Stable task identifier shared by every generation.
     pub task_id: moa_execution::state::ExecutionTaskId,
+}
+
+/// Exact bounded execution sandbox ownership to release before parking.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointAndReleaseExecutionHandsRequest {
+    /// Verified tenant that owns the execution run and lease.
+    pub tenant_id: TenantId,
+    /// Authoritative parent session loaded from the run.
+    pub session_id: SessionId,
+    /// Owning execution run.
+    pub run_uid: uuid::Uuid,
+    /// Exact task or compensation owner and logical generation.
+    pub owner: ExecutionHandReleaseOwner,
+    /// Exact active-attempt generation relinquishing ownership.
+    pub attempt_generation: u64,
+    /// Fresh absolute bound for checkpoint, provider destroy, and receipt verification.
+    pub release_deadline_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Request to release one settled compensation's scoped hands.
@@ -203,11 +733,30 @@ pub struct ReleaseExecutionCompensationHandsRequest {
 
 /// Request to release every hand under a session at terminal teardown.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReleaseSessionHandsRequest {
     /// Verified tenant that owns the session leases.
     pub tenant_id: TenantId,
     /// Session whose hands and durable leases should be reclaimed.
     pub session_id: SessionId,
+    /// Consecutive no-progress continuations used to bound outage retry cadence.
+    pub continuation_attempt: u32,
+}
+
+fn session_release_continuation(
+    outcome: SessionHandReleasePageOutcome,
+    continuation_attempt: u32,
+) -> Option<(u32, Duration)> {
+    match outcome {
+        SessionHandReleasePageOutcome::Complete => None,
+        SessionHandReleasePageOutcome::Progressed => Some((0, Duration::from_millis(100))),
+        SessionHandReleasePageOutcome::Waiting => {
+            let next_attempt = continuation_attempt.saturating_add(1);
+            let exponent = next_attempt.min(8);
+            let delay_ms = 100_u64.saturating_mul(1_u64 << exponent).min(30_000);
+            Some((next_attempt, Duration::from_millis(delay_ms)))
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -244,6 +793,90 @@ enum JournaledExecutionEffectAdmission {
     NotDispatched {
         reason: ExecutionToolDispatchRejection,
     },
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct JournaledExternalJobForCancel {
+    tenant_id: TenantId,
+    job_generation: u64,
+    provider: Option<String>,
+    provider_job_id: Option<String>,
+    idempotency_key: String,
+    cancel_supported: bool,
+    terminal: bool,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum JournaledExternalJobCallbackOutcome {
+    Applied,
+    Duplicate,
+    StaleGeneration,
+    AlreadyTerminal,
+    NotFound,
+}
+
+impl From<moa_execution::repository::external_job::ExecutionExternalJobCallbackOutcome>
+    for JournaledExternalJobCallbackOutcome
+{
+    fn from(
+        outcome: moa_execution::repository::external_job::ExecutionExternalJobCallbackOutcome,
+    ) -> Self {
+        match outcome {
+            moa_execution::repository::external_job::ExecutionExternalJobCallbackOutcome::Applied(
+                _,
+            ) => Self::Applied,
+            moa_execution::repository::external_job::ExecutionExternalJobCallbackOutcome::Duplicate => {
+                Self::Duplicate
+            }
+            moa_execution::repository::external_job::ExecutionExternalJobCallbackOutcome::StaleGeneration => {
+                Self::StaleGeneration
+            }
+            moa_execution::repository::external_job::ExecutionExternalJobCallbackOutcome::AlreadyTerminal => {
+                Self::AlreadyTerminal
+            }
+            moa_execution::repository::external_job::ExecutionExternalJobCallbackOutcome::NotFound => {
+                Self::NotFound
+            }
+        }
+    }
+}
+
+impl From<moa_execution::repository::external_job::ExecutionExternalJobRecord>
+    for JournaledExternalJobForCancel
+{
+    fn from(record: moa_execution::repository::external_job::ExecutionExternalJobRecord) -> Self {
+        Self {
+            tenant_id: record.tenant_id,
+            job_generation: record.job_generation,
+            provider: record.provider,
+            provider_job_id: record.provider_job_id,
+            idempotency_key: record.idempotency_key,
+            cancel_supported: record.cancel_supported,
+            terminal: record.state.is_terminal(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum JournaledExternalJobCancellationOutcome {
+    Applied,
+    StaleGeneration,
+    AlreadyTerminal,
+    NotFound,
+}
+
+impl From<ExecutionExternalJobCancellationOutcome> for JournaledExternalJobCancellationOutcome {
+    fn from(outcome: ExecutionExternalJobCancellationOutcome) -> Self {
+        match outcome {
+            ExecutionExternalJobCancellationOutcome::Applied(_) => Self::Applied,
+            ExecutionExternalJobCancellationOutcome::StaleGeneration => Self::StaleGeneration,
+            ExecutionExternalJobCancellationOutcome::AlreadyTerminal => Self::AlreadyTerminal,
+            ExecutionExternalJobCancellationOutcome::NotFound => Self::NotFound,
+        }
+    }
 }
 
 impl From<ExecutionEffectAdmissionOutcome> for JournaledExecutionEffectAdmission {
@@ -284,6 +917,28 @@ struct SessionAccess {
     events: Arc<dyn SessionEventLookupStore>,
 }
 
+/// Fully validated dependencies for the durable tool-execution boundary.
+pub(crate) struct ToolExecutorDependencies {
+    /// Tenant-scoped tool router.
+    pub(crate) router: Arc<ToolRouter>,
+    /// Connector catalog authority used for every invocation.
+    pub(crate) connector_catalogs: ScopedConnectorCatalogProvider,
+    /// Durable connector completion service.
+    pub(crate) connector_completion: ConnectorInvocationCompletionService,
+    /// Session metadata store.
+    pub(crate) sessions: Arc<dyn SessionStore>,
+    /// Session event lookup store.
+    pub(crate) events: Arc<dyn SessionEventLookupStore>,
+    /// Shared runtime database pool.
+    pub(crate) pool: sqlx::PgPool,
+    /// Sandbox workspace lifecycle service.
+    pub(crate) workspace_management: SandboxWorkspaceManagement,
+    /// Registered asynchronous provider-job adapters.
+    pub(crate) external_job_adapters: ExecutionExternalJobAdapterRegistry,
+    /// Validated execution capacity and recovery policy.
+    pub(crate) execution_config: ExecutionConfig,
+}
+
 /// Concrete Restate service implementation backed by a shared `ToolRouter`.
 #[derive(Clone)]
 pub struct ToolExecutorImpl {
@@ -293,20 +948,25 @@ pub struct ToolExecutorImpl {
     session_access: SessionAccess,
     execution_repository: ExecutionRepository,
     workspace_management: SandboxWorkspaceManagement,
+    external_job_adapters: ExecutionExternalJobAdapterRegistry,
+    execution_config: ExecutionConfig,
 }
 
 impl ToolExecutorImpl {
     /// Creates the fully configured durable tool-execution service.
     #[must_use]
-    pub(crate) fn new(
-        router: Arc<ToolRouter>,
-        connector_catalogs: ScopedConnectorCatalogProvider,
-        connector_completion: ConnectorInvocationCompletionService,
-        sessions: Arc<dyn SessionStore>,
-        events: Arc<dyn SessionEventLookupStore>,
-        pool: sqlx::PgPool,
-        workspace_management: SandboxWorkspaceManagement,
-    ) -> Self {
+    pub(crate) fn new(dependencies: ToolExecutorDependencies) -> Self {
+        let ToolExecutorDependencies {
+            router,
+            connector_catalogs,
+            connector_completion,
+            sessions,
+            events,
+            pool,
+            workspace_management,
+            external_job_adapters,
+            execution_config,
+        } = dependencies;
         Self {
             router,
             connector_catalogs,
@@ -314,7 +974,137 @@ impl ToolExecutorImpl {
             session_access: SessionAccess { sessions, events },
             execution_repository: ExecutionRepository::new(pool.clone()),
             workspace_management,
+            external_job_adapters,
+            execution_config,
         }
+    }
+
+    async fn finalize_recovered_compensation_external_start(
+        &self,
+        ctx: &Context<'_>,
+        request: ExecutionCompensationAttemptCancelRequest,
+        external_job_uid: Option<uuid::Uuid>,
+        recovered_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), HandlerError> {
+        let repository = self.execution_repository.clone();
+        let scope = ExecutionScope::Tenant {
+            tenant_id: request.tenant_id,
+        };
+        let run_uid = request.run_uid;
+        let run = ctx
+            .run(|| async move {
+                repository
+                    .load_run(scope, run_uid)
+                    .await
+                    .map(Json::from)
+                    .map_err(execution_error_to_handler_error)
+            })
+            .name(format!(
+                "load_recovered_compensation_release_run:{}",
+                request.cancellation_dispatch_uid
+            ))
+            .await?
+            .into_inner()
+            .ok_or_else(|| {
+                TerminalError::new("recovered compensation release lost its authoritative run")
+            })?;
+        let receipt = crate::restate_identity::replay_safe_request(
+            ctx.service_client::<ToolExecutorClient>()
+                .checkpoint_and_release_execution_hands(Json::from(
+                    CheckpointAndReleaseExecutionHandsRequest {
+                        tenant_id: request.tenant_id,
+                        session_id: run.session_id,
+                        run_uid: request.run_uid,
+                        owner: ExecutionHandReleaseOwner::Compensation {
+                            compensation_id: ExecutionCompensationScopeId(
+                                request.compensation_id.as_uuid(),
+                            ),
+                            logical_generation: request.compensation_generation,
+                        },
+                        attempt_generation: request.compensation_attempt_generation,
+                        release_deadline_at: recovered_at + chrono::Duration::minutes(5),
+                    },
+                ))
+                .idempotency_key(format!(
+                    "external-start-recovery-hand-release:{}",
+                    request.cancellation_dispatch_uid
+                )),
+        )
+        .call()
+        .await?
+        .into_inner();
+        let settled_at = ctx
+            .run(|| async { Ok::<_, HandlerError>(Json::from(chrono::Utc::now())) })
+            .name(format!(
+                "recovered_compensation_release_clock:{}",
+                request.cancellation_dispatch_uid
+            ))
+            .await?
+            .into_inner();
+        let repository = self.execution_repository.clone();
+        let request_for_finalizer = request.clone();
+        let outcome = ctx
+            .run(|| async move {
+                let applied = match request_for_finalizer.intent {
+                    ExecutionCompensationReleaseIntent::Retry => {
+                        let outcome = repository
+                            .yield_released_compensation_attempt_after_external_not_started(
+                                &request_for_finalizer,
+                                settled_at,
+                                Some(receipt),
+                            )
+                            .await?;
+                        matches!(
+                            outcome,
+                            CompensationAttemptWriteOutcome::Applied(_)
+                                | CompensationAttemptWriteOutcome::Replayed(_)
+                        )
+                    }
+                    ExecutionCompensationReleaseIntent::ExternalJob => {
+                        let external_job_uid = external_job_uid.ok_or_else(|| {
+                            moa_execution::Error::InvalidRepositoryInput {
+                                message: "recovered external compensation lost its job identity"
+                                    .to_string(),
+                            }
+                        })?;
+                        let outcome = repository
+                            .yield_released_compensation_attempt_to_external_job(
+                                &request_for_finalizer,
+                                external_job_uid,
+                                Some(receipt),
+                                settled_at,
+                            )
+                            .await?;
+                        matches!(
+                            outcome,
+                            CompensationAttemptExternalOutcome::Applied { .. }
+                                | CompensationAttemptExternalOutcome::Replayed { .. }
+                        )
+                    }
+                    _ => {
+                        return Err(execution_error_to_handler_error(
+                            moa_execution::Error::InvalidRepositoryInput {
+                                message: "recovered compensation carried an invalid release intent"
+                                    .to_string(),
+                            },
+                        ));
+                    }
+                };
+                Ok::<_, HandlerError>(Json::from(applied))
+            })
+            .name(format!(
+                "finalize_recovered_compensation_external_start:{}",
+                request.cancellation_dispatch_uid
+            ))
+            .await?
+            .into_inner();
+        if !outcome {
+            return Err(anyhow::anyhow!(
+                "recovered compensation external-start release remains unsettled"
+            )
+            .into());
+        }
+        Ok(())
     }
 
     async fn scoped_catalog_for_session(
@@ -887,8 +1677,9 @@ impl ToolExecutor for ToolExecutorImpl {
         let admission_scope = execution_scope_for_session(&session);
         let admission_run_uid = execution_run_uid(origin);
         let admission_session_id = session.id;
-        let admission_owner = execution_effect_owner(origin);
-        let admission_name = execution_effect_admission_run_name(origin, request.call.tool_call_id);
+        let admission_owner = execution_effect_owner(origin, request.phase);
+        let admission_name =
+            execution_effect_admission_run_name(origin, request.phase, request.call.tool_call_id);
         let effect_admission = ctx
             .run(|| async move {
                 admission_repository
@@ -912,6 +1703,17 @@ impl ToolExecutor for ToolExecutorImpl {
             }));
         }
 
+        if requires_sandbox
+            && matches!(
+                &definition.async_mode,
+                ToolAsyncMode::MayReturnExternalJob { .. }
+            )
+        {
+            return Err(TerminalError::new(
+                "asynchronous provider adapters cannot own a live sandbox hand",
+            )
+            .into());
+        }
         if requires_sandbox {
             let exact_scope = workspace_scope.clone().ok_or_else(|| {
                 TerminalError::new(
@@ -931,6 +1733,124 @@ impl ToolExecutor for ToolExecutorImpl {
                 request.call.tool_call_id
             ))
             .await?;
+        }
+
+        if let ToolAsyncMode::MayReturnExternalJob { provider } = &definition.async_mode {
+            let adapter = self
+                .external_job_adapters
+                .require(provider)
+                .map_err(moa_error_to_handler_error)?;
+            let expires_at = request.call.resource_budget.deadline.ok_or_else(|| {
+                TerminalError::new(
+                    "asynchronous execution tool calls require an absolute attempt deadline",
+                )
+            })?;
+            let intent = execution_external_job_intent(
+                origin,
+                session.tenant_id,
+                request.call.tool_call_id,
+                provider,
+                expires_at,
+            );
+            let repository = self.execution_repository.clone();
+            let config = self.execution_config.clone();
+            let intent_for_reserve = intent.clone();
+            ctx.run(|| async move {
+                repository
+                    .reserve_external_job_intent(
+                        ExecutionScope::ControlPlane,
+                        &config,
+                        intent_for_reserve,
+                    )
+                    .await
+                    .map(|record| Json::from(record.external_job_uid))
+                    .map_err(execution_error_to_handler_error)
+            })
+            .name(format!(
+                "execution_external_job_reserve:{}",
+                intent.external_job_uid
+            ))
+            .await?;
+
+            let start_context = ExternalJobStartContext {
+                external_job_uid: intent.external_job_uid,
+                provider: provider.clone(),
+                idempotency_key: intent.idempotency_key.clone(),
+            };
+            let start_request = ExecutionExternalJobStartRequest {
+                context: start_context.clone(),
+                call: request.call.clone(),
+            };
+            let start = ctx
+                .run(|| async move {
+                    adapter
+                        .start(&start_request)
+                        .await
+                        .map(Json::from)
+                        .map_err(moa_error_to_handler_error)
+                })
+                .name(format!(
+                    "execution_external_job_start:{}",
+                    intent.external_job_uid
+                ))
+                .retry_policy(RunRetryPolicy::new().max_attempts(1))
+                .await?
+                .into_inner();
+            return match start {
+                ExecutionExternalJobStartOutcome::Completed(output) => {
+                    let repository = self.execution_repository.clone();
+                    let intent_for_release = intent.clone();
+                    ctx.run(|| async move {
+                        repository
+                            .release_external_job_intent(
+                                ExecutionScope::ControlPlane,
+                                intent_for_release,
+                            )
+                            .await
+                            .and_then(|outcome| match outcome {
+                                ExecutionExternalJobIntentReleaseOutcome::Released
+                                | ExecutionExternalJobIntentReleaseOutcome::AlreadyReleased => {
+                                    Ok(())
+                                }
+                                ExecutionExternalJobIntentReleaseOutcome::Stale
+                                | ExecutionExternalJobIntentReleaseOutcome::AlreadyBound => {
+                                    Err(moa_execution::Error::InvalidRepositoryData {
+                                        message: "synchronous provider result could not release its unbound external-job intent".to_string(),
+                                    })
+                                }
+                            })
+                            .map_err(execution_error_to_handler_error)
+                    })
+                    .name(format!(
+                        "execution_external_job_release:{}",
+                        intent.external_job_uid
+                    ))
+                    .await?;
+                    Ok(Json::from(ExecutionToolCallOutcome::Completed { output }))
+                }
+                ExecutionExternalJobStartOutcome::ExternalJob(job) => {
+                    let binding = execution_external_job_binding(&intent, provider, job.clone());
+                    let repository = self.execution_repository.clone();
+                    let config = self.execution_config.clone();
+                    ctx.run(|| async move {
+                        repository
+                            .bind_external_job(ExecutionScope::ControlPlane, &config, binding)
+                            .await
+                            .map(|record| Json::from(record.external_job_uid))
+                            .map_err(execution_error_to_handler_error)
+                    })
+                    .name(format!(
+                        "execution_external_job_bind:{}",
+                        intent.external_job_uid
+                    ))
+                    .await?;
+                    fixture_external_job_after_bind_barrier(&ctx, provider, &start_context).await?;
+                    Ok(Json::from(ExecutionToolCallOutcome::ExternalJob {
+                        external_job_uid: intent.external_job_uid,
+                        job,
+                    }))
+                }
+            };
         }
 
         // This journaled admission is the linearization cut point. A terminal fence that wins
@@ -1019,6 +1939,481 @@ impl ToolExecutor for ToolExecutorImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal generation-fenced cancellation delivery; the tenant-owned job row is
+    // loaded before any provider call and no caller-owned payload is returned.
+    async fn cancel_external_job(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ExecutionExternalJobCancelRequest>,
+    ) -> Result<Json<ExecutionExternalJobCancelResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("ToolExecutor", "cancel_external_job");
+        let request = request.into_inner();
+        let repository = self.execution_repository.clone();
+        let scope = ExecutionScope::ControlPlane;
+        let external_job_uid = request.external_job_uid;
+        let loaded = ctx
+            .run(|| async move {
+                repository
+                    .load_external_job(scope, external_job_uid)
+                    .await
+                    .map(|record| record.map(JournaledExternalJobForCancel::from))
+                    .map(Json::from)
+                    .map_err(execution_error_to_handler_error)
+            })
+            .name(format!("load_external_job_for_cancel:{external_job_uid}"))
+            .await?
+            .into_inner();
+        let Some(job) = loaded else {
+            return Ok(Json::from(external_job_cancel_response(
+                &request,
+                ExecutionExternalJobCancelResponseOutcome::NotFound,
+            )));
+        };
+        let (Some(provider), Some(provider_job_id)) =
+            (job.provider.as_deref(), job.provider_job_id.as_deref())
+        else {
+            return Ok(Json::from(external_job_cancel_response(
+                &request,
+                ExecutionExternalJobCancelResponseOutcome::StaleDelivery,
+            )));
+        };
+        if job.tenant_id != request.tenant_id
+            || job.job_generation != request.job_generation
+            || provider != request.provider
+            || provider_job_id != request.provider_job_id
+            || job.idempotency_key != request.idempotency_key
+        {
+            return Ok(Json::from(external_job_cancel_response(
+                &request,
+                ExecutionExternalJobCancelResponseOutcome::StaleDelivery,
+            )));
+        }
+        if job.terminal {
+            return Ok(Json::from(external_job_cancel_response(
+                &request,
+                ExecutionExternalJobCancelResponseOutcome::AlreadyTerminal,
+            )));
+        }
+
+        let provider_outcome = if job.cancel_supported {
+            let adapter = self
+                .external_job_adapters
+                .require(provider)
+                .map_err(moa_error_to_handler_error)?;
+            let request_for_provider = request.clone();
+            ctx.run(|| async move {
+                adapter
+                    .cancel(&request_for_provider)
+                    .await
+                    .map(Json::from)
+                    .map_err(moa_error_to_handler_error)
+            })
+            .name(format!(
+                "cancel_external_job_provider:{}:{}",
+                request.external_job_uid, request.job_generation
+            ))
+            .retry_policy(RunRetryPolicy::new().max_attempts(1))
+            .await?
+            .into_inner()
+        } else {
+            AsyncToolJobCancelOutcome::Unsupported
+        };
+
+        let cancellation = external_job_cancellation(&request, &provider_outcome);
+        let repository = self.execution_repository.clone();
+        let config = self.execution_config.clone();
+        let settlement = ctx
+            .run(|| async move {
+                repository
+                    .settle_external_job_cancellation(scope, &config, cancellation)
+                    .await
+                    .map(JournaledExternalJobCancellationOutcome::from)
+                    .map(Json::from)
+                    .map_err(execution_error_to_handler_error)
+            })
+            .name(format!(
+                "settle_external_job_cancel:{}:{}",
+                request.external_job_uid, request.job_generation
+            ))
+            .await?
+            .into_inner();
+        let outcome = match settlement {
+            JournaledExternalJobCancellationOutcome::Applied => {
+                ExecutionExternalJobCancelResponseOutcome::Applied { provider_outcome }
+            }
+            JournaledExternalJobCancellationOutcome::StaleGeneration => {
+                ExecutionExternalJobCancelResponseOutcome::StaleDelivery
+            }
+            JournaledExternalJobCancellationOutcome::AlreadyTerminal => {
+                ExecutionExternalJobCancelResponseOutcome::AlreadyTerminal
+            }
+            JournaledExternalJobCancellationOutcome::NotFound => {
+                ExecutionExternalJobCancelResponseOutcome::NotFound
+            }
+        };
+        Ok(Json::from(external_job_cancel_response(&request, outcome)))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal generation-fenced sparse reconciliation; the handler reloads the exact
+    // provider job before calling a registered adapter and persists through the canonical callback transaction.
+    async fn reconcile_external_job(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ExecutionExternalJobReconcileRequest>,
+    ) -> Result<Json<ExecutionExternalJobReconcileResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("ToolExecutor", "reconcile_external_job");
+        let request = request.into_inner();
+        if request.trigger_uid.is_nil() {
+            return Err(
+                TerminalError::new("external reconcile trigger UID must not be nil").into(),
+            );
+        }
+        let repository = self.execution_repository.clone();
+        let external_job_uid = request.external_job_uid;
+        let loaded = ctx
+            .run(|| async move {
+                repository
+                    .load_external_job(ExecutionScope::ControlPlane, external_job_uid)
+                    .await
+                    .map(|record| record.map(JournaledExternalJobForCancel::from))
+                    .map(Json::from)
+                    .map_err(execution_error_to_handler_error)
+            })
+            .name(format!(
+                "load_external_job_for_reconcile:{external_job_uid}"
+            ))
+            .await?
+            .into_inner();
+        let Some(job) = loaded else {
+            return Ok(Json::from(external_job_reconcile_response(
+                &request,
+                ExecutionExternalJobReconcileResponseOutcome::NotFound,
+            )));
+        };
+        let (Some(provider), Some(provider_job_id)) =
+            (job.provider.as_deref(), job.provider_job_id.as_deref())
+        else {
+            return Ok(Json::from(external_job_reconcile_response(
+                &request,
+                ExecutionExternalJobReconcileResponseOutcome::StaleDelivery,
+            )));
+        };
+        if job.tenant_id != request.tenant_id
+            || job.job_generation != request.job_generation
+            || provider != request.provider
+            || provider_job_id != request.provider_job_id
+            || job.idempotency_key != request.idempotency_key
+        {
+            return Ok(Json::from(external_job_reconcile_response(
+                &request,
+                ExecutionExternalJobReconcileResponseOutcome::StaleDelivery,
+            )));
+        }
+        if job.terminal {
+            return Ok(Json::from(external_job_reconcile_response(
+                &request,
+                ExecutionExternalJobReconcileResponseOutcome::AlreadyTerminal,
+            )));
+        }
+
+        let adapter = self
+            .external_job_adapters
+            .require(provider)
+            .map_err(moa_error_to_handler_error)?;
+        let request_for_provider = request.clone();
+        let provider_outcome = ctx
+            .run(|| async move {
+                adapter
+                    .reconcile(&request_for_provider)
+                    .await
+                    .map(Json::from)
+                    .map_err(moa_error_to_handler_error)
+            })
+            .name(format!(
+                "reconcile_external_job_provider:{}:{}:{}",
+                request.external_job_uid, request.job_generation, request.trigger_uid
+            ))
+            .retry_policy(RunRetryPolicy::new().max_attempts(1))
+            .await?
+            .into_inner();
+
+        let callback = ExecutionExternalJobCallback {
+            external_job_uid: request.external_job_uid,
+            job_generation: request.job_generation,
+            provider: request.provider.clone(),
+            provider_job_id: request.provider_job_id.clone(),
+            provider_event_id: format!("external-reconcile:{}", request.trigger_uid),
+            update: ExecutionExternalJobCallbackUpdate::from(provider_outcome.clone()),
+        };
+        let repository = self.execution_repository.clone();
+        let config = self.execution_config.clone();
+        let settlement = ctx
+            .run(|| async move {
+                repository
+                    .apply_external_job_callback_and_activate(
+                        ExecutionScope::ControlPlane,
+                        &config,
+                        callback,
+                    )
+                    .await
+                    .map(|write| JournaledExternalJobCallbackOutcome::from(write.outcome))
+                    .map(Json::from)
+                    .map_err(execution_error_to_handler_error)
+            })
+            .name(format!(
+                "settle_external_job_reconcile:{}:{}:{}",
+                request.external_job_uid, request.job_generation, request.trigger_uid
+            ))
+            .await?
+            .into_inner();
+        let outcome = match settlement {
+            JournaledExternalJobCallbackOutcome::Applied
+            | JournaledExternalJobCallbackOutcome::Duplicate => {
+                ExecutionExternalJobReconcileResponseOutcome::Applied { provider_outcome }
+            }
+            JournaledExternalJobCallbackOutcome::StaleGeneration => {
+                ExecutionExternalJobReconcileResponseOutcome::StaleDelivery
+            }
+            JournaledExternalJobCallbackOutcome::AlreadyTerminal => {
+                ExecutionExternalJobReconcileResponseOutcome::AlreadyTerminal
+            }
+            JournaledExternalJobCallbackOutcome::NotFound => {
+                ExecutionExternalJobReconcileResponseOutcome::NotFound
+            }
+        };
+        Ok(Json::from(external_job_reconcile_response(
+            &request, outcome,
+        )))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal generation-fenced delivery prepared from canonical unbound owner storage.
+    async fn recover_external_job_start(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ExecutionExternalJobStartRecoveryRequest>,
+    ) -> Result<Json<ExecutionExternalJobStartRecoveryResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("ToolExecutor", "recover_external_job_start");
+        let request = request.into_inner();
+        if request.trigger_uid.is_nil()
+            || request.external_job_uid.is_nil()
+            || request.job_generation == 0
+            || request.provider.trim().is_empty()
+            || request.idempotency_key.trim().is_empty()
+        {
+            return Err(TerminalError::new(
+                "external start recovery requires exact non-empty trigger and provider identity",
+            )
+            .into());
+        }
+        let adapter = self
+            .external_job_adapters
+            .require(&request.provider)
+            .map_err(moa_error_to_handler_error)?;
+        let context = ExternalJobStartContext {
+            external_job_uid: request.external_job_uid,
+            provider: request.provider.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+        };
+        let context_for_provider = context.clone();
+        let recovery = ctx
+            .run(|| async move {
+                adapter
+                    .recover_start(&context_for_provider)
+                    .await
+                    .map(Json::from)
+                    .map_err(moa_error_to_handler_error)
+            })
+            .name(format!(
+                "recover_external_job_start_provider:{}:{}",
+                request.external_job_uid, request.job_generation
+            ))
+            .retry_policy(RunRetryPolicy::new().max_attempts(1))
+            .await?
+            .into_inner();
+        let recovered_at = ctx
+            .run(|| async { Ok::<_, HandlerError>(Json::from(chrono::Utc::now())) })
+            .name(format!(
+                "external_start_recovered_at:{}",
+                request.external_job_uid
+            ))
+            .await?
+            .into_inner();
+        let outcome = match recovery {
+            ExecutionExternalJobStartRecovery::NotStarted => {
+                let repository = self.execution_repository.clone();
+                let request_for_adoption = request.clone();
+                let adoption = ctx
+                    .run(|| async move {
+                        repository
+                            .recover_external_job_start_not_started(
+                                &request_for_adoption,
+                                recovered_at,
+                            )
+                            .await
+                            .map(Json::from)
+                            .map_err(execution_error_to_handler_error)
+                    })
+                    .name(format!(
+                        "adopt_not_started_external_job_start:{}",
+                        request.external_job_uid
+                    ))
+                    .await?
+                    .into_inner();
+                match adoption {
+                    ExecutionExternalJobStartRecoveryAdoptionOutcome::Applied {
+                        compensation_release,
+                    }
+                    | ExecutionExternalJobStartRecoveryAdoptionOutcome::Replayed {
+                        compensation_release,
+                    } => {
+                        if let Some(release) = compensation_release {
+                            self.finalize_recovered_compensation_external_start(
+                                &ctx,
+                                *release,
+                                None,
+                                recovered_at,
+                            )
+                            .await?;
+                        }
+                        ExecutionExternalJobStartRecoveryResponseOutcome::NotStartedReleased
+                    }
+                    ExecutionExternalJobStartRecoveryAdoptionOutcome::AlreadySettled => {
+                        ExecutionExternalJobStartRecoveryResponseOutcome::AlreadySettled
+                    }
+                    ExecutionExternalJobStartRecoveryAdoptionOutcome::NotFound
+                    | ExecutionExternalJobStartRecoveryAdoptionOutcome::Stale => {
+                        ExecutionExternalJobStartRecoveryResponseOutcome::StaleDelivery
+                    }
+                    ExecutionExternalJobStartRecoveryAdoptionOutcome::InvalidState => {
+                        return Err(anyhow::anyhow!(
+                            "external NotStarted recovery owner is not ready for safe requeue"
+                        )
+                        .into());
+                    }
+                }
+            }
+            ExecutionExternalJobStartRecovery::Started(job) => {
+                let intent = execution_external_job_intent_from_recovery(&request);
+                let binding =
+                    execution_external_job_binding(&intent, &request.provider, job.clone());
+                let repository = self.execution_repository.clone();
+                let config = self.execution_config.clone();
+                let request_for_adoption = request.clone();
+                let adoption = ctx
+                    .run(|| async move {
+                        repository
+                            .recover_external_job_start_started(
+                                &config,
+                                &request_for_adoption,
+                                binding,
+                                recovered_at,
+                            )
+                            .await
+                            .map(Json::from)
+                            .map_err(execution_error_to_handler_error)
+                    })
+                    .name(format!(
+                        "adopt_started_external_job_start:{}",
+                        request.external_job_uid
+                    ))
+                    .await?
+                    .into_inner();
+                match adoption {
+                    ExecutionExternalJobStartRecoveryAdoptionOutcome::Applied {
+                        compensation_release,
+                    }
+                    | ExecutionExternalJobStartRecoveryAdoptionOutcome::Replayed {
+                        compensation_release,
+                    } => {
+                        if let Some(release) = compensation_release {
+                            self.finalize_recovered_compensation_external_start(
+                                &ctx,
+                                *release,
+                                Some(request.external_job_uid),
+                                recovered_at,
+                            )
+                            .await?;
+                        }
+                        ExecutionExternalJobStartRecoveryResponseOutcome::StartedBound
+                    }
+                    ExecutionExternalJobStartRecoveryAdoptionOutcome::AlreadySettled => {
+                        ExecutionExternalJobStartRecoveryResponseOutcome::AlreadySettled
+                    }
+                    ExecutionExternalJobStartRecoveryAdoptionOutcome::NotFound
+                    | ExecutionExternalJobStartRecoveryAdoptionOutcome::Stale => {
+                        ExecutionExternalJobStartRecoveryResponseOutcome::StaleDelivery
+                    }
+                    ExecutionExternalJobStartRecoveryAdoptionOutcome::InvalidState => {
+                        return Err(anyhow::anyhow!(
+                            "recovered provider start is contained but its owner still requires repair"
+                        )
+                        .into());
+                    }
+                }
+            }
+            ExecutionExternalJobStartRecovery::Unknown { error } => {
+                let retry_at = recovered_at
+                    + chrono::Duration::seconds(
+                        i64::try_from(self.execution_config.trigger_reconciliation_cadence_seconds)
+                            .unwrap_or(i64::MAX),
+                    );
+                let error = bounded_external_start_recovery_error(&error);
+                let repository = self.execution_repository.clone();
+                let request_for_rearm = request.clone();
+                let rearm = ctx
+                    .run(|| async move {
+                        repository
+                            .rearm_external_start_recovery(
+                                ExecutionScope::ControlPlane,
+                                &request_for_rearm,
+                                retry_at,
+                                &error,
+                            )
+                            .await
+                            .map(|outcome| {
+                                Json::from(matches!(
+                                    outcome,
+                                    ExecutionExternalStartRecoveryRearmOutcome::Rearmed(_)
+                                ))
+                            })
+                            .map_err(execution_error_to_handler_error)
+                    })
+                    .name(format!(
+                        "rearm_external_start_recovery:{}",
+                        request.external_job_uid
+                    ))
+                    .await?
+                    .into_inner();
+                match rearm {
+                    true => ExecutionExternalJobStartRecoveryResponseOutcome::UnknownPreserved,
+                    false => ExecutionExternalJobStartRecoveryResponseOutcome::StaleDelivery,
+                }
+            }
+        };
+        if let Some(idempotency_key) = external_start_recovery_dispatch_key(&request, outcome) {
+            // Recovery commits its replacement activation, reconciliation, or rearmed delivery
+            // before this wake. Repair remains a fallback rather than the normal delivery path.
+            let handle = crate::restate_identity::replay_safe_request(
+                ctx.service_client::<ExecutionDispatcherClient>()
+                    .dispatch(Json::from(DispatchExecutionsRequest::default()))
+                    .idempotency_key(idempotency_key),
+            )
+            .send();
+            let _invocation_id = handle.invocation_id().await?;
+        }
+        Ok(Json::from(ExecutionExternalJobStartRecoveryResponse {
+            external_job_uid: request.external_job_uid,
+            job_generation: request.job_generation,
+            outcome,
+        }))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
     // SAFETY: internal authenticated catalog projection; session admission owns the caller identity.
     async fn list_tools(
         &self,
@@ -1093,6 +2488,108 @@ impl ToolExecutor for ToolExecutorImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal worker-turn pre-park read. The admitted SessionMeta and worker
+    // id come from the already-authorized worker dispatch and expose no data publicly.
+    async fn capture_worker_hand_release_fence(
+        &self,
+        ctx: Context<'_>,
+        request: Json<CaptureWorkerHandReleaseFenceRequest>,
+    ) -> Result<Json<Option<WorkerHandReleaseFence>>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("ToolExecutor", "capture_worker_hand_release_fence");
+        let request = request.into_inner();
+        self.router
+            .capture_worker_hand_release_fence(&request.session, &request.worker_id)
+            .await
+            .map(Json::from)
+            .map_err(moa_error_to_handler_error)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal worker-turn park after its exact pending-input registration is
+    // durable. The captured workspace/instance/lease fence prevents a replay from
+    // touching compute provisioned by a later resume.
+    async fn checkpoint_and_release_worker_hand(
+        &self,
+        ctx: Context<'_>,
+        request: Json<CheckpointAndReleaseWorkerHandRequest>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("ToolExecutor", "checkpoint_and_release_worker_hand");
+        let request = request.into_inner();
+        self.router
+            .checkpoint_and_release_worker_hand(WorkerHandReleaseRequest {
+                session: &request.session,
+                worker_id: &request.worker_id,
+                input_target: &request.input_target,
+                expected: request.expected.as_ref(),
+                scope: ToolCallScope::unbounded().with_budget(
+                    moa_core::types::resource::ResourceBudget::until(
+                        chrono::Utc::now() + chrono::Duration::minutes(5),
+                    ),
+                ),
+            })
+            .await
+            .map_err(moa_error_to_handler_error)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal bounded-attempt yield; the authoritative Session is loaded and its exact
+    // tenant/run/owner generation is fenced again by the durable release repository.
+    async fn checkpoint_and_release_execution_hands(
+        &self,
+        ctx: Context<'_>,
+        request: Json<CheckpointAndReleaseExecutionHandsRequest>,
+    ) -> Result<Json<ExecutionHandReleaseReceipt>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("ToolExecutor", "checkpoint_and_release_execution_hands");
+        let request = request.into_inner();
+        let session_store = self.session_access.sessions.clone();
+        let session_id = request.session_id;
+        let session = ctx
+            .run(|| async move {
+                session_store
+                    .get_session(session_id)
+                    .await
+                    .map(Json::from)
+                    .map_err(moa_error_to_handler_error)
+            })
+            .name(format!("load_task_yield_session:{session_id}"))
+            .await?
+            .into_inner();
+        if session.tenant_id != request.tenant_id {
+            return Err(TerminalError::new("execution yield session tenant mismatch").into());
+        }
+        let router = self.router.clone();
+        let run_id = ExecutionRunScopeId(request.run_uid);
+        let owner = request.owner;
+        let attempt_generation = request.attempt_generation;
+        let release_deadline_at = request.release_deadline_at;
+        Ok(ctx
+            .run(|| async move {
+                router
+                    .checkpoint_and_release_execution_hand(ExecutionHandReleaseRequest {
+                        session: &session,
+                        run_id,
+                        owner,
+                        attempt_generation,
+                        scope: ToolCallScope::unbounded().with_budget(
+                            moa_core::types::resource::ResourceBudget::until(release_deadline_at),
+                        ),
+                    })
+                    .await
+                    .map(Json::from)
+                    .map_err(moa_error_to_handler_error)
+            })
+            .name(format!(
+                "checkpoint_release_execution_hand:{}:{:?}:{}",
+                request.run_uid, request.owner, request.attempt_generation
+            ))
+            .retry_policy(RunRetryPolicy::new().max_attempts(1))
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
     // SAFETY: internal terminal-task teardown reclaims only the typed run/task hand scope and returns no caller-owned data.
     async fn release_execution_task_hands(
         &self,
@@ -1102,11 +2599,7 @@ impl ToolExecutor for ToolExecutorImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ToolExecutor", "release_execution_task_hands");
         let request = request.into_inner();
-        let scope = execution_task_hand_scope(ExecutionTaskOrigin {
-            run_uid: request.run_uid,
-            task_uid: request.task_id.as_uuid(),
-            generation: 1,
-        });
+        let scope = execution_task_hand_scope(request.run_uid, request.task_id.as_uuid());
         if !self
             .router
             .reclaim_hands(request.tenant_id, &request.session_id, Some(scope.as_str()))
@@ -1127,11 +2620,8 @@ impl ToolExecutor for ToolExecutorImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ToolExecutor", "release_execution_compensation_hands");
         let request = request.into_inner();
-        let scope = execution_compensation_hand_scope(ExecutionCompensationOrigin {
-            run_uid: request.run_uid,
-            compensation_id: request.compensation_id.as_uuid(),
-            generation: 1,
-        });
+        let scope =
+            execution_compensation_hand_scope(request.run_uid, request.compensation_id.as_uuid());
         if !self
             .router
             .reclaim_hands(request.tenant_id, &request.session_id, Some(scope.as_str()))
@@ -1156,9 +2646,31 @@ impl ToolExecutor for ToolExecutorImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ToolExecutor", "release_session_hands");
         let request = request.into_inner();
-        self.router
-            .reclaim_hands(request.tenant_id, &request.session_id, None)
+        let outcome = self
+            .router
+            .reclaim_session_hands_page(request.tenant_id, &request.session_id)
             .await;
+        if let Some((continuation_attempt, delay)) =
+            session_release_continuation(outcome, request.continuation_attempt)
+        {
+            let invocation_id = ctx.invocation_id();
+            let continuation = crate::restate_identity::replay_safe_request(
+                ctx.service_client::<ToolExecutorClient>()
+                    .release_session_hands(Json::from(ReleaseSessionHandsRequest {
+                        continuation_attempt,
+                        ..request.clone()
+                    }))
+                    .idempotency_key(format!(
+                        "release-session-hands:{}:{invocation_id}",
+                        request.session_id
+                    )),
+            )
+            .send_after(delay);
+            continuation
+                .invocation_id()
+                .await
+                .map_err(HandlerError::from)?;
+        }
         Ok(())
     }
 }
@@ -1218,23 +2730,30 @@ pub fn tool_run_name(
 }
 
 /// Builds the isolated hand scope shared by generations of one execution task.
-pub fn execution_task_hand_scope(origin: ExecutionTaskOrigin) -> String {
-    format!("execution:{}:{}", origin.run_uid, origin.task_uid)
+///
+/// Takes the two identifiers it actually uses rather than a full origin, so
+/// callers that only know the run and task cannot invent generation values.
+pub fn execution_task_hand_scope(run_uid: Uuid, task_uid: Uuid) -> String {
+    format!("execution:{run_uid}:{task_uid}")
 }
 
 /// Builds the isolated hand scope shared by generations of one compensation.
-pub fn execution_compensation_hand_scope(origin: ExecutionCompensationOrigin) -> String {
-    format!(
-        "execution_compensation:{}:{}",
-        origin.run_uid, origin.compensation_id
-    )
+///
+/// Takes the two identifiers it actually uses rather than a full origin, so
+/// callers that only know the run and compensation cannot invent generations.
+pub fn execution_compensation_hand_scope(run_uid: Uuid, compensation_id: Uuid) -> String {
+    format!("execution_compensation:{run_uid}:{compensation_id}")
 }
 
 /// Builds the isolated hand scope for one typed execution operation.
 pub fn execution_hand_scope(origin: ExecutionToolCallOrigin) -> String {
     match origin {
-        ExecutionToolCallOrigin::Task(origin) => execution_task_hand_scope(origin),
-        ExecutionToolCallOrigin::Compensation(origin) => execution_compensation_hand_scope(origin),
+        ExecutionToolCallOrigin::Task(origin) => {
+            execution_task_hand_scope(origin.run_uid, origin.task_uid)
+        }
+        ExecutionToolCallOrigin::Compensation(origin) => {
+            execution_compensation_hand_scope(origin.run_uid, origin.compensation_id)
+        }
     }
 }
 
@@ -1285,42 +2804,261 @@ fn execution_run_uid(origin: ExecutionToolCallOrigin) -> uuid::Uuid {
     }
 }
 
-fn execution_effect_owner(origin: ExecutionToolCallOrigin) -> ExecutionEffectOwner {
+fn execution_effect_owner(
+    origin: ExecutionToolCallOrigin,
+    phase: ExecutionToolCallPhase,
+) -> ExecutionEffectOwner {
+    let phase = match phase {
+        ExecutionToolCallPhase::Direct => ExecutionEffectPhase::Direct,
+        ExecutionToolCallPhase::Reviewed { review_uid } => {
+            ExecutionEffectPhase::Reviewed { review_uid }
+        }
+    };
     match origin {
         ExecutionToolCallOrigin::Task(origin) => ExecutionEffectOwner::Task {
             task_id: moa_execution::state::ExecutionTaskId::from_uuid(origin.task_uid),
             generation: origin.generation,
+            attempt_generation: origin.attempt_generation,
+            phase,
         },
         ExecutionToolCallOrigin::Compensation(origin) => ExecutionEffectOwner::Compensation {
             compensation_id: moa_execution::state::CompensationId::from_uuid(
                 origin.compensation_id,
             ),
             generation: origin.generation,
+            attempt_generation: origin.attempt_generation,
+            phase,
         },
+    }
+}
+
+const EXECUTION_EXTERNAL_JOB_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x62c0_5ead_8b32_5daa_86bf_b05c_7d27_7441);
+
+fn execution_external_job_intent(
+    origin: ExecutionToolCallOrigin,
+    tenant_id: TenantId,
+    tool_call_id: ToolCallId,
+    provider: &str,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> NewExecutionExternalJobIntent {
+    let run_uid = execution_run_uid(origin);
+    let (owner, owner_identity) = match origin {
+        ExecutionToolCallOrigin::Task(origin) => (
+            ExecutionExternalJobOwner::Task {
+                task_id: origin.task_uid,
+                attempt_generation: origin.attempt_generation,
+            },
+            format!("task:{}:{}", origin.task_uid, origin.attempt_generation),
+        ),
+        ExecutionToolCallOrigin::Compensation(origin) => (
+            ExecutionExternalJobOwner::Compensation {
+                compensation_id: origin.compensation_id,
+                compensation_generation: origin.generation,
+                compensation_attempt_generation: origin.attempt_generation,
+            },
+            format!(
+                "compensation:{}:{}:{}",
+                origin.compensation_id, origin.generation, origin.attempt_generation
+            ),
+        ),
+    };
+    // The provider key deliberately excludes attempt generation: a provider retry after a
+    // runtime-loss recovery fence must join the same committed start instead of duplicating it.
+    // MOA's external-job UID still includes the exact attempt owner, and a successor attempt is
+    // admitted only after the preceding unbound intent is proven NotStarted and released.
+    let idempotency_key = format!("execution-external:{provider}:{tool_call_id}");
+    let canonical_identity = format!(
+        "v1|tenant:{tenant_id}|run:{run_uid}|owner:{owner_identity}|call:{tool_call_id}|provider:{provider}"
+    );
+    let external_job_uid = uuid::Uuid::new_v5(
+        &EXECUTION_EXTERNAL_JOB_NAMESPACE,
+        canonical_identity.as_bytes(),
+    );
+    NewExecutionExternalJobIntent {
+        external_job_uid,
+        tenant_id,
+        run_uid,
+        owner,
+        job_generation: 1,
+        provider: provider.to_string(),
+        idempotency_key,
+        expires_at,
+    }
+}
+
+fn execution_external_job_intent_from_recovery(
+    request: &ExecutionExternalJobStartRecoveryRequest,
+) -> NewExecutionExternalJobIntent {
+    let owner = match request.owner {
+        ExecutionExternalJobStartRecoveryOwner::Task {
+            task_id,
+            attempt_generation,
+        } => ExecutionExternalJobOwner::Task {
+            task_id,
+            attempt_generation,
+        },
+        ExecutionExternalJobStartRecoveryOwner::Compensation {
+            compensation_id,
+            compensation_generation,
+            compensation_attempt_generation,
+        } => ExecutionExternalJobOwner::Compensation {
+            compensation_id,
+            compensation_generation,
+            compensation_attempt_generation,
+        },
+    };
+    NewExecutionExternalJobIntent {
+        external_job_uid: request.external_job_uid,
+        tenant_id: request.tenant_id,
+        run_uid: request.run_uid,
+        owner,
+        job_generation: request.job_generation,
+        provider: request.provider.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        // Exact intent matching excludes expiry; release is allowed only after provider recovery
+        // proved NotStarted, so no synthetic wall-clock value is used as an authorization fence.
+        expires_at: chrono::DateTime::<chrono::Utc>::MAX_UTC,
+    }
+}
+
+fn external_start_recovery_dispatch_key(
+    request: &ExecutionExternalJobStartRecoveryRequest,
+    outcome: ExecutionExternalJobStartRecoveryResponseOutcome,
+) -> Option<String> {
+    matches!(
+        outcome,
+        ExecutionExternalJobStartRecoveryResponseOutcome::NotStartedReleased
+            | ExecutionExternalJobStartRecoveryResponseOutcome::StartedBound
+            | ExecutionExternalJobStartRecoveryResponseOutcome::UnknownPreserved
+    )
+    .then(|| {
+        format!(
+            "external-start-recovery-dispatch:{}:{}:{}",
+            request.external_job_uid, request.job_generation, request.trigger_uid
+        )
+    })
+}
+
+fn bounded_external_start_recovery_error(error: &serde_json::Value) -> String {
+    error.to_string().chars().take(4_096).collect()
+}
+
+fn execution_external_job_binding(
+    intent: &NewExecutionExternalJobIntent,
+    provider: &str,
+    job: AsyncToolJob,
+) -> ExecutionExternalJobBinding {
+    let provider_contract_violation =
+        (job.provider != provider || job.idempotency_key != intent.idempotency_key).then(|| {
+            format!(
+                "declared_provider={provider}; returned_provider={}; idempotency_key_matches={}",
+                job.provider,
+                job.idempotency_key == intent.idempotency_key
+            )
+        });
+    ExecutionExternalJobBinding {
+        external_job_uid: intent.external_job_uid,
+        tenant_id: intent.tenant_id,
+        run_uid: intent.run_uid,
+        owner: intent.owner,
+        job_generation: intent.job_generation,
+        idempotency_key: intent.idempotency_key.clone(),
+        provider: provider.to_string(),
+        provider_job_id: job.provider_job_id,
+        callback_auth_reference: job.callback_auth_reference,
+        state: ExecutionExternalJobState::Running,
+        progress_phase: Some(job.progress_phase),
+        cancel_supported: job.cancel_supported,
+        next_reconcile_at: Some(job.next_reconcile_at),
+        provider_contract_violation,
     }
 }
 
 fn execution_effect_admission_run_name(
     origin: ExecutionToolCallOrigin,
+    phase: ExecutionToolCallPhase,
     tool_call_id: ToolCallId,
 ) -> String {
+    let phase = match phase {
+        ExecutionToolCallPhase::Direct => "direct".to_string(),
+        ExecutionToolCallPhase::Reviewed { review_uid } => format!("reviewed:{review_uid}"),
+    };
     match origin {
         ExecutionToolCallOrigin::Task(origin) => format!(
-            "execution_effect_admission:task:{}:{}:{}:{tool_call_id}",
-            origin.run_uid, origin.task_uid, origin.generation
+            "execution_effect_admission:task:{}:{}:{}:{}:{phase}:{tool_call_id}",
+            origin.run_uid, origin.task_uid, origin.generation, origin.attempt_generation
         ),
         ExecutionToolCallOrigin::Compensation(origin) => format!(
-            "execution_effect_admission:compensation:{}:{}:{}:{tool_call_id}",
-            origin.run_uid, origin.compensation_id, origin.generation
+            "execution_effect_admission:compensation:{}:{}:{}:{}:{phase}:{tool_call_id}",
+            origin.run_uid, origin.compensation_id, origin.generation, origin.attempt_generation
         ),
     }
 }
 
-fn execution_repository_error(error: moa_execution::Error) -> HandlerError {
-    match error {
-        error @ moa_execution::Error::Storage { .. } => HandlerError::from(error),
-        error => TerminalError::new(format!("execution effect admission failed: {error}")).into(),
+fn external_job_cancel_response(
+    request: &ExecutionExternalJobCancelRequest,
+    outcome: ExecutionExternalJobCancelResponseOutcome,
+) -> ExecutionExternalJobCancelResponse {
+    ExecutionExternalJobCancelResponse {
+        external_job_uid: request.external_job_uid,
+        job_generation: request.job_generation,
+        outcome,
     }
+}
+
+fn external_job_reconcile_response(
+    request: &ExecutionExternalJobReconcileRequest,
+    outcome: ExecutionExternalJobReconcileResponseOutcome,
+) -> ExecutionExternalJobReconcileResponse {
+    ExecutionExternalJobReconcileResponse {
+        external_job_uid: request.external_job_uid,
+        job_generation: request.job_generation,
+        outcome,
+    }
+}
+
+fn external_job_cancellation(
+    request: &ExecutionExternalJobCancelRequest,
+    outcome: &AsyncToolJobCancelOutcome,
+) -> ExecutionExternalJobCancellation {
+    let (state, next_reconcile_at, error) = match outcome {
+        AsyncToolJobCancelOutcome::Cancelled => (ExecutionExternalJobState::Cancelled, None, None),
+        AsyncToolJobCancelOutcome::Accepted {
+            next_reconcile_at, ..
+        } => (
+            ExecutionExternalJobState::CancelRequested,
+            Some(*next_reconcile_at),
+            None,
+        ),
+        AsyncToolJobCancelOutcome::Unsupported => (
+            ExecutionExternalJobState::UnknownOutcome,
+            None,
+            Some(serde_json::json!({
+                "kind": "cancellation_unsupported",
+                "provider": request.provider,
+                "provider_job_id": request.provider_job_id,
+            })),
+        ),
+        AsyncToolJobCancelOutcome::UnknownOutcome { error } => (
+            ExecutionExternalJobState::UnknownOutcome,
+            None,
+            Some(error.clone()),
+        ),
+    };
+    ExecutionExternalJobCancellation {
+        external_job_uid: request.external_job_uid,
+        job_generation: request.job_generation,
+        provider: request.provider.clone(),
+        provider_job_id: request.provider_job_id.clone(),
+        state,
+        next_reconcile_at,
+        error,
+    }
+}
+
+fn execution_repository_error(error: moa_execution::Error) -> HandlerError {
+    execution_error_to_handler_error(error)
 }
 
 /// Builds the Restate run-operation name fenced by execution generation.
@@ -1832,10 +3570,11 @@ mod tests {
         types::identifiers::ExecutionTaskScopeId, types::identifiers::HandProvisioningOperationId,
         types::identifiers::SessionId, types::identifiers::TenantId,
         types::identifiers::ToolCallId, types::sandbox_workspace::SandboxWorkspaceScope,
-        types::security::SensitivityClass, types::session::SessionMeta,
-        types::tools::IdempotencyClass, types::tools::ToolCallRequest,
-        types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolOutput,
-        types::tools::ToolPolicySpec,
+        types::security::SensitivityClass, types::session::SessionMeta, types::tools::AsyncToolJob,
+        types::tools::AsyncToolJobCallbackOutcome, types::tools::AsyncToolJobCancelOutcome,
+        types::tools::AsyncToolJobTerminalOutcome, types::tools::IdempotencyClass,
+        types::tools::ToolCallRequest, types::tools::ToolDiffStrategy,
+        types::tools::ToolInputShape, types::tools::ToolOutput, types::tools::ToolPolicySpec,
     };
     use moa_hands::{
         HandRoute, PinnedToolContract, PinnedToolOwner, ToolCatalogPin, ToolExecution,
@@ -1849,17 +3588,368 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ExecutionToolCallOrigin, ExecutionToolCallOutcome, ExecutionToolCallRequest,
-        JournaledExecutionEffectAdmission, ScopedToolCatalogRequest, agent_deployment_tool_denial,
-        blocked_canary_tool_output, classify_execution_tool_result,
-        execute_buffered_with_trusted_files, execution_compensation_hand_scope,
-        execution_hand_scope, execution_task_hand_scope, execution_task_tool_run_name,
-        execution_tool_run_name, execution_workspace_scope, has_prior_tool_call_event,
-        is_installed_connector_action, root_trusted_file_read, tool_contract_denial,
-        worker_workspace_scope,
+        ExecutionExternalJobAdapter, ExecutionExternalJobAdapterRegistry,
+        ExecutionExternalJobCallbackAuthentication, ExecutionToolCallOrigin,
+        ExecutionToolCallOutcome, ExecutionToolCallRequest, JournaledExecutionEffectAdmission,
+        ScopedToolCatalogRequest, agent_deployment_tool_denial, blocked_canary_tool_output,
+        classify_execution_tool_result, execute_buffered_with_trusted_files,
+        execution_compensation_hand_scope, execution_external_job_intent, execution_hand_scope,
+        execution_task_hand_scope, execution_task_tool_run_name, execution_tool_run_name,
+        execution_workspace_scope, external_start_recovery_dispatch_key, has_prior_tool_call_event,
+        is_installed_connector_action, root_trusted_file_read, session_release_continuation,
+        tool_contract_denial, worker_workspace_scope,
     };
+    use moa_core::types::tools::ExternalJobStartContext;
+    use moa_execution::wire::{
+        ExecutionExternalJobCancelRequest, ExecutionExternalJobReconcileRequest,
+        ExecutionExternalJobStartRecoveryOwner, ExecutionExternalJobStartRecoveryRequest,
+        ExecutionExternalJobStartRecoveryResponseOutcome,
+    };
+    use moa_hands::SessionHandReleasePageOutcome;
 
     struct ConnectorLookingBuiltIn;
+
+    struct FixtureExternalJobAdapter;
+
+    #[test]
+    fn committed_external_start_recovery_outcomes_wake_dispatch_exactly_by_trigger() {
+        // Pins: recovery outcomes that commit replacement outbox work wake its dispatcher, while
+        // stale/already-settled deliveries remain side-effect free. The exact trigger identity
+        // makes replay coalesce without suppressing another job generation.
+        let request = ExecutionExternalJobStartRecoveryRequest {
+            tenant_id: TenantId::from(Uuid::from_u128(1)),
+            run_uid: Uuid::from_u128(2),
+            owner: ExecutionExternalJobStartRecoveryOwner::Task {
+                task_id: Uuid::from_u128(3),
+                attempt_generation: 4,
+            },
+            external_job_uid: Uuid::from_u128(5),
+            job_generation: 6,
+            provider: "fixture".to_string(),
+            idempotency_key: "provider-start-6".to_string(),
+            trigger_uid: Uuid::from_u128(7),
+        };
+        let expected = format!(
+            "external-start-recovery-dispatch:{}:6:{}",
+            request.external_job_uid, request.trigger_uid
+        );
+        for outcome in [
+            ExecutionExternalJobStartRecoveryResponseOutcome::NotStartedReleased,
+            ExecutionExternalJobStartRecoveryResponseOutcome::StartedBound,
+            ExecutionExternalJobStartRecoveryResponseOutcome::UnknownPreserved,
+        ] {
+            assert_eq!(
+                external_start_recovery_dispatch_key(&request, outcome),
+                Some(expected.clone())
+            );
+        }
+        for outcome in [
+            ExecutionExternalJobStartRecoveryResponseOutcome::StaleDelivery,
+            ExecutionExternalJobStartRecoveryResponseOutcome::AlreadySettled,
+        ] {
+            assert_eq!(
+                external_start_recovery_dispatch_key(&request, outcome),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn session_release_backoff_is_bounded_and_resets_after_progress() {
+        // Pins: a persistent provider/reaper outage cannot create a fixed-rate continuation
+        // storm, while a page that makes progress resumes the fast drain cadence.
+        let (_, first_wait) =
+            session_release_continuation(SessionHandReleasePageOutcome::Waiting, 0)
+                .expect("waiting cleanup continues");
+        let (saturated_attempt, saturated_wait) =
+            session_release_continuation(SessionHandReleasePageOutcome::Waiting, u32::MAX)
+                .expect("waiting cleanup remains retryable");
+        assert!(first_wait >= Duration::from_millis(200));
+        assert_eq!(saturated_attempt, u32::MAX);
+        assert_eq!(saturated_wait, Duration::from_millis(25_600));
+
+        let (reset_attempt, progress_wait) =
+            session_release_continuation(SessionHandReleasePageOutcome::Progressed, 12)
+                .expect("a partial page schedules its successor");
+        assert_eq!(reset_attempt, 0);
+        assert_eq!(progress_wait, Duration::from_millis(100));
+        assert!(
+            session_release_continuation(SessionHandReleasePageOutcome::Complete, 12,).is_none()
+        );
+    }
+
+    // Pins: the pre-provider UID is a versioned wire identity, not Rust Debug output, and every
+    // durable owner coordinate changes it while the provider idempotency key remains call-stable.
+    #[test]
+    fn external_job_intent_uid_is_canonical_and_exact_offline() {
+        let tenant_id = TenantId::from(
+            Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("fixture tenant UUID"),
+        );
+        let run_uid =
+            Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("fixture run UUID");
+        let task_uid =
+            Uuid::parse_str("33333333-3333-3333-3333-333333333333").expect("fixture task UUID");
+        let tool_call_id = ToolCallId::from(
+            Uuid::parse_str("44444444-4444-4444-4444-444444444444")
+                .expect("fixture tool-call UUID"),
+        );
+        let expires_at = Utc::now() + chrono::Duration::minutes(5);
+        let task_origin = ExecutionTaskOrigin {
+            run_uid,
+            task_uid,
+            generation: 5,
+            attempt_generation: 7,
+        };
+        let origin = ExecutionToolCallOrigin::Task(task_origin);
+        let expected =
+            execution_external_job_intent(origin, tenant_id, tool_call_id, "fixture", expires_at);
+        assert_eq!(
+            expected.external_job_uid,
+            Uuid::parse_str("913531e0-959c-5a11-9260-4ae8636e92e0")
+                .expect("pinned external-job UUID")
+        );
+        assert_eq!(
+            expected.idempotency_key,
+            format!("execution-external:fixture:{tool_call_id}")
+        );
+
+        let mutations = [
+            execution_external_job_intent(
+                origin,
+                TenantId::new(),
+                tool_call_id,
+                "fixture",
+                expires_at,
+            ),
+            execution_external_job_intent(
+                ExecutionToolCallOrigin::Task(ExecutionTaskOrigin {
+                    run_uid: Uuid::new_v4(),
+                    ..task_origin
+                }),
+                tenant_id,
+                tool_call_id,
+                "fixture",
+                expires_at,
+            ),
+            execution_external_job_intent(
+                ExecutionToolCallOrigin::Task(ExecutionTaskOrigin {
+                    task_uid: Uuid::new_v4(),
+                    ..task_origin
+                }),
+                tenant_id,
+                tool_call_id,
+                "fixture",
+                expires_at,
+            ),
+            execution_external_job_intent(
+                ExecutionToolCallOrigin::Task(ExecutionTaskOrigin {
+                    attempt_generation: 8,
+                    ..task_origin
+                }),
+                tenant_id,
+                tool_call_id,
+                "fixture",
+                expires_at,
+            ),
+            execution_external_job_intent(
+                origin,
+                tenant_id,
+                ToolCallId::new(),
+                "fixture",
+                expires_at,
+            ),
+            execution_external_job_intent(
+                origin,
+                tenant_id,
+                tool_call_id,
+                "other-provider",
+                expires_at,
+            ),
+        ];
+        assert!(
+            mutations
+                .iter()
+                .all(|intent| { intent.external_job_uid != expected.external_job_uid })
+        );
+        assert_eq!(mutations[3].idempotency_key, expected.idempotency_key);
+    }
+
+    #[async_trait]
+    impl ExecutionExternalJobAdapter for FixtureExternalJobAdapter {
+        fn provider_key(&self) -> &'static str {
+            "fixture"
+        }
+
+        async fn start(
+            &self,
+            request: &super::ExecutionExternalJobStartRequest,
+        ) -> moa_core::error::Result<super::ExecutionExternalJobStartOutcome> {
+            Ok(super::ExecutionExternalJobStartOutcome::ExternalJob(
+                AsyncToolJob {
+                    provider: request.context.provider.clone(),
+                    provider_job_id: format!("fixture-job-{}", request.context.external_job_uid),
+                    idempotency_key: request.context.idempotency_key.clone(),
+                    callback_auth_reference: "vault://fixture/callback".to_string(),
+                    progress_phase: "queued".to_string(),
+                    cancel_supported: true,
+                    next_reconcile_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+                },
+            ))
+        }
+
+        async fn recover_start(
+            &self,
+            context: &ExternalJobStartContext,
+        ) -> moa_core::error::Result<super::ExecutionExternalJobStartRecovery> {
+            Ok(super::ExecutionExternalJobStartRecovery::Started(
+                AsyncToolJob {
+                    provider: context.provider.clone(),
+                    provider_job_id: format!("fixture-job-{}", context.external_job_uid),
+                    idempotency_key: context.idempotency_key.clone(),
+                    callback_auth_reference: "vault://fixture/callback".to_string(),
+                    progress_phase: "queued".to_string(),
+                    cancel_supported: true,
+                    next_reconcile_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+                },
+            ))
+        }
+
+        async fn authenticate_callback(
+            &self,
+            callback_auth_reference: &str,
+            authentication: &ExecutionExternalJobCallbackAuthentication,
+            body: &[u8],
+        ) -> moa_core::error::Result<bool> {
+            Ok(callback_auth_reference == "vault://fixture/callback"
+                && authentication.body_sha256 == [7; 32]
+                && body == b"fixture-callback")
+        }
+
+        async fn parse_callback(
+            &self,
+            _authentication: &ExecutionExternalJobCallbackAuthentication,
+            _body: &[u8],
+        ) -> moa_core::error::Result<super::ExecutionExternalJobAdapterCallback> {
+            Ok(super::ExecutionExternalJobAdapterCallback {
+                provider_job_id: "job-7".to_string(),
+                provider_event_id: "event-11".to_string(),
+                outcome: AsyncToolJobCallbackOutcome::Terminal {
+                    outcome: AsyncToolJobTerminalOutcome::Cancelled,
+                },
+            })
+        }
+
+        async fn cancel(
+            &self,
+            request: &ExecutionExternalJobCancelRequest,
+        ) -> moa_core::error::Result<AsyncToolJobCancelOutcome> {
+            Ok(AsyncToolJobCancelOutcome::UnknownOutcome {
+                error: serde_json::json!({
+                    "provider_job_id": request.provider_job_id,
+                    "fixture": true,
+                }),
+            })
+        }
+
+        async fn reconcile(
+            &self,
+            _request: &ExecutionExternalJobReconcileRequest,
+        ) -> moa_core::error::Result<AsyncToolJobCallbackOutcome> {
+            Ok(AsyncToolJobCallbackOutcome::Terminal {
+                outcome: AsyncToolJobTerminalOutcome::Cancelled,
+            })
+        }
+    }
+
+    // Pins: an asynchronous outcome is usable only through its exact registered provider
+    // adapter, whose callback authentication and bounded provider operations are deterministic.
+    #[tokio::test]
+    async fn external_job_adapter_registry_fails_closed_and_routes_exact_provider_offline() {
+        let registry = ExecutionExternalJobAdapterRegistry::new([
+            Arc::new(FixtureExternalJobAdapter) as Arc<dyn ExecutionExternalJobAdapter>,
+        ])
+        .expect("fixture registry should be valid");
+        assert!(registry.require("missing").is_err());
+
+        let adapter = registry
+            .require("fixture")
+            .expect("fixture provider should be registered");
+        let start_context = ExternalJobStartContext {
+            external_job_uid: Uuid::from_u128(17),
+            provider: "fixture".to_string(),
+            idempotency_key: "fixture-start-17".to_string(),
+        };
+        let started = adapter
+            .start(&super::ExecutionExternalJobStartRequest {
+                context: start_context.clone(),
+                call: tool_request("fixture_external_job"),
+            })
+            .await
+            .expect("fixture start should complete");
+        let super::ExecutionExternalJobStartOutcome::ExternalJob(started) = started else {
+            panic!("fixture async adapter must return a provider job");
+        };
+        assert_eq!(started.provider, start_context.provider);
+        assert_eq!(started.idempotency_key, start_context.idempotency_key);
+        assert_eq!(
+            started.provider_job_id,
+            format!("fixture-job-{}", start_context.external_job_uid)
+        );
+        let recovered = adapter
+            .recover_start(&start_context)
+            .await
+            .expect("fixture start recovery should complete");
+        let super::ExecutionExternalJobStartRecovery::Started(recovered) = recovered else {
+            panic!("fixture recovery must resolve the same started job");
+        };
+        assert_eq!(recovered.provider_job_id, started.provider_job_id);
+        assert_eq!(recovered.idempotency_key, started.idempotency_key);
+        assert!(
+            adapter
+                .authenticate_callback(
+                    "vault://fixture/callback",
+                    &ExecutionExternalJobCallbackAuthentication {
+                        headers: std::collections::BTreeMap::new(),
+                        body_sha256: [7; 32],
+                    },
+                    b"fixture-callback",
+                )
+                .await
+                .expect("fixture authentication should complete")
+        );
+        let request = ExecutionExternalJobCancelRequest {
+            tenant_id: TenantId::new(),
+            external_job_uid: Uuid::new_v4(),
+            job_generation: 3,
+            provider: "fixture".to_string(),
+            provider_job_id: "job-7".to_string(),
+            idempotency_key: "cancel-job-7".to_string(),
+        };
+        assert_eq!(
+            adapter
+                .cancel(&request)
+                .await
+                .expect("fixture cancellation should complete"),
+            AsyncToolJobCancelOutcome::UnknownOutcome {
+                error: serde_json::json!({
+                    "provider_job_id": "job-7",
+                    "fixture": true,
+                }),
+            }
+        );
+        let parsed = adapter
+            .parse_callback(
+                &ExecutionExternalJobCallbackAuthentication {
+                    headers: std::collections::BTreeMap::new(),
+                    body_sha256: [7; 32],
+                },
+                br#"{"state":"cancelled"}"#,
+            )
+            .await
+            .expect("fixture callback parsing should complete");
+        assert_eq!(parsed.provider_event_id, "event-11");
+        assert_eq!(parsed.provider_job_id, "job-7");
+    }
 
     #[async_trait]
     impl BuiltInTool for ConnectorLookingBuiltIn {
@@ -1965,10 +4055,6 @@ mod tests {
 
         async fn status(&self, _handle: &HandHandle) -> moa_core::error::Result<HandStatus> {
             Ok(HandStatus::Running)
-        }
-
-        async fn pause(&self, _handle: &HandHandle) -> moa_core::error::Result<()> {
-            Ok(())
         }
 
         async fn resume(&self, _handle: &HandHandle) -> moa_core::error::Result<()> {
@@ -2202,6 +4288,7 @@ mod tests {
             run_uid: Uuid::from_u128(10),
             task_uid: Uuid::from_u128(20),
             generation: 1,
+            attempt_generation: 1,
         };
         let next_generation = ExecutionTaskOrigin {
             generation: 2,
@@ -2212,13 +4299,16 @@ mod tests {
             ..first
         };
 
-        assert_eq!(
-            execution_task_hand_scope(first),
-            execution_task_hand_scope(next_generation)
-        );
+        // Generations of one task share a scope by construction now that
+        // `execution_task_hand_scope` takes only the run and task identifiers,
+        // so the surviving assertion is the one with content: siblings differ.
         assert_ne!(
-            execution_task_hand_scope(first),
-            execution_task_hand_scope(sibling)
+            execution_task_hand_scope(first.run_uid, first.task_uid),
+            execution_task_hand_scope(sibling.run_uid, sibling.task_uid)
+        );
+        assert_eq!(
+            execution_hand_scope(ExecutionToolCallOrigin::Task(first)),
+            execution_hand_scope(ExecutionToolCallOrigin::Task(next_generation))
         );
         assert_eq!(
             execution_workspace_scope(ExecutionToolCallOrigin::Task(first)),
@@ -2233,6 +4323,7 @@ mod tests {
                     run_uid: first.run_uid,
                     compensation_id: Uuid::from_u128(30),
                     generation: 1,
+                    attempt_generation: 1,
                 },
             )),
             None,
@@ -2276,6 +4367,7 @@ mod tests {
             run_uid: Uuid::from_u128(10),
             task_uid: Uuid::from_u128(20),
             generation: 3,
+            attempt_generation: 3,
         };
         let next = ExecutionTaskOrigin {
             generation: 4,
@@ -2303,6 +4395,7 @@ mod tests {
             run_uid: Uuid::from_u128(10),
             compensation_id: Uuid::from_u128(30),
             generation: 3,
+            attempt_generation: 3,
         };
         let next = ExecutionCompensationOrigin {
             generation: 4,
@@ -2315,9 +4408,9 @@ mod tests {
             execution_hand_scope(first_origin),
             execution_hand_scope(next_origin)
         );
-        assert_eq!(
-            execution_compensation_hand_scope(first),
-            execution_compensation_hand_scope(next)
+        assert_ne!(
+            execution_compensation_hand_scope(first.run_uid, first.compensation_id),
+            execution_compensation_hand_scope(first.run_uid, Uuid::from_u128(31))
         );
         let first_name = execution_tool_run_name(&definition, &request, first_origin);
         let next_name = execution_tool_run_name(&definition, &request, next_origin);

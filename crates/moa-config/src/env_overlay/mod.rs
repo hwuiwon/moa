@@ -628,10 +628,6 @@ pub struct EnvOverlay {
     pub session_limits_worker_resume_max_per_window: Option<u32>,
     /// `MOA_SESSION_LIMITS_WORKER_RESUME_WINDOW_MS`.
     pub session_limits_worker_resume_window_ms: Option<u64>,
-    /// `MOA_SESSION_LIMITS_WORKER_INPUT_TIMEOUT_MS`.
-    pub session_limits_worker_input_timeout_ms: Option<u64>,
-    /// `MOA_SESSION_LIMITS_COORDINATOR_INPUT_TIMEOUT_MS`.
-    pub session_limits_coordinator_input_timeout_ms: Option<u64>,
     /// `MOA_SESSION_LIMITS_WORKER_HEARTBEAT_INTERVAL_MS`.
     pub session_limits_worker_heartbeat_interval_ms: Option<u64>,
     /// `MOA_SESSION_LIMITS_WORKER_HEARTBEAT_STALE_MS`.
@@ -730,6 +726,40 @@ pub struct EnvOverlay {
     pub execution_repeated_failure_limit: Option<u32>,
     /// `MOA_EXECUTION_MAX_IN_FLIGHT_TASKS`.
     pub execution_max_in_flight_tasks: Option<usize>,
+    /// `MOA_EXECUTION_MAXIMUM_HORIZON_SECONDS`.
+    pub execution_maximum_horizon_seconds: Option<u64>,
+    /// `MOA_EXECUTION_MAXIMUM_ACTIVATION_STEPS`.
+    pub execution_maximum_activation_steps: Option<usize>,
+    /// `MOA_EXECUTION_DISPATCH_BATCH_SIZE`.
+    pub execution_dispatch_batch_size: Option<usize>,
+    /// `MOA_EXECUTION_ACTIVE_ATTEMPT_TIMEOUT_SECONDS`.
+    pub execution_active_attempt_timeout_seconds: Option<u64>,
+    /// `MOA_EXECUTION_ATTEMPT_HEARTBEAT_STALENESS_SECONDS`.
+    pub execution_attempt_heartbeat_staleness_seconds: Option<u64>,
+    /// `MOA_EXECUTION_MAX_TENANT_ACTIVE_RUNS`.
+    pub execution_max_tenant_active_runs: Option<u32>,
+    /// `MOA_EXECUTION_MAX_FLEET_ACTIVE_RUNS`.
+    pub execution_max_fleet_active_runs: Option<u32>,
+    /// `MOA_EXECUTION_MAX_TENANT_ACTIVE_TASKS`.
+    pub execution_max_tenant_active_tasks: Option<u32>,
+    /// `MOA_EXECUTION_MAX_FLEET_ACTIVE_TASKS`.
+    pub execution_max_fleet_active_tasks: Option<u32>,
+    /// `MOA_EXECUTION_MAX_TENANT_PARKED_RUNS`.
+    pub execution_max_tenant_parked_runs: Option<u32>,
+    /// `MOA_EXECUTION_MAX_FLEET_PARKED_RUNS`.
+    pub execution_max_fleet_parked_runs: Option<u32>,
+    /// `MOA_EXECUTION_MAX_TENANT_SCHEDULED_TRIGGERS`.
+    pub execution_max_tenant_scheduled_triggers: Option<u32>,
+    /// `MOA_EXECUTION_MAX_FLEET_SCHEDULED_TRIGGERS`.
+    pub execution_max_fleet_scheduled_triggers: Option<u32>,
+    /// `MOA_EXECUTION_MAX_TENANT_EXTERNAL_JOBS`.
+    pub execution_max_tenant_external_jobs: Option<u32>,
+    /// `MOA_EXECUTION_MAX_FLEET_EXTERNAL_JOBS`.
+    pub execution_max_fleet_external_jobs: Option<u32>,
+    /// `MOA_EXECUTION_TRIGGER_RECONCILIATION_CADENCE_SECONDS`.
+    pub execution_trigger_reconciliation_cadence_seconds: Option<u64>,
+    /// `MOA_EXECUTION_TERMINAL_DETAIL_RETENTION_DAYS`.
+    pub execution_terminal_detail_retention_days: Option<u64>,
     /// `MOA_EXECUTION_MAX_TASKS`.
     pub execution_max_tasks: Option<u64>,
     /// `MOA_EXECUTION_MAX_TOKENS`.
@@ -1203,6 +1233,7 @@ const ALLOWLIST_EXACT: &[&str] = &[
     "MOA_ORCHESTRATOR_FEATURES",
     "MOA_PERSIST_TURN_METRICS",
     "MOA_PROVIDERS_OVERRIDE",
+    "MOA_RESTATE_ADMIN_URL", // maintenance-only drain observer override
     "MOA_SCIM_BASE_URL",
     "MOA_SKIP_FGA",
     "MOA_TOXIPROXY_URL",

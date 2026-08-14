@@ -82,7 +82,7 @@ pub trait CronJob {
     /// Resume firing and reschedule from the current wall clock.
     async fn resume() -> Result<(), HandlerError>;
 
-    /// Stop and clear all state for this job key.
+    /// Stop and clear the schedule while retaining its version tombstone.
     async fn stop() -> Result<(), HandlerError>;
 
     /// Internal handler fired by delayed sends.
@@ -109,13 +109,9 @@ impl CronJob for CronJobImpl {
         validate(&config)?;
 
         let mut state = load_state(&ctx).await?;
-        if state.config.as_ref() == Some(&config) && !state.paused {
+        if !install_config(&mut state, config)? {
             return Ok(());
         }
-
-        state.config = Some(config);
-        state.paused = false;
-        state.version = state.version.wrapping_add(1);
         persist_state(&ctx, &state);
 
         schedule_next_tick(&ctx, &mut state).await?;
@@ -129,7 +125,7 @@ impl CronJob for CronJobImpl {
         annotate_restate_handler_span("CronJob", "pause");
         let mut state = load_state(&ctx).await?;
         state.paused = true;
-        state.version = state.version.wrapping_add(1);
+        advance_version(&mut state)?;
         persist_state(&ctx, &state);
         Ok(())
     }
@@ -144,7 +140,7 @@ impl CronJob for CronJobImpl {
         }
 
         state.paused = false;
-        state.version = state.version.wrapping_add(1);
+        advance_version(&mut state)?;
         persist_state(&ctx, &state);
 
         schedule_next_tick(&ctx, &mut state).await?;
@@ -156,7 +152,9 @@ impl CronJob for CronJobImpl {
     async fn stop(&self, ctx: ObjectContext<'_>) -> Result<(), HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("CronJob", "stop");
-        ctx.clear_all();
+        let mut state = load_state(&ctx).await?;
+        stop_schedule(&mut state);
+        persist_state(&ctx, &state);
         Ok(())
     }
 
@@ -171,10 +169,7 @@ impl CronJob for CronJobImpl {
         let payload = payload.into_inner();
         let state = load_state(&ctx).await?;
 
-        if payload.version != state.version || state.paused {
-            return Ok(());
-        }
-        let Some(config) = state.config.clone() else {
+        let Some(config) = config_for_tick(&state, &payload).cloned() else {
             return Ok(());
         };
 
@@ -239,6 +234,42 @@ where
 
 fn persist_state(ctx: &ObjectContext<'_>, state: &CronJobState) {
     ctx.set(K_STATE, Json::from(state.clone()));
+}
+
+fn advance_version(state: &mut CronJobState) -> Result<(), TerminalError> {
+    state.version = state
+        .version
+        .checked_add(1)
+        .ok_or_else(|| TerminalError::new("cron job version exhausted"))?;
+    Ok(())
+}
+
+fn install_config(state: &mut CronJobState, config: CronJobConfig) -> Result<bool, TerminalError> {
+    if state.config.as_ref() == Some(&config) && !state.paused {
+        return Ok(false);
+    }
+
+    advance_version(state)?;
+    state.config = Some(config);
+    state.last_scheduled_fire = None;
+    state.paused = false;
+    Ok(true)
+}
+
+fn stop_schedule(state: &mut CronJobState) {
+    state.config = None;
+    state.last_scheduled_fire = None;
+    state.paused = false;
+}
+
+fn config_for_tick<'a>(
+    state: &'a CronJobState,
+    payload: &TickPayload,
+) -> Option<&'a CronJobConfig> {
+    if state.paused || payload.version != state.version {
+        return None;
+    }
+    state.config.as_ref()
 }
 
 fn validate(config: &CronJobConfig) -> Result<(), HandlerError> {
@@ -385,5 +416,77 @@ mod tests {
         assert_eq!(next.second(), 0);
         assert_eq!(next.nanosecond(), 0);
         assert!(next > Utc::now());
+    }
+
+    #[test]
+    fn stop_reconfigure_rejects_late_tick_from_old_incarnation() {
+        // Pins: stopping and reconfiguring a CronJob never lets a delayed tick from the
+        // previous configuration dispatch against the new target.
+        let original_config = valid_config();
+        let mut state = CronJobState::default();
+        assert!(
+            install_config(&mut state, original_config)
+                .expect("initial configuration should advance the incarnation")
+        );
+        let stale_tick = TickPayload {
+            version: state.version,
+            scheduled_for: DateTime::<Utc>::from_timestamp(1_700_000_000, 0)
+                .expect("fixture timestamp should be valid"),
+        };
+        assert_eq!(state.version, 1);
+        assert_eq!(config_for_tick(&state, &stale_tick), state.config.as_ref());
+
+        stop_schedule(&mut state);
+        assert_eq!(state.version, 1);
+        assert_eq!(state.config, None);
+        assert_eq!(state.last_scheduled_fire, None);
+        assert!(!state.paused);
+        assert_eq!(config_for_tick(&state, &stale_tick), None);
+
+        let replacement_config = CronJobConfig {
+            target_handler: "replacement".to_string(),
+            ..valid_config()
+        };
+        assert!(
+            install_config(&mut state, replacement_config.clone())
+                .expect("replacement configuration should advance the incarnation")
+        );
+        assert_eq!(state.version, 2);
+        assert_eq!(state.config, Some(replacement_config));
+        assert_eq!(config_for_tick(&state, &stale_tick), None);
+
+        let replacement_tick = TickPayload {
+            version: state.version,
+            scheduled_for: stale_tick.scheduled_for,
+        };
+        assert_eq!(
+            config_for_tick(&state, &replacement_tick),
+            state.config.as_ref()
+        );
+    }
+
+    #[test]
+    fn version_exhaustion_preserves_the_existing_incarnation() {
+        // Pins: version rollover cannot make an ancient delayed tick current again.
+        let mut state = CronJobState {
+            config: Some(valid_config()),
+            version: u64::MAX,
+            ..CronJobState::default()
+        };
+
+        let replacement_config = CronJobConfig {
+            target_handler: "replacement".to_string(),
+            ..valid_config()
+        };
+        let error = install_config(&mut state, replacement_config)
+            .expect_err("an exhausted version must fail closed");
+
+        assert_eq!(state.version, u64::MAX);
+        assert_eq!(state.config, Some(valid_config()));
+        assert_eq!(
+            error.message(),
+            "cron job version exhausted",
+            "exhaustion should return the exact terminal reason"
+        );
     }
 }

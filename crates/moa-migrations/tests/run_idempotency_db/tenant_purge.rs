@@ -709,7 +709,7 @@ async fn seed_tenant_purge_activated_release_chain(
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
 async fn bounded_tenant_purge_final_schema_executes_bounded_batches_db() {
-    // Pins: a pristine final schema persists exactly 142 purge stages, installs
+    // Pins: a pristine final schema persists exactly 160 purge stages, installs
     // statement fences, and advances a real purge in fixed-size batches.
     let admin_url = test_database_url();
     let db_name = unique_db_name();
@@ -833,7 +833,7 @@ async fn bounded_tenant_purge_final_schema_executes_bounded_batches_db() {
         )
         .fetch_one(&target)
         .await?;
-        let legacy_release_cleanup: (bool, i64, i64, bool, String) = sqlx::query_as(
+        let legacy_release_cleanup: (bool, i64, bool, String) = sqlx::query_as(
             r#"
             WITH legacy_tables(table_name) AS (
                 VALUES
@@ -860,21 +860,7 @@ async fn bounded_tenant_purge_final_schema_executes_bounded_batches_db() {
                           'artifact_release_partition_purge'
                       )
                 ),
-                (
-                    SELECT count(*)
-                    FROM legacy_tables AS legacy
-                    WHERE has_table_privilege(
-                              'moa_artifact_releaser',
-                              format('moa.%I', legacy.table_name),
-                              'SELECT'
-                          )
-                       OR has_table_privilege(
-                              'moa_artifact_releaser',
-                              format('moa.%I', legacy.table_name),
-                              'DELETE'
-                          )
-                ),
-                has_schema_privilege('moa_artifact_releaser', 'moa', 'USAGE'),
+                to_regrole('moa_artifact_releaser') IS NULL,
                 pg_get_functiondef('moa.artifact_activation_audit_guard()'::REGPROCEDURE)
             "#,
         )
@@ -1308,7 +1294,7 @@ async fn bounded_tenant_purge_final_schema_executes_bounded_batches_db() {
             true,
         )
     );
-    assert_eq!(catalog_count, 142);
+    assert_eq!(catalog_count, 160);
     assert_eq!(
         trigger_kinds,
         vec![
@@ -1341,24 +1327,20 @@ async fn bounded_tenant_purge_final_schema_executes_bounded_batches_db() {
         legacy_release_cleanup.1, 0,
         "all legacy release read/delete policies must be absent"
     );
-    assert_eq!(
-        legacy_release_cleanup.2, 0,
-        "the inert releaser role must retain no release-table privileges"
-    );
     assert!(
-        !legacy_release_cleanup.3,
-        "the inert releaser role must retain no moa schema usage"
+        legacy_release_cleanup.2,
+        "the retired artifact releaser role must be absent"
     );
     assert!(
         legacy_release_cleanup
-            .4
+            .3
             .contains("moa.tenant_purge_bypass_valid")
-            && !legacy_release_cleanup.4.contains("moa_artifact_releaser")
+            && !legacy_release_cleanup.3.contains("moa_artifact_releaser")
             && !legacy_release_cleanup
-                .4
+                .3
                 .contains("artifact_release_purge_partition"),
         "the audit guard must admit deletion only through the validated bounded purge: {}",
-        legacy_release_cleanup.4
+        legacy_release_cleanup.3
     );
     assert_eq!(
         audit_guard_contract,
@@ -1395,7 +1377,7 @@ async fn bounded_tenant_purge_final_schema_executes_bounded_batches_db() {
     );
     assert_eq!(
         bounded_facts,
-        (0, 0, 1, 1001, 2012, 0, 1),
+        (0, 0, 1, 1001, 2014, 0, 1),
         "the target release-policy set must be gone while the neighboring policy survives"
     );
     assert_eq!(
@@ -1419,9 +1401,9 @@ async fn bounded_tenant_purge_final_schema_executes_bounded_batches_db() {
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
 async fn sandbox_workspace_purge_catalog_db() {
-    // Pins: V58 extends the current 134-stage catalog to exactly 142 with all
-    // workspace rows fenced and checkpoint head/parent ordering encoded in the
-    // bounded owner-only purge function.
+    // Pins: a full clean apply lands a 160-stage catalog (V58 took it to 142, V59
+    // to 159, and V60 to 160) with all workspace rows fenced and checkpoint
+    // head/parent ordering encoded in the bounded owner-only purge function.
     let admin_url = test_database_url();
     let db_name = unique_db_name();
     let tenant_id = uuid::Uuid::new_v4();
@@ -1463,6 +1445,18 @@ async fn sandbox_workspace_purge_catalog_db() {
         ])
         .fetch_all(&target)
         .await?;
+        let planning_stages: Vec<String> = sqlx::query_scalar(
+            "SELECT stage_name FROM moa.tenant_purge_catalog \
+             WHERE stage_name = ANY($1) ORDER BY stage_order",
+        )
+        .bind(vec![
+            "moa.execution_amendment_planning_settlement",
+            "moa.execution_amendment_planning_reservation",
+            "moa.execution_planner_call_audit",
+            "moa.execution_run",
+        ])
+        .fetch_all(&target)
+        .await?;
         let fence_count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM information_schema.triggers \
              WHERE event_object_schema = 'moa' \
@@ -1480,6 +1474,8 @@ async fn sandbox_workspace_purge_catalog_db() {
             "sandbox_workspace_grants",
             "sandbox_storage_resources",
             "sandbox_capacity_reservations",
+            "execution_amendment_planning_reservation",
+            "execution_amendment_planning_settlement",
         ])
         .fetch_one(&target)
         .await?;
@@ -1535,6 +1531,7 @@ async fn sandbox_workspace_purge_catalog_db() {
             second,
             catalog_count,
             workspace_stages,
+            planning_stages,
             fence_count,
             global_catalog_count,
             purge_definition,
@@ -1551,6 +1548,7 @@ async fn sandbox_workspace_purge_catalog_db() {
         second,
         catalog_count,
         workspace_stages,
+        planning_stages,
         fence_count,
         global_catalog_count,
         purge_definition,
@@ -1559,7 +1557,17 @@ async fn sandbox_workspace_purge_catalog_db() {
     ) = outcome.expect("sandbox workspace purge schema assertions should complete");
     assert_eq!(first, expected_migration_labels());
     assert!(second.is_empty(), "V58 must not reapply: {second:?}");
-    assert_eq!(catalog_count, 142);
+    assert_eq!(catalog_count, 160);
+    assert_eq!(
+        planning_stages,
+        vec![
+            "moa.execution_amendment_planning_settlement",
+            "moa.execution_amendment_planning_reservation",
+            "moa.execution_planner_call_audit",
+            "moa.execution_run",
+        ],
+        "settlements must purge before reservations and both before their audit/run parents"
+    );
     assert_eq!(
         workspace_stages,
         vec![
@@ -1594,10 +1602,10 @@ async fn sandbox_workspace_purge_catalog_db() {
             ),
         ]
     );
-    assert_eq!(fence_count, 14);
+    assert_eq!(fence_count, 18);
     assert_eq!(global_catalog_count, 0);
-    assert!(purge_definition.contains("catalog_count <> 142"));
-    assert!(purge_definition.contains("exactly 142 tables"));
+    assert!(purge_definition.contains("catalog_count <> 160"));
+    assert!(purge_definition.contains("exactly 160 tables"));
     assert!(purge_definition.contains("SET current_checkpoint_id = NULL"));
     assert!(purge_definition.contains("ORDER BY target.generation DESC"));
     assert_eq!(checkpoint_columns.len(), 7);

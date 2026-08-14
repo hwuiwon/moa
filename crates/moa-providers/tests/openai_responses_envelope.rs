@@ -2,13 +2,13 @@
 
 use std::collections::HashMap;
 
-use moa_core::transcript::ProviderEvent;
 use moa_core::{
     traits::LLMProvider, types::completion::CompletionContent,
     types::completion::CompletionRequest, types::completion::StopReason,
     types::completion::TokenUsage, types::completion::ToolCallContent,
     types::completion::ToolInvocation, types::context::ContextMessage, types::identifiers::ModelId,
 };
+use moa_eval_core::transcript::ProviderEvent;
 use moa_providers::{OpenAIProvider, debug_build_openai_request_body};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

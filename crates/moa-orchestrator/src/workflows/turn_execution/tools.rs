@@ -32,8 +32,7 @@ use crate::turn::util::{
 use crate::turn_driver::progress as driver_progress;
 use crate::workflows::errors::moa_error_to_handler_error;
 use crate::workflows::turn_events::{
-    COORDINATOR_SECURITY_INPUT_TIMEOUT_MESSAGE, append_tool_call_event, append_tool_result_event,
-    record_segment_tool_use,
+    append_tool_call_event, append_tool_result_event, record_segment_tool_use,
 };
 use crate::workflows::turn_progress;
 use crate::workflows::turn_responsiveness::{
@@ -148,8 +147,6 @@ pub(super) enum ToolDispatchOutcome {
     ToolBudgetExceeded(ToolBudgetExhausted),
     /// The prompt-injection circuit reached its halt threshold for this owner.
     SecurityHalt,
-    /// The coordinator's bounded security-input wait expired without an answer.
-    SecurityInputTimedOut,
 }
 
 #[derive(Debug, Deserialize)]
@@ -480,10 +477,6 @@ pub(super) async fn dispatch_response_tool_calls(
                 *last_summary = Some(reason);
                 return Ok(ToolDispatchOutcome::Cancelled);
             }
-            ToolCallDisposition::SecurityInputTimedOut => {
-                *last_summary = Some(COORDINATOR_SECURITY_INPUT_TIMEOUT_MESSAGE.to_string());
-                return Ok(ToolDispatchOutcome::SecurityInputTimedOut);
-            }
             // `handle_tool_call` already parked on the user's reply before
             // returning, so by the time control reaches here the suspend has been
             // answered and the loop may continue with the capability disabled.
@@ -659,7 +652,8 @@ async fn handle_tool_call(
                 *tool_context.delegated_worker = true;
             }
         }
-        GovernedInvocationOutcome::UnknownOutcome { .. }
+        GovernedInvocationOutcome::ExternalJob { .. }
+        | GovernedInvocationOutcome::UnknownOutcome { .. }
         | GovernedInvocationOutcome::NotDispatched { .. } => {
             return Err(TerminalError::new(
                 "root-turn governed invocation returned an execution-only outcome",
@@ -677,7 +671,6 @@ async fn handle_tool_call(
             tool_context.turn_id,
             tool_context.generation,
             suspend_tool_id,
-            workflow.session_limits().coordinator_input_timeout_ms,
         )
         .await?;
         disposition = match input_outcome {
@@ -685,7 +678,6 @@ async fn handle_tool_call(
             CoordinatorSecurityInputOutcome::Cancelled(reason) => {
                 ToolCallDisposition::Cancelled(reason)
             }
-            CoordinatorSecurityInputOutcome::TimedOut => ToolCallDisposition::SecurityInputTimedOut,
         };
     }
     Ok(disposition)
@@ -702,8 +694,6 @@ enum ToolCallDisposition {
     SecurityNeedsInput,
     /// Cancellation won while the coordinator was parked for user input.
     Cancelled(String),
-    /// The bounded coordinator input wait expired.
-    SecurityInputTimedOut,
 }
 
 /// Records the refusal of a tool whose capability the circuit already disabled.
@@ -766,7 +756,6 @@ async fn await_coordinator_security_input(
     turn_id: &str,
     generation: u64,
     tool_id: ToolCallId,
-    timeout_ms: u64,
 ) -> Result<CoordinatorSecurityInputOutcome, HandlerError> {
     let input_request_id = format!("security:{turn_id}:{generation}:{tool_id}");
     let awakeable = ctx.awakeable::<String>();
@@ -796,9 +785,6 @@ async fn await_coordinator_security_input(
         },
         reason = ctx.promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE) => {
             CoordinatorSecurityInputOutcome::Cancelled(reason?)
-        },
-        _ = ctx.sleep(std::time::Duration::from_millis(timeout_ms)) => {
-            CoordinatorSecurityInputOutcome::TimedOut
         }
     };
 
@@ -825,7 +811,6 @@ async fn await_coordinator_security_input(
 enum CoordinatorSecurityInputOutcome {
     Answered,
     Cancelled(String),
-    TimedOut,
 }
 
 /// Fixed question asked when the circuit suspends a coordinator turn.

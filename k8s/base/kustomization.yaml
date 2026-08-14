@@ -7,6 +7,7 @@ resources:
   - 20-orchestrator-deployment.yaml
   - 21-session-status-migrator.yaml
   - 22-restate-bootstrap-job.yaml
+  - 25-maintenance-deployment.yaml
   - 25-orchestrator-service.yaml
   - 26-orchestrator-network-policy.yaml
   - 30-orchestrator-hpa.yaml

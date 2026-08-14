@@ -204,7 +204,14 @@ fn execution_candidate(objective: &str) -> String {
                     "output_schema": { "type": "object" },
                     "operation": {
                         "kind": "wait_signal",
-                        "signal_name": "fixture_release"
+                        "signal_name": "fixture_release",
+                        "wait_policy": {
+                            "expiry": {
+                                "kind": "after",
+                                "delay_seconds": 3600
+                            },
+                            "on_expiry": { "kind": "fail_task" }
+                        }
                     },
                     "compensation": null,
                     "retry": {

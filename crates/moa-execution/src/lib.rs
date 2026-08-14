@@ -12,7 +12,7 @@ pub mod compiler;
 pub mod completion;
 /// Crate error contract.
 pub mod error;
-/// Pure execution scheduling.
+/// Pure bounded logical-task materialization.
 pub mod interpreter;
 /// Deterministic replan-stop evaluation.
 pub mod replan;
@@ -42,7 +42,10 @@ pub use completion::{
     evaluate_completion, execution_terminal_reason,
 };
 pub use error::Error;
-pub use interpreter::{ScheduleRequest, ready_empty_map_nodes, schedule};
+pub use interpreter::{
+    NodeMaterializationPage, ReduceMaterializationCursor, ReduceMaterializationPageInput,
+    ScheduleRequest, materialize_node_page,
+};
 pub use replan::{ReplanDecision, ReplanEvaluationRequest, ReplanStopReason, evaluate_replan_stop};
 pub use state::{ExecutionSourceKind, ExecutionTerminalReason};
 

@@ -1,7 +1,12 @@
 //! Background timeout reaper for builtin async authorization challenges.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use moa_authz::{AwakeableResolveError, AwakeableResolver};
 use moa_core::traits::ApprovalDecision;
@@ -9,12 +14,37 @@ use moa_observability::{
     record_builtin_approval_decision, record_builtin_approval_oldest_pending_age,
     record_builtin_approval_pending_depth,
 };
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 use tokio::time::interval;
 
 use crate::authz_challenges::store as authz_challenge_store;
+use crate::services::durable_timeout::{
+    AuthzChallengeTimeout, DURABLE_TIMEOUT_RECONCILIATION_INTERVAL,
+};
+
+/// Durable delivery selected after applying one exact authz-challenge timeout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "delivery", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AuthzChallengeTimeoutDelivery {
+    /// The row no longer matches the delayed challenge incarnation.
+    Stale,
+    /// Resolution is complete or is already owned by another exact claim.
+    AlreadyDelivered,
+    /// The exact timeout claim must resolve its original awakeable.
+    Resolve {
+        /// Stable challenge row identifier.
+        challenge_id: uuid::Uuid,
+        /// Exact awakeable fenced by this delayed delivery.
+        awakeable_id: String,
+        /// Claim token that must fence the delivery acknowledgement.
+        resolve_claim_token: uuid::Uuid,
+        /// Whether this delivery changed the row from pending to timeout.
+        newly_timed_out: bool,
+    },
+}
 
 /// Authz challenge reaper failures.
 #[derive(Debug, Error)]
@@ -45,6 +75,9 @@ pub enum ReaperError {
     /// Awakeable resolution through the shared resolver trait failed.
     #[error("resolve awakeable: {0}")]
     Resolve(#[from] AwakeableResolveError),
+    /// The supervised reaper task could not be joined.
+    #[error("authz-challenge reaper task join failed: {0}")]
+    Join(String),
 }
 
 /// Background worker that marks expired authz challenges as timed out.
@@ -59,34 +92,48 @@ impl AuthzChallengeReaper {
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
-            sweep_interval: Duration::from_secs(30),
+            sweep_interval: DURABLE_TIMEOUT_RECONCILIATION_INTERVAL,
         }
     }
 
     /// Spawn the reaper as a Tokio task.
     pub fn spawn(self, resolver: Arc<dyn AwakeableResolver>) -> AuthzChallengeReaperHandle {
-        let (shutdown, mut shutdown_rx) = oneshot::channel::<()>();
+        let health = Arc::new(AuthzChallengeReaperHealth {
+            started_at: Instant::now(),
+            last_success: RwLock::new(None),
+            exited: AtomicBool::new(false),
+        });
+        let heartbeat_maximum_age = self.sweep_interval.saturating_mul(3);
+        let (shutdown, mut shutdown_rx) = watch::channel(false);
+        let task_health = Arc::clone(&health);
         let task = tokio::spawn(async move {
-            let mut tick = interval(self.sweep_interval);
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = &mut shutdown_rx => {
-                        tracing::info!("authz challenge reaper received shutdown");
-                        break;
+            let result = async {
+                let mut tick = interval(self.sweep_interval);
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_rx.changed() => {
+                            tracing::info!("authz challenge reaper received shutdown");
+                            return Ok(());
+                        }
+                        _ = tick.tick() => {}
                     }
-                    _ = tick.tick() => {}
+                    self.sweep(resolver.as_ref()).await?;
+                    // Queue sampling is observational and cannot invalidate a
+                    // completed correctness pass.
+                    let _ = self.sample_gauges().await;
+                    set_authz_challenge_reaper_heartbeat(&task_health);
                 }
-                if let Err(error) = self.sweep(resolver.as_ref()).await {
-                    tracing::error!(error = %error, "authz challenge reaper sweep failed");
-                }
-                // Best-effort in the tick loop; the error is logged inside.
-                let _ = self.sample_gauges().await;
             }
+            .await;
+            task_health.exited.store(true, Ordering::Release);
+            result
         });
         AuthzChallengeReaperHandle {
-            shutdown: Some(shutdown),
+            health,
+            shutdown,
             task,
+            heartbeat_maximum_age,
         }
     }
 
@@ -173,6 +220,41 @@ impl AuthzChallengeReaper {
 
         Ok(resolved_count)
     }
+
+    /// Applies and claims one exact delayed authz-challenge timeout.
+    ///
+    /// Both the row id and original awakeable are compared. A late delivery
+    /// from an older challenge incarnation therefore returns
+    /// [`AuthzChallengeTimeoutDelivery::Stale`] without changing or resolving
+    /// the current row.
+    pub async fn apply_timeout(
+        &self,
+        timeout: &AuthzChallengeTimeout,
+    ) -> Result<AuthzChallengeTimeoutDelivery, sqlx::Error> {
+        let request = authz_challenge_store::BuiltinChallengeTimeoutLookup {
+            challenge_id: timeout.challenge_id,
+            awakeable_id: timeout.awakeable_id.clone(),
+        };
+        match authz_challenge_store::apply_builtin_challenge_timeout(&self.pool, &request).await? {
+            authz_challenge_store::BuiltinChallengeTimeoutClaim::Resolve {
+                challenge_id,
+                awakeable_id,
+                resolve_claim_token,
+                newly_timed_out,
+            } => Ok(AuthzChallengeTimeoutDelivery::Resolve {
+                challenge_id,
+                awakeable_id,
+                resolve_claim_token,
+                newly_timed_out,
+            }),
+            authz_challenge_store::BuiltinChallengeTimeoutClaim::AlreadyDelivered => {
+                Ok(AuthzChallengeTimeoutDelivery::AlreadyDelivered)
+            }
+            authz_challenge_store::BuiltinChallengeTimeoutClaim::Stale => {
+                Ok(AuthzChallengeTimeoutDelivery::Stale)
+            }
+        }
+    }
 }
 
 fn missing_awakeable_error(error: &AwakeableResolveError) -> bool {
@@ -200,17 +282,90 @@ fn decision_from_unresolved_challenge(
 
 /// Handle used to stop the authz challenge reaper.
 pub struct AuthzChallengeReaperHandle {
-    shutdown: Option<oneshot::Sender<()>>,
-    task: tokio::task::JoinHandle<()>,
+    health: Arc<AuthzChallengeReaperHealth>,
+    shutdown: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<Result<(), ReaperError>>,
+    heartbeat_maximum_age: Duration,
 }
 
 impl AuthzChallengeReaperHandle {
-    /// Signal shutdown and wait for the task to exit.
-    pub async fn shutdown(mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
+    /// Returns a cloneable readiness projection for the supervised reaper.
+    #[must_use]
+    pub fn readiness(&self) -> AuthzChallengeReaperReadiness {
+        AuthzChallengeReaperReadiness {
+            health: Arc::clone(&self.health),
+            heartbeat_maximum_age: self.heartbeat_maximum_age,
         }
-        let _ = self.task.await;
+    }
+
+    /// Waits for the reaper task so unexpected failure can terminate its owner process.
+    pub async fn task_result(&mut self) -> Result<(), ReaperError> {
+        match (&mut self.task).await {
+            Ok(result) => result,
+            Err(error) => Err(ReaperError::Join(error.to_string())),
+        }
+    }
+
+    /// Signals shutdown and waits for the task to exit.
+    pub async fn shutdown(mut self) -> Result<(), ReaperError> {
+        let _ = self.shutdown.send(true);
+        self.task_result().await
+    }
+}
+
+impl Drop for AuthzChallengeReaperHandle {
+    fn drop(&mut self) {
+        self.health.exited.store(true, Ordering::Release);
+        let _ = self.shutdown.send(true);
+        self.task.abort();
+    }
+}
+
+/// Cloneable readiness projection for builtin-authz timeout reconciliation.
+#[derive(Clone)]
+pub struct AuthzChallengeReaperReadiness {
+    health: Arc<AuthzChallengeReaperHealth>,
+    heartbeat_maximum_age: Duration,
+}
+
+impl AuthzChallengeReaperReadiness {
+    /// Returns the age of the most recent complete successful reconciliation pass.
+    #[must_use]
+    pub fn heartbeat_age(&self) -> Duration {
+        let heartbeat = self
+            .health
+            .last_success
+            .read()
+            .ok()
+            .and_then(|value| *value);
+        heartbeat.map_or_else(|| self.health.started_at.elapsed(), |value| value.elapsed())
+    }
+
+    /// Returns why the reaper must not be considered ready.
+    #[must_use]
+    pub fn unready_reason(&self) -> Option<String> {
+        if self.health.exited.load(Ordering::Acquire) {
+            return Some("authz-challenge reaper exited".to_string());
+        }
+        super::action_reviews_reaper::reaper_heartbeat_reason(
+            "authz-challenge reaper",
+            self.health.started_at,
+            &self.health.last_success,
+            self.heartbeat_maximum_age,
+        )
+    }
+}
+
+#[derive(Debug)]
+struct AuthzChallengeReaperHealth {
+    started_at: Instant,
+    last_success: RwLock<Option<Instant>>,
+    exited: AtomicBool,
+}
+
+fn set_authz_challenge_reaper_heartbeat(health: &AuthzChallengeReaperHealth) {
+    if let Ok(mut heartbeat) = health.last_success.write() {
+        *heartbeat = Some(Instant::now());
     }
 }
 
@@ -299,6 +454,34 @@ mod tests {
         assert_eq!(
             decision_from_unresolved_challenge(&timeout).expect("timeout maps"),
             ApprovalDecision::Timeout
+        );
+    }
+
+    #[test]
+    fn readiness_requires_a_complete_pass_and_rejects_exit() {
+        // Pins: the maintenance role cannot report ready before this sole
+        // reconciliation owner succeeds or after it exits.
+        let health = Arc::new(AuthzChallengeReaperHealth {
+            started_at: Instant::now(),
+            last_success: RwLock::new(None),
+            exited: AtomicBool::new(false),
+        });
+        let readiness = AuthzChallengeReaperReadiness {
+            health: Arc::clone(&health),
+            heartbeat_maximum_age: Duration::from_secs(60),
+        };
+        assert_eq!(
+            readiness.unready_reason().as_deref(),
+            Some("authz-challenge reaper has not completed its first pass")
+        );
+
+        set_authz_challenge_reaper_heartbeat(&health);
+        assert_eq!(readiness.unready_reason(), None);
+
+        health.exited.store(true, Ordering::Release);
+        assert_eq!(
+            readiness.unready_reason().as_deref(),
+            Some("authz-challenge reaper exited")
         );
     }
 }

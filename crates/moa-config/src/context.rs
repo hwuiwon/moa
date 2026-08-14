@@ -73,14 +73,6 @@ pub struct SessionLimitsConfig {
     pub worker_resume_max_per_window: u32,
     /// Rolling-window length, in milliseconds, for the guarded parent-resume budget.
     pub worker_resume_window_ms: u64,
-    /// Maximum time a child `request_input` round-trip blocks on its awakeable before
-    /// returning a "no input received" result so the child can proceed or abort. Kept
-    /// large because a human answer (audience = user) may take minutes.
-    pub worker_input_timeout_ms: u64,
-    /// Maximum time a coordinator security-input round-trip blocks before the turn
-    /// stops with a safe timeout result. Kept large because the owning user may take
-    /// minutes to answer.
-    pub coordinator_input_timeout_ms: u64,
     /// Target cadence, in milliseconds, at which an active child refreshes its
     /// telemetry-plane heartbeat while running. Sizes the heartbeat the watchdog
     /// observes; consumers treat `0` as the built-in default cadence.
@@ -111,8 +103,6 @@ impl Default for SessionLimitsConfig {
             worker_cleanup_grace_ms: 60_000,
             worker_resume_max_per_window: 6,
             worker_resume_window_ms: 600_000,
-            worker_input_timeout_ms: 1_800_000,
-            coordinator_input_timeout_ms: 1_800_000,
             worker_heartbeat_interval_ms: 15_000,
             worker_heartbeat_stale_ms: 60_000,
         }
@@ -468,12 +458,6 @@ mod tests {
         let limits = SessionLimitsConfig::default();
         assert_eq!(limits.worker_resume_max_per_window, 6);
         assert_eq!(limits.worker_resume_window_ms, 600_000);
-        // The needs_input round-trip ships with a large (but finite) default so a human
-        // answer has time to arrive without blocking a child turn forever.
-        assert_eq!(limits.worker_input_timeout_ms, 1_800_000);
-        // The coordinator's security-input suspend is bounded by the same human-scale
-        // default and cannot fence a session forever.
-        assert_eq!(limits.coordinator_input_timeout_ms, 1_800_000);
     }
 
     #[test]
@@ -482,8 +466,6 @@ mod tests {
         let overlay = EnvOverlay {
             session_limits_worker_resume_max_per_window: Some(3),
             session_limits_worker_resume_window_ms: Some(120_000),
-            session_limits_worker_input_timeout_ms: Some(90_000),
-            session_limits_coordinator_input_timeout_ms: Some(75_000),
             ..EnvOverlay::default()
         };
 
@@ -495,8 +477,6 @@ mod tests {
         let limits = &config.session_limits;
         assert_eq!(limits.worker_resume_max_per_window, 3);
         assert_eq!(limits.worker_resume_window_ms, 120_000);
-        assert_eq!(limits.worker_input_timeout_ms, 90_000);
-        assert_eq!(limits.coordinator_input_timeout_ms, 75_000);
     }
 
     #[test]

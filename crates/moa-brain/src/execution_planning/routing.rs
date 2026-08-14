@@ -37,7 +37,7 @@ const EXECUTION_ROUTER_MAX_MISSING_INPUT_BYTES: usize = 256;
 /// Maximum installed-skill names serialized into the classifier prompt as a
 /// coverage hint. Bounds the per-turn user message regardless of tenant size.
 pub const EXECUTION_ROUTER_MAX_SKILL_NAMES: usize = 24;
-const EXECUTION_ROUTER_PROMPT: &str = include_str!("../prompts/execution_router.txt");
+const EXECUTION_ROUTER_PROMPT: &str = include_str!("../prompts/execution_router.md");
 const ROUTER_STAGE_METADATA_KEY: &str = "moa.pipeline.stage";
 const OPENAI_REASONING_EFFORT_METADATA_KEY: &str = "_moa.openai.reasoning_effort";
 
@@ -484,7 +484,7 @@ fn decision_missing_input_count(decision: &ExecutionRouteDecision) -> Result<u8>
     }
 }
 
-fn route_usage(usage: TokenUsage) -> Result<ExecutionRouteUsage> {
+pub(super) fn route_usage(usage: TokenUsage) -> Result<ExecutionRouteUsage> {
     Ok(ExecutionRouteUsage {
         input_tokens_uncached: u64::try_from(usage.input_tokens_uncached).map_err(|_| {
             MoaError::ValidationError("route uncached input usage exceeds u64".to_string())

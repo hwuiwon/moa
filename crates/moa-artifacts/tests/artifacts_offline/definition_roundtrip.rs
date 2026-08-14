@@ -803,6 +803,61 @@ fn prompt_examples_parse_as_skill_execution_plans() {
     );
 }
 
+#[test]
+fn custom_logic_example_totalizes_priority_branches_and_requires_retry_input() {
+    // Pins: every input accepted by the documented custom-logic schema selects one
+    // declared branch, and the high-priority branch cannot reference an omitted retry value.
+    let skill = parse_skill_example(
+        "patterns/custom-logic",
+        include_str!("../../../../docs/examples/artifacts/patterns/custom-logic.skill.yaml"),
+    );
+    assert_eq!(
+        skill.inputs["required"],
+        serde_json::json!(["priority", "retry"])
+    );
+    assert_eq!(
+        skill.inputs["properties"]["priority"]["enum"],
+        serde_json::json!(["high", "standard"])
+    );
+
+    let template = skill
+        .execution_plan
+        .expect("custom-logic example should declare an execution plan");
+    assert_eq!(
+        template.plan.input_schema["required"],
+        serde_json::json!(["priority", "retry"])
+    );
+    assert_eq!(
+        template.plan.input_schema["properties"]["priority"]["enum"],
+        serde_json::json!(["high", "standard"])
+    );
+    let branches = template
+        .plan
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.when {
+            Some(moa_artifacts::execution_plan::ExecutionCondition::Equals {
+                reference,
+                value,
+            }) => Some((reference.path.as_str(), value.as_str())),
+            Some(moa_artifacts::execution_plan::ExecutionCondition::Exists { .. }) | None => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        branches,
+        vec![
+            ("$.input.priority", Some("high")),
+            ("$.input.priority", Some("standard")),
+        ]
+    );
+    assert_eq!(
+        template.plan.nodes[0].input,
+        serde_json::json!({
+            "retry_requested": { "$ref": "$.input.retry" }
+        })
+    );
+}
+
 fn parse_skill_example(name: &str, yaml: &str) -> moa_artifacts::skill::SkillDefinition {
     let document = ArtifactDocument::from_yaml(yaml)
         .unwrap_or_else(|error| panic!("example {name} should parse: {error}"));

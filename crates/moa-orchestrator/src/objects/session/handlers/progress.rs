@@ -62,7 +62,7 @@ impl SessionImpl {
         annotate_restate_handler_span("Session", "turn_admission_heartbeat");
         let req = req.into_inner();
         let pending_state = load_pending_state(&ctx).await?;
-        if pending_state.active_turn_id.is_none()
+        if !pending_state.turn_admission_is_live()
             || pending_state.admission_heartbeat_generation != req.generation
         {
             return Ok(());

@@ -197,6 +197,23 @@ fn compact_status_summary(summary: &str) -> String {
     compact
 }
 
+/// Builds the compact product summary emitted by bounded execution controllers.
+pub(crate) fn execution_controller_summary(
+    phase: &str,
+    ready_tasks: u64,
+    active_tasks: u64,
+    parked_tasks: u64,
+    completed_tasks: u64,
+    next_wake_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> String {
+    let next_wake = next_wake_at
+        .map(|value| value.to_rfc3339())
+        .unwrap_or_else(|| "none".to_string());
+    compact_status_summary(&format!(
+        "Execution {phase}: ready={ready_tasks}, active={active_tasks}, parked={parked_tasks}, completed={completed_tasks}, next_wake={next_wake}"
+    ))
+}
+
 async fn live_delivery_enabled(ctx: &WorkflowContext<'_>) -> Result<bool, HandlerError> {
     Ok(ctx
         .get::<Json<bool>>(K_PROGRESS_LIVE_DELIVERY_ENABLED)
@@ -506,6 +523,20 @@ mod tests {
         assert_eq!(
             terminal_status_and_summary(TurnPhase::Accepted),
             (SessionStatus::Running, "Execution accepted.")
+        );
+    }
+
+    #[test]
+    fn controller_summary_exposes_storage_only_wait_and_next_wake() {
+        // Pins: product progress distinguishes parked work from active compute and reports the
+        // exact durable wake instead of implying that a handler remains alive.
+        let wake = chrono::DateTime::parse_from_rfc3339("2026-08-12T03:04:05Z")
+            .expect("test timestamp parses")
+            .with_timezone(&chrono::Utc);
+
+        assert_eq!(
+            execution_controller_summary("waiting_timer", 2, 1, 3, 8, Some(wake)),
+            "Execution waiting_timer: ready=2, active=1, parked=3, completed=8, next_wake=2026-08-12T03:04:05+00:00"
         );
     }
 

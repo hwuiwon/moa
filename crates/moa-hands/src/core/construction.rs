@@ -152,6 +152,13 @@ impl ToolRouter {
         } else {
             Vec::new()
         };
+        let checkpoint_capacity = workspace_pool.as_ref().map(|pool| {
+            Arc::new(
+                super::sandbox_workspace::capacity::PostgresWorkspaceCapacityRepository::new(
+                    pool.clone(),
+                ),
+            )
+        });
 
         let mut providers = HashMap::new();
         let mut storage_providers: HashMap<String, Arc<dyn SandboxStorageProvider>> =
@@ -168,6 +175,9 @@ impl ToolRouter {
             .with_command_timeout(DEFAULT_TOOL_TIMEOUT);
             if let Some(store) = checkpoint_store.as_ref() {
                 provider = provider.with_checkpoint_store(Arc::clone(store));
+            }
+            if let Some(capacity) = checkpoint_capacity.as_ref() {
+                provider = provider.with_checkpoint_capacity(Arc::clone(capacity));
             }
             let provider = Arc::new(provider);
             let provider_trait: Arc<dyn HandProvider> = provider.clone();
@@ -228,11 +238,12 @@ impl ToolRouter {
                                 pool.clone(),
                             ),
                         ),
-                        capacity: Arc::new(
-                            super::sandbox_workspace::capacity::PostgresWorkspaceCapacityRepository::new(
-                                pool.clone(),
-                            ),
-                        ),
+                        capacity: Arc::clone(checkpoint_capacity.as_ref().ok_or_else(|| {
+                            MoaError::ConfigError(
+                                "Daytona persistent workspaces require checkpoint capacity admission"
+                                    .to_string(),
+                            )
+                        })?),
                         kms: Arc::clone(kms),
                     },
                 )?);
@@ -250,9 +261,16 @@ impl ToolRouter {
                         "E2B persistent workspaces require a checkpoint object store".to_string(),
                     )
                 })?;
+                let checkpoint_capacity = checkpoint_capacity.as_ref().ok_or_else(|| {
+                    MoaError::ConfigError(
+                        "E2B persistent workspaces require checkpoint capacity admission"
+                            .to_string(),
+                    )
+                })?;
                 let provider = Arc::new(
                     E2BHandProvider::new(Arc::clone(source))
-                        .with_checkpoint_store(Arc::clone(checkpoint_store)),
+                        .with_checkpoint_store(Arc::clone(checkpoint_store))
+                        .with_checkpoint_capacity(Arc::clone(checkpoint_capacity)),
                 );
                 let hand: Arc<dyn HandProvider> = provider.clone();
                 let storage: Arc<dyn SandboxStorageProvider> = provider;
@@ -447,8 +465,11 @@ impl ToolRouter {
             ),
             Arc::new(
                 super::sandbox_workspace::operations::PostgresWorkspaceOperationRepository::new(
-                    pool,
+                    pool.clone(),
                 ),
+            ),
+            Arc::new(
+                super::sandbox_workspace::capacity::PostgresWorkspaceCapacityRepository::new(pool),
             ),
         );
         self

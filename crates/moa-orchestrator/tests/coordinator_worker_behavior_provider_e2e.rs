@@ -50,8 +50,8 @@ use moa_execution::state::{
 };
 use moa_execution::wire::{
     ExecutionCancelRequest, ExecutionConflictReason, ExecutionMutationResponse,
-    ExecutionPlanningContextRequest, ExecutionPlanningContextResponse, ExecutionRunRequest,
-    ExecutionStatusResponse, ExecutionTaskListRequest, ExecutionTaskListResponse,
+    ExecutionRunRequest, ExecutionStatusResponse, ExecutionTaskListRequest,
+    ExecutionTaskListResponse,
 };
 use moa_wire::turn::{StartTurnRequest, StartTurnResponse, TurnOutcomeKind};
 use serde::Serialize;
@@ -1205,7 +1205,7 @@ impl SupplementaryLiveHarness {
                 response,
                 ExecutionMutationResponse::Applied { ref run }
                     | ExecutionMutationResponse::Replayed { ref run }
-                    if run.status == ExecutionRunStatus::Cancelled
+                    if run.status == ExecutionRunStatus::Cancelled || !run.status.is_terminal()
             ) || matches!(
                 response,
                 ExecutionMutationResponse::Conflict {
@@ -1743,6 +1743,7 @@ fn generated_plan_hash_chain_rejects_cross_surface_drift() {
 async fn assert_generated_plan_audits_and_authorization(
     harness: &SupplementaryLiveHarness,
     events: &[EventRecord],
+    planning_context_uid: uuid::Uuid,
 ) -> Result<GeneratedPlanAuditEvidence> {
     let audits = supplementary_planning_audits(harness).await?;
     ensure!(
@@ -2029,22 +2030,20 @@ async fn assert_generated_plan_audits_and_authorization(
     );
     let expected_compiler_candidate_hash = supplementary_compile_candidate_hash(&candidate)?;
 
-    let planning_context: ExecutionPlanningContextResponse = harness
-        .execution_call(
-            "planning_context",
-            &ExecutionPlanningContextRequest {
-                tenant_id: harness.session.identity.tenant_id,
-                contact_id: None,
-                session_id: harness.session.session_id,
-                originating_user_sequence_num: originating_sequence,
-                requested_template: None,
-            },
-        )
-        .await?;
-    ensure!(
-        !planning_context.created,
-        "post-admission planning context read must replay the frozen authority snapshot"
-    );
+    let planning_context = ExecutionRepository::new(
+        sqlx::PgPool::connect(&test_database_url())
+            .await
+            .context("connect supplementary planning-context repository")?,
+    )
+    .load_planning_context_for_session(
+        ExecutionScope::Tenant {
+            tenant_id: harness.session.identity.tenant_id,
+        },
+        planning_context_uid,
+        harness.session.session_id,
+    )
+    .await?
+    .context("admitted run must retain its immutable planning context")?;
     planning_context
         .snapshot
         .validate()
@@ -2456,39 +2455,71 @@ async fn recovery_matrix_blocked_llm_invocation(
     let key_filter = workflow_key
         .map(|key| format!(" AND target_service_key = '{key}'"))
         .unwrap_or_default();
-    let parents = recovery_matrix_restate_rows(
-        fixture,
-        format!(
-            "SELECT id FROM sys_invocation WHERE target_service_name = '{workflow_service}'\
-             {key_filter}"
-        ),
-    )
-    .await?;
-    ensure!(
-        !parents.is_empty(),
-        "expected a {workflow_service} invocation, got {parents:?}"
-    );
-    for parent in &parents {
-        let parent_id = parent
-            .get("id")
-            .and_then(Value::as_str)
-            .context("workflow introspection row omitted id")?;
-        let children = recovery_matrix_restate_rows(
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let parents = recovery_matrix_restate_rows(
             fixture,
             format!(
-                "SELECT id, status FROM sys_invocation WHERE invoked_by_id = '{parent_id}' \
-                 AND target_service_name = 'LLMGateway' AND status != 'completed' ORDER BY id"
+                "SELECT id FROM sys_invocation WHERE target_service_name = '{workflow_service}'\
+                 {key_filter}"
             ),
         )
         .await?;
-        for child in &children {
-            let Some(invoked_id) = child.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            return Ok((parent_id.to_string(), invoked_id.to_string()));
+        let mut observed = Vec::new();
+        for parent in &parents {
+            let parent_id = parent
+                .get("id")
+                .and_then(Value::as_str)
+                .context("workflow introspection row omitted id")?;
+            let children = recovery_matrix_restate_rows(
+                fixture,
+                format!(
+                    "SELECT id, status FROM sys_invocation WHERE invoked_by_id = '{parent_id}' \
+                     AND target_service_name = 'LLMGateway' ORDER BY id"
+                ),
+            )
+            .await?;
+            for child in &children {
+                if child.get("status").and_then(Value::as_str) == Some("completed") {
+                    continue;
+                }
+                let Some(invoked_id) = child.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                return Ok((parent_id.to_string(), invoked_id.to_string()));
+            }
+            observed.push(json!({ "parent_id": parent_id, "children": children }));
         }
+        ensure!(
+            Instant::now() < deadline,
+            "{workflow_service} has no incomplete LLMGateway child: {observed:?}"
+        );
+        sleep(Duration::from_millis(25)).await;
     }
-    bail!("{workflow_service} has no incomplete LLMGateway child: {parents:?}")
+}
+
+async fn recovery_matrix_execution_task_attempt_key(
+    fixture: &OrchestratorTestFixture,
+    run_uid: uuid::Uuid,
+) -> Result<String> {
+    let pool = sqlx::PgPool::connect(&fixture.postgres_url)
+        .await
+        .context("connect recovery-matrix execution database")?;
+    let dispatch_uids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT dispatch_uid FROM moa.execution_dispatch_outbox \
+         WHERE run_uid = $1 AND dispatch_kind = 'task_attempt' \
+         ORDER BY created_at, dispatch_uid",
+    )
+    .bind(run_uid)
+    .fetch_all(&pool)
+    .await
+    .context("load recovery-matrix task-attempt dispatch identity")?;
+    let [dispatch_uid] = dispatch_uids.as_slice() else {
+        bail!(
+            "expected exactly one task-attempt dispatch for run {run_uid}, got {dispatch_uids:?}"
+        );
+    };
+    Ok(dispatch_uid.to_string())
 }
 
 async fn recovery_matrix_assert_child_joined(
@@ -2496,18 +2527,30 @@ async fn recovery_matrix_assert_child_joined(
     parent_id: &str,
     child_id: &str,
 ) -> Result<()> {
-    let rows = recovery_matrix_restate_rows(
-        fixture,
-        format!("SELECT id, invoked_by_id, status FROM sys_invocation WHERE id = '{child_id}'"),
-    )
-    .await?;
-    ensure!(
-        rows.len() == 1
-            && rows[0].get("invoked_by_id").and_then(Value::as_str) == Some(parent_id)
-            && rows[0].get("status").and_then(Value::as_str) == Some("completed"),
-        "cancelled LLM child {child_id} was not joined in parent {parent_id}: {rows:?}"
-    );
-    Ok(())
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut poll = tokio::time::interval(Duration::from_millis(25));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        poll.tick().await;
+        let rows = recovery_matrix_restate_rows(
+            fixture,
+            format!("SELECT id, invoked_by_id, status FROM sys_invocation WHERE id = '{child_id}'"),
+        )
+        .await?;
+        ensure!(
+            rows.len() == 1
+                && rows[0].get("id").and_then(Value::as_str) == Some(child_id)
+                && rows[0].get("invoked_by_id").and_then(Value::as_str) == Some(parent_id),
+            "cancelled LLM child {child_id} did not retain parent {parent_id}: {rows:?}"
+        );
+        if rows[0].get("status").and_then(Value::as_str) == Some("completed") {
+            return Ok(());
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "cancelled LLM child {child_id} was not joined in parent {parent_id}: {rows:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -3180,7 +3223,7 @@ async fn recovery_matrix_wait_for_execution_status(
                 fixture,
                 "SELECT id, invoked_by_id, target_service_name, target_service_key, status \
                  FROM sys_invocation WHERE target_service_name IN \
-                 ('ExecutionRun', 'ExecutionTask', 'LLMGateway') \
+                 ('ExecutionRunController', 'ExecutionTaskAttempt', 'ExecutionDispatcher', 'LLMGateway') \
                  ORDER BY target_service_name, id",
             )
             .await
@@ -3225,9 +3268,9 @@ async fn recovery_matrix_wait_for_session_unfenced(
 #[ignore = "requires Docker for the Postgres/Restate/OpenFGA/Redis scripted-provider fixture"]
 async fn recovery_matrix_execution_task_llm_cancel_crash_restart_fences_budget_service_e2e()
 -> Result<()> {
-    // Pins: cancelling a durable run joins its blocked ExecutionTask LLM child across a hard
-    // orchestrator crash, records one cancelled run/task with zero actual usage, and permits a
-    // fresh replacement durable run to execute its task exactly once.
+    // Pins: cancelling a durable run joins its blocked ExecutionTaskAttempt LLM child across a
+    // hard orchestrator crash, records one cancelled run/task with zero actual usage, and permits
+    // a fresh replacement durable run to execute its task exactly once.
     let fixture = OrchestratorTestFixture::with_script(recovery_matrix_blocked_execution_script()?)
         .await
         .context("boot execution-task recovery-matrix fixture")?;
@@ -3268,8 +3311,14 @@ async fn recovery_matrix_execution_task_llm_cancel_crash_restart_fences_budget_s
         Duration::from_secs(60),
     )
     .await?;
-    let (parent_invocation_id, child_invocation_id) =
-        recovery_matrix_blocked_llm_invocation(&fixture, "ExecutionTask", None).await?;
+    let task_attempt_key =
+        recovery_matrix_execution_task_attempt_key(&fixture, execution_run_uid).await?;
+    let (parent_invocation_id, child_invocation_id) = recovery_matrix_blocked_llm_invocation(
+        &fixture,
+        "ExecutionTaskAttempt",
+        Some(&task_attempt_key),
+    )
+    .await?;
 
     let session_snapshot = session.snapshot().await?;
     ensure!(
@@ -3476,12 +3525,6 @@ async fn coordinator_generated_plan_is_strict_authorized_and_terminal_provider_e
         started
             .validate()
             .context("ExecutionRunStarted must satisfy the strict admission contract")?;
-        let audit_evidence =
-            assert_generated_plan_audits_and_authorization(&harness, &admission_events).await?;
-        ensure!(
-            started.originating_user_sequence_num == audit_evidence.originating_sequence,
-            "admission origin must equal planning-audit origin"
-        );
         ensure!(
             started.plan_revision == 1,
             "admission must start at revision one"
@@ -3510,6 +3553,16 @@ async fn coordinator_generated_plan_is_strict_authorized_and_terminal_provider_e
             )
             .await?
             .context("admitted generated run must be persisted")?;
+        let audit_evidence = assert_generated_plan_audits_and_authorization(
+            &harness,
+            &admission_events,
+            persisted.planning_context_uid,
+        )
+        .await?;
+        ensure!(
+            started.originating_user_sequence_num == audit_evidence.originating_sequence,
+            "admission origin must equal planning-audit origin"
+        );
         ensure!(
             persisted.run_uid == started.run_uid,
             "event run UID must equal persisted run UID"

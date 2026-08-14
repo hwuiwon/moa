@@ -58,9 +58,6 @@ async fn docker_container_runs_with_hardening() {
             .unwrap_or_default();
         assert!(mounts.contains("ro"));
         assert!(rendered.contains("metadata=blocked"));
-
-        provider.pause(&handle).await.unwrap();
-        provider.resume(&handle).await.unwrap();
     }
     .await;
 

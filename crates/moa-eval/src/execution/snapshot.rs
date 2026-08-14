@@ -129,6 +129,8 @@ pub enum ExecutionTaskKindSummary {
     Review,
     /// Named external signal wait.
     WaitSignal,
+    /// Storage-only timer wait.
+    WaitUntil,
     /// Terminal output task.
     Output,
     /// Bounded semantic completion verifier.
@@ -457,6 +459,7 @@ fn redact_task(record: &ExecutionTaskRecord) -> Result<ExecutionEvalTask> {
         } => (ExecutionTaskKindSummary::Agent, capability_refs.clone()),
         LogicalTaskKind::Review { .. } => (ExecutionTaskKindSummary::Review, Vec::new()),
         LogicalTaskKind::WaitSignal { .. } => (ExecutionTaskKindSummary::WaitSignal, Vec::new()),
+        LogicalTaskKind::WaitUntil { .. } => (ExecutionTaskKindSummary::WaitUntil, Vec::new()),
         LogicalTaskKind::Output { .. } => (ExecutionTaskKindSummary::Output, Vec::new()),
         LogicalTaskKind::CompletionVerifier { .. } => {
             (ExecutionTaskKindSummary::CompletionVerifier, Vec::new())

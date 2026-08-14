@@ -2,6 +2,14 @@
 
 use super::*;
 
+/// Sums the worst case over *every* node, including nodes that declare a condition.
+///
+/// A branchy plan therefore reserves the union of its branches even though at most one
+/// of them can run. That over-reservation is deliberate: the estimate is what the owning
+/// user approves and what the budget ledger fences, and it must be an upper bound that
+/// holds before any condition has been evaluated. Narrowing it to the taken branch would
+/// require knowing the run input at approval time and would let a run exceed the amount
+/// its user actually saw.
 pub(super) fn estimate_plan(
     goal: &ExecutionGoalContract,
     plan: &ExecutionPlanDefinition,
@@ -58,7 +66,7 @@ pub(super) fn estimate_plan(
 pub(super) fn estimate_remaining_plan(
     goal: &ExecutionGoalContract,
     plan: &ExecutionPlanDefinition,
-    projection: &ExecutionProjection,
+    projection: &ExecutionAmendmentProjection,
     catalog: &ExecutionCapabilityCatalog,
     config: &ExecutionConfig,
     report: &mut ExecutionValidationReport,
@@ -98,18 +106,6 @@ pub(super) fn estimate_remaining_plan(
         let CompletionCheckKind::AgentVerifier { max_turns, .. } = check.kind else {
             continue;
         };
-        let node_id = format!("@check/{}", check.id);
-        if projection.tasks.iter().any(|task| {
-            task.node_id == node_id
-                && matches!(
-                    task.status,
-                    ExecutionTaskStatus::Completed
-                        | ExecutionTaskStatus::Failed
-                        | ExecutionTaskStatus::Cancelled
-                )
-        }) {
-            continue;
-        }
         match verifier_estimate(config, max_turns)
             .and_then(|estimate| total.checked_add(estimate, "remaining verifier estimate"))
         {
@@ -189,6 +185,7 @@ pub(super) fn estimate_node(
         }),
         ExecutionOperation::Review { .. }
         | ExecutionOperation::WaitSignal { .. }
+        | ExecutionOperation::WaitUntil { .. }
         | ExecutionOperation::Output { .. } => Ok(ExecutionEstimate {
             tasks: 1,
             ..ExecutionEstimate::default()

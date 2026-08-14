@@ -1,5 +1,6 @@
 //! Normalized planning-audit identities, labels, and row codecs.
 
+use super::audit::{CompileAuditEvidence, PlannerCallAuditEvidence, RouteAuditEvidence};
 use super::rows::{optional_u64, required_u64};
 use super::*;
 
@@ -93,6 +94,8 @@ impl PersistedPlannerAudit {
             outcome,
             provider_model,
             prompt_version,
+            usage,
+            cost_microusd,
             candidate_hash,
             candidate_json,
             compiler_report,
@@ -109,6 +112,8 @@ impl PersistedPlannerAudit {
             && self.evidence.outcome == *outcome
             && self.provider_model == *provider_model
             && self.prompt_version == *prompt_version
+            && self.evidence.usage == *usage
+            && self.evidence.cost_microusd == *cost_microusd
             && self.evidence.candidate_hash == *candidate_hash
             && self.candidate_json == *candidate_json
             && self.compiler_report == *compiler_report
@@ -341,6 +346,13 @@ pub(super) fn planner_audit_from_row(row: &PgRow) -> Result<PersistedPlannerAudi
             call,
             outcome,
             duration_micros: required_u64(row, "duration_micros")?,
+            usage: ExecutionRouteUsage {
+                input_tokens_uncached: required_u64(row, "input_tokens_uncached")?,
+                input_tokens_cache_write: required_u64(row, "input_tokens_cache_write")?,
+                input_tokens_cache_read: required_u64(row, "input_tokens_cache_read")?,
+                output_tokens: required_u64(row, "output_tokens")?,
+            },
+            cost_microusd: required_u64(row, "cost_microusd")?,
             candidate_hash: row.try_get("candidate_hash").map_err(row_error)?,
         },
     })

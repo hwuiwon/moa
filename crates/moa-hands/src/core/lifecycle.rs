@@ -32,12 +32,14 @@ use super::leases::{
     HandLeaseRenewRequest, HandLeaseStatus, LeaseHandle, provisioning_deadline,
 };
 use super::reaper::{ProvisioningAbsenceProof, destroy_provisioning_operations};
+use super::sandbox_workspace::capacity::ActiveHandCapacityRequest;
 use super::sandbox_workspace::lifecycle::lease_attachment;
 #[cfg(test)]
 use super::sandbox_workspace::lifecycle::validate_managed_restore_target;
 use super::{
-    ActiveHand, DEFAULT_PROVIDER_NAME, DEFAULT_TOOL_TIMEOUT, HandRoute, HandScopeKey,
-    InstalledManifestMarker, ToolCallScope, ToolRouter, TrustedSandboxManifest,
+    ActiveHand, DEFAULT_PROVIDER_NAME, DEFAULT_TOOL_TIMEOUT, HandProviderCacheKey, HandRoute,
+    HandScopeKey, InstalledManifestMarker, SessionCacheDrainCursor, ToolCallScope, ToolRouter,
+    TrustedSandboxManifest,
 };
 
 /// Builds a sandbox-provisioning span parented to the active turn root when present.
@@ -97,15 +99,57 @@ const HAND_LEASE_PROVISION_WAIT_MS: u64 = 25;
 const HAND_DESTROY_CLAIM_TTL: StdDuration = StdDuration::from_secs(5 * 60);
 const HAND_DESTROY_RETRY_DELAY: StdDuration = StdDuration::from_secs(15);
 
+/// Result of one bounded session-wide hand cleanup page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionHandReleasePageOutcome {
+    /// No live durable lease or process-local session cache entry remains.
+    Complete,
+    /// This page made forward progress and another bounded page is required.
+    Progressed,
+    /// Live ownership remains, but this page could not make forward progress.
+    Waiting,
+}
+
 struct DurableHandProvisionContext<'a> {
     route: &'a HandRoute,
     session: &'a SessionMeta,
     worker_id: Option<&'a str>,
     workspace_binding: &'a WorkspaceBinding,
-    key: String,
+    key: HandProviderCacheKey,
     effective: &'a EffectiveSandboxProfile,
     policy: &'a HandLeasePolicy,
     call_scope: ToolCallScope<'a>,
+}
+
+/// Builds the exact fenced active-compute capacity identity for one lease.
+pub(in crate::core) fn active_hand_capacity_request(
+    workspace_binding: &WorkspaceBinding,
+    lease: &HandLease,
+) -> Result<ActiveHandCapacityRequest> {
+    Ok(ActiveHandCapacityRequest {
+        tenant_id: workspace_binding.tenant_id,
+        workspace_id: workspace_binding.workspace_id,
+        provider_account_id: workspace_binding.provider_account_id,
+        provider_account_generation: i64::try_from(workspace_binding.provider_account_generation)
+            .map_err(|_| {
+            MoaError::ValidationError(
+                "hand capacity provider-account generation overflows Postgres bigint".to_string(),
+            )
+        })?,
+        provisioning_operation_id: lease.provisioning_operation_id,
+        hand_lease_generation: lease.generation,
+        expected_writer_epoch: i64::try_from(workspace_binding.writer_epoch).map_err(|_| {
+            MoaError::ValidationError(
+                "hand capacity writer epoch overflows Postgres bigint".to_string(),
+            )
+        })?,
+        expected_instance_generation: i64::try_from(workspace_binding.instance_generation)
+            .map_err(|_| {
+                MoaError::ValidationError(
+                    "hand capacity instance generation overflows Postgres bigint".to_string(),
+                )
+            })?,
+    })
 }
 
 struct CreateHandContext<'a> {
@@ -122,7 +166,7 @@ struct ProvisionedHandRecoveryContext<'a> {
     worker_id: &'a str,
     provider: &'a str,
     workspace_binding: &'a WorkspaceBinding,
-    cache_key: &'a str,
+    cache_key: &'a HandProviderCacheKey,
     lease: &'a HandLease,
     policy: &'a HandLeasePolicy,
     call_scope: ToolCallScope<'a>,
@@ -134,7 +178,7 @@ struct ProvisionedHandActivationContext<'a> {
     worker_id: &'a str,
     provider: &'a str,
     workspace_binding: &'a WorkspaceBinding,
-    cache_key: &'a str,
+    cache_key: &'a HandProviderCacheKey,
     lease: &'a HandLease,
     handle: HandHandle,
     call_scope: ToolCallScope<'a>,
@@ -199,9 +243,7 @@ impl ToolRouter {
             return;
         }
 
-        // Installed markers are nested under the exact structured scope, so a
-        // manifest change never scans or invalidates another session.
-        self.hands.installed_files.write().await.remove(&scope);
+        self.hands.clear_installed_files_for_scope(&scope).await;
     }
 
     pub(super) async fn install_trusted_files_for_hand(
@@ -333,32 +375,63 @@ impl ToolRouter {
         session_id: &moa_core::types::identifiers::SessionId,
         scope: Option<&str>,
     ) -> bool {
+        matches!(
+            self.reclaim_hands_page(tenant_id, session_id, scope).await,
+            SessionHandReleasePageOutcome::Complete
+        )
+    }
+
+    /// Reclaims one bounded page of all hand ownership under a terminal session.
+    pub async fn reclaim_session_hands_page(
+        &self,
+        tenant_id: TenantId,
+        session_id: &moa_core::types::identifiers::SessionId,
+    ) -> SessionHandReleasePageOutcome {
+        self.reclaim_hands_page(tenant_id, session_id, None).await
+    }
+
+    async fn reclaim_hands_page(
+        &self,
+        tenant_id: TenantId,
+        session_id: &moa_core::types::identifiers::SessionId,
+        scope: Option<&str>,
+    ) -> SessionHandReleasePageOutcome {
         let mut complete = true;
-        let session_prefix = format!("{session_id}:");
-        let match_prefix = match scope {
-            Some(worker_id) => format!("{session_prefix}{worker_id}:"),
-            None => session_prefix.clone(),
-        };
-        match scope {
-            Some(worker_id) => {
-                let scope_key = format!("{session_prefix}{worker_id}");
-                self.hands
-                    .preferred_hand_routes
-                    .write()
-                    .await
-                    .remove(&scope_key);
-            }
-            None => {
-                self.hands
-                    .preferred_hand_routes
-                    .write()
-                    .await
-                    .retain(|key, _| !key.starts_with(&session_prefix));
-            }
+        let mut made_progress = false;
+        if let Some(worker_id) = scope {
+            let scope_key = HandScopeKey::new(tenant_id, *session_id, worker_id);
+            made_progress |= self
+                .hands
+                .preferred_hand_routes
+                .write()
+                .await
+                .remove(&scope_key)
+                .is_some();
         }
 
         if let Some(lease_store) = &self.hands.hand_leases {
-            match lease_store.list_session(tenant_id, *session_id).await {
+            let (leases, batch_saturated) = match scope {
+                Some(worker_id) => {
+                    let leases = lease_store
+                        .list_live_owner_candidates(tenant_id, *session_id, worker_id)
+                        .await;
+                    let saturated = leases.as_ref().is_ok_and(|leases| leases.len() == 2);
+                    (leases, saturated)
+                }
+                None => {
+                    let page = lease_store
+                        .list_live_session_page(tenant_id, *session_id, None)
+                        .await;
+                    let saturated = page.as_ref().is_ok_and(|page| page.next_cursor.is_some());
+                    (page.map(|page| page.leases), saturated)
+                }
+            };
+            if batch_saturated {
+                // Process a bounded owner batch, but require another pass before
+                // declaring an owner with multiple live providers fully released.
+                complete = false;
+            }
+            match leases {
                 Ok(leases) => {
                     for lease in leases {
                         if let Some(worker_id) = scope
@@ -370,6 +443,10 @@ impl ToolRouter {
                             continue;
                         }
                         if self.hands.workspace_repository.is_some() && lease.attachment.is_some() {
+                            // Durable workspace teardown is owned by the reaper after this handoff.
+                            // Keep the session continuation live until a later page observes that
+                            // the exact lease has reached Destroyed and no longer appears here.
+                            complete = false;
                             let terminal_status = match lease.status {
                                 HandLeaseStatus::Provisioning | HandLeaseStatus::Failed => {
                                     HandLeaseStatus::Failed
@@ -388,7 +465,7 @@ impl ToolRouter {
                                     .transition_status(tenant_id, &lease, terminal_status)
                                     .await
                                 {
-                                    Ok(true) => {}
+                                    Ok(true) => made_progress = true,
                                     Ok(false) => {
                                         complete = false;
                                         continue;
@@ -409,6 +486,7 @@ impl ToolRouter {
                             }
                             if let Some(lease_handle) = lease.handle.as_ref() {
                                 let key = session_provider_key_from_parts(
+                                    tenant_id,
                                     lease.session_id,
                                     &lease.worker_id,
                                     &lease.provider,
@@ -421,7 +499,11 @@ impl ToolRouter {
                                 .await;
                             }
                             self.remove_installed_marker(
-                                manifest_scope_key_from_parts(lease.session_id, &lease.worker_id),
+                                manifest_scope_key_from_parts(
+                                    tenant_id,
+                                    lease.session_id,
+                                    &lease.worker_id,
+                                ),
                                 &lease.provider,
                             )
                             .await;
@@ -452,6 +534,7 @@ impl ToolRouter {
                             }
                         };
                         let key = session_provider_key_from_parts(
+                            tenant_id,
                             lease.session_id,
                             &lease.worker_id,
                             &lease.provider,
@@ -465,7 +548,11 @@ impl ToolRouter {
                             .await;
                         }
                         self.remove_installed_marker(
-                            manifest_scope_key_from_parts(lease.session_id, &lease.worker_id),
+                            manifest_scope_key_from_parts(
+                                tenant_id,
+                                lease.session_id,
+                                &lease.worker_id,
+                            ),
                             &lease.provider,
                         )
                         .await;
@@ -513,7 +600,7 @@ impl ToolRouter {
                                 .finalize_destroy(tenant_id, &lease, claim_token)
                                 .await
                             {
-                                Ok(true) => {}
+                                Ok(true) => made_progress = true,
                                 Ok(false) => complete = false,
                                 Err(error) => {
                                     complete = false;
@@ -568,40 +655,78 @@ impl ToolRouter {
                     );
                 }
             }
-        } else {
-            let hands = {
-                let mut active_hands = self.hands.active_hands.write().await;
-                let keys = active_hands
-                    .keys()
-                    .filter(|key| key.starts_with(&match_prefix))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                keys.into_iter()
-                    .filter_map(|key| active_hands.remove(&key).map(|hand| (key, hand)))
-                    .collect::<Vec<_>>()
-            };
-            for (key, hand) in hands {
-                let remainder = key.strip_prefix(&session_prefix).unwrap_or_default();
-                let (_, provider_name) = remainder.rsplit_once(':').unwrap_or(("", remainder));
-                let Some(provider) = self.hands.providers.get(provider_name) else {
-                    complete = false;
-                    continue;
-                };
-                if let Err(error) = provider.destroy(&hand.handle).await {
-                    complete = false;
-                    tracing::warn!(
-                        session_id = %session_id,
-                        provider = %provider_name,
-                        hand_id = %hand_id(&hand.handle),
-                        error = %error,
-                        "failed to destroy cached hand"
-                    );
+        }
+        if scope.is_none() {
+            let mut cursor = SessionCacheDrainCursor::start();
+            loop {
+                match self
+                    .hands
+                    .drain_session_cache_page(tenant_id, *session_id, cursor)
+                    .await
+                {
+                    Ok(page) => {
+                        made_progress |= page.removed_entries > page.active_hands.len();
+                        for cached in page.active_hands {
+                            let Some(provider) = self.hands.providers.get(&cached.provider) else {
+                                complete = false;
+                                self.hands
+                                    .active_hands
+                                    .write()
+                                    .await
+                                    .insert(cached.key, cached.hand);
+                                continue;
+                            };
+                            if let Err(error) = provider.destroy(&cached.hand.handle).await {
+                                complete = false;
+                                let hand_id = hand_id(&cached.hand.handle);
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    provider = %cached.provider,
+                                    hand_id = %hand_id,
+                                    error = %error,
+                                    "failed to destroy cached hand"
+                                );
+                                self.hands
+                                    .active_hands
+                                    .write()
+                                    .await
+                                    .insert(cached.key, cached.hand);
+                            } else {
+                                made_progress = true;
+                            }
+                        }
+                        let page_was_empty = page.removed_entries == 0;
+                        cursor = page.next_cursor;
+                        if matches!(cursor, SessionCacheDrainCursor::Complete) {
+                            break;
+                        }
+                        if !page_was_empty {
+                            complete = false;
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        complete = false;
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %error,
+                            "failed to drain session hand caches"
+                        );
+                        break;
+                    }
                 }
             }
+        } else {
+            self.clear_manifest_scopes(tenant_id, *session_id, scope)
+                .await;
         }
-
-        self.clear_manifest_scopes(*session_id, scope).await;
-        complete
+        if complete {
+            SessionHandReleasePageOutcome::Complete
+        } else if made_progress {
+            SessionHandReleasePageOutcome::Progressed
+        } else {
+            SessionHandReleasePageOutcome::Waiting
+        }
     }
 
     /// Provisions or reuses a hand on behalf of a run with `budget` left.
@@ -813,7 +938,7 @@ impl ToolRouter {
 
     pub(in crate::core) async fn remove_cached_binding_if_matches(
         &self,
-        key: &str,
+        key: &HandProviderCacheKey,
         expected_handle: &HandHandle,
         expected_generation: Option<i64>,
     ) {
@@ -884,9 +1009,8 @@ impl ToolRouter {
                             .await?;
                         return Err(error);
                     }
-                    // Once destroy is dispatched it is deliberately outside a
-                    // DeadlineGuard. Its exact provisioning fence is finalized
-                    // even if cancellation arrives while the provider runs.
+                    // Provider destruction is an external effect. Once it starts,
+                    // finish the exact durable clear even if the caller cancels.
                     if let Err(error) = destroy_provisioning_operations(
                         provider_impl.as_ref(),
                         previous_handle
@@ -919,6 +1043,15 @@ impl ToolRouter {
                     }
                     claim.handle = None;
                     if let Err(error) = call_scope.admit() {
+                        let _ = lease_store
+                            .transition_status(session.tenant_id, &claim, HandLeaseStatus::Failed)
+                            .await?;
+                        return Err(error);
+                    }
+                }
+                if let Some(capacity) = self.hands.workspace_capacity.as_ref() {
+                    let request = active_hand_capacity_request(workspace_binding, &claim)?;
+                    if let Err(error) = capacity.reserve_active_hand(&request).await {
                         let _ = lease_store
                             .transition_status(session.tenant_id, &claim, HandLeaseStatus::Failed)
                             .await?;
@@ -1188,6 +1321,11 @@ impl ToolRouter {
         {
             HandStatus::Running => {}
             HandStatus::Provisioning => return Ok(None),
+            // No capacity re-admission here, unlike the active-lease resume path.
+            // This branch recovers a lease still in `provisioning`, whose
+            // `ActiveHands` reservation was taken before the provider create and
+            // is therefore still charged. Only a continuation-boundary suspension
+            // gives that charge back, and it leaves the lease `active`.
             HandStatus::Paused | HandStatus::Stopped => {
                 call_scope.admit()?;
                 provider_impl.resume(&handle).await?;
@@ -1324,6 +1462,19 @@ impl ToolRouter {
         };
         match activated {
             Ok(true) => {
+                if let Some(capacity) = self.hands.workspace_capacity.as_ref()
+                    && !capacity
+                        .commit_active_hand(&active_hand_capacity_request(
+                            workspace_binding,
+                            lease,
+                        )?)
+                        .await?
+                {
+                    return Err(MoaError::StorageError(format!(
+                        "hand activation lost its exact capacity fence for session {} provider {provider}",
+                        session.id
+                    )));
+                }
                 let active = ActiveHand {
                     handle: handle.clone(),
                     generation: Some(lease.generation),
@@ -1332,7 +1483,7 @@ impl ToolRouter {
                     .active_hands
                     .write()
                     .await
-                    .insert(cache_key.to_string(), active.clone());
+                    .insert(cache_key.clone(), active.clone());
                 self.remember_preactivation_manifest_install(
                     session,
                     worker_id,
@@ -1356,6 +1507,24 @@ impl ToolRouter {
                             && current.attachment == lease.attachment
                     });
                 if already_active {
+                    // The activation replay may already have committed the exact
+                    // charge, but it must never proceed while that charge is still
+                    // pending: the durable release predicates only settle a
+                    // committed reservation, so a lost fence here would strand the
+                    // run with dead compute.
+                    if let Some(capacity) = self.hands.workspace_capacity.as_ref()
+                        && !capacity
+                            .ensure_active_hand_committed(&active_hand_capacity_request(
+                                workspace_binding,
+                                lease,
+                            )?)
+                            .await?
+                    {
+                        return Err(MoaError::StorageError(format!(
+                            "replayed hand activation lost its exact capacity fence for session {} provider {provider}",
+                            session.id
+                        )));
+                    }
                     let active = ActiveHand {
                         handle: handle.clone(),
                         generation: Some(lease.generation),
@@ -1364,7 +1533,7 @@ impl ToolRouter {
                         .active_hands
                         .write()
                         .await
-                        .insert(cache_key.to_string(), active.clone());
+                        .insert(cache_key.clone(), active.clone());
                     self.remember_preactivation_manifest_install(
                         session,
                         worker_id,
@@ -1555,11 +1724,12 @@ impl ToolRouter {
         }
     }
 
+    /// Reattaches one live durable lease, resuming provider-managed compute when needed.
     async fn resume_durable_lease(
         &self,
         provider: &str,
         lease: &HandLease,
-        key: &str,
+        key: &HandProviderCacheKey,
         call_scope: ToolCallScope<'_>,
     ) -> Result<HandHandle> {
         let lease_handle = lease.handle.as_ref().ok_or_else(|| {
@@ -1590,7 +1760,7 @@ impl ToolRouter {
             }
         }
         self.hands.active_hands.write().await.insert(
-            key.to_string(),
+            key.clone(),
             ActiveHand {
                 handle: handle.clone(),
                 generation: Some(lease.generation),
@@ -1658,31 +1828,18 @@ impl ToolRouter {
 
     async fn clear_manifest_scopes(
         &self,
+        tenant_id: TenantId,
         session_id: moa_core::types::identifiers::SessionId,
         worker_id: Option<&str>,
     ) {
-        match worker_id {
-            Some(worker_id) => {
-                let scope = manifest_scope_key_from_parts(session_id, worker_id);
-                self.hands
-                    .trusted_sandbox_files
-                    .write()
-                    .await
-                    .remove(&scope);
-                self.hands.installed_files.write().await.remove(&scope);
-            }
-            None => {
-                self.hands
-                    .trusted_sandbox_files
-                    .write()
-                    .await
-                    .retain(|scope, _| scope.session_id != session_id);
-                self.hands
-                    .installed_files
-                    .write()
-                    .await
-                    .retain(|scope, _| scope.session_id != session_id);
-            }
+        if let Some(worker_id) = worker_id {
+            let scope = manifest_scope_key_from_parts(tenant_id, session_id, worker_id);
+            self.hands
+                .trusted_sandbox_files
+                .write()
+                .await
+                .remove(&scope);
+            self.hands.clear_installed_files_for_scope(&scope).await;
         }
     }
 
@@ -1800,51 +1957,52 @@ pub(super) fn workspace_lease_scope(scope: &SandboxWorkspaceScope) -> String {
 
 /// Returns the scope key that namespaces a session's hands by typed owner.
 ///
-/// A populated lease key yields `"{session_id}:{owner_key}"`. `None` yields the
-/// non-owning `"{session_id}:"` aggregate key used only by session-wide
-/// bookkeeping. Sandbox admission never accepts that aggregate key as a
-/// workspace owner. All keys share the `"{session_id}:"` prefix so session
-/// teardown can match every typed owner scope at once.
-pub(super) fn scope_key(session: &SessionMeta, worker_id: Option<&str>) -> String {
-    format!("{}:{}", session.id, worker_id.unwrap_or_default())
+/// Tenant and session identity remain typed fields, so aggregate cleanup can
+/// use a bounded ordered range without parsing or prefix-scanning string keys.
+/// `None` uses an empty non-owning worker key for sandbox-free bookkeeping;
+/// sandbox admission never accepts it as a workspace owner.
+pub(super) fn scope_key(session: &SessionMeta, worker_id: Option<&str>) -> HandScopeKey {
+    HandScopeKey::new(session.tenant_id, session.id, worker_id.unwrap_or_default())
 }
 
 pub(in crate::core) fn manifest_scope_key(
     session: &SessionMeta,
     worker_id: Option<&str>,
 ) -> HandScopeKey {
-    manifest_scope_key_from_parts(session.id, worker_id.unwrap_or_default())
+    manifest_scope_key_from_parts(session.tenant_id, session.id, worker_id.unwrap_or_default())
 }
 
 fn manifest_scope_key_from_parts(
+    tenant_id: TenantId,
     session_id: moa_core::types::identifiers::SessionId,
     worker_id: &str,
 ) -> HandScopeKey {
-    HandScopeKey {
-        session_id,
-        worker_id: worker_id.to_string(),
-    }
+    HandScopeKey::new(tenant_id, session_id, worker_id)
 }
 
 /// Returns the cache/lease key for one hand within a typed owner scope.
 ///
-/// The format is `"{session_id}:{owner_key}:{provider}"`. A missing owner key
-/// produces the reserved non-owning aggregate form
-/// `"{session_id}::{provider}"`; sandbox dispatch never provisions against it.
+/// Tenant, session, owner, and provider remain separate typed fields. A missing
+/// owner uses the reserved empty non-owning worker key; sandbox dispatch never
+/// provisions against it.
 pub(super) fn session_provider_key(
     session: &SessionMeta,
     worker_id: Option<&str>,
     provider: &str,
-) -> String {
-    format!("{}:{provider}", scope_key(session, worker_id))
+) -> HandProviderCacheKey {
+    HandProviderCacheKey::new(scope_key(session, worker_id), provider)
 }
 
 fn session_provider_key_from_parts(
+    tenant_id: TenantId,
     session_id: moa_core::types::identifiers::SessionId,
     worker_id: &str,
     provider: &str,
-) -> String {
-    format!("{session_id}:{worker_id}:{provider}")
+) -> HandProviderCacheKey {
+    HandProviderCacheKey::new(
+        HandScopeKey::new(tenant_id, session_id, worker_id),
+        provider,
+    )
 }
 
 /// Returns the idle deadline a renewal should ask for under `policy`.

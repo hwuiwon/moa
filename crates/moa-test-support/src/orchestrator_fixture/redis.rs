@@ -8,12 +8,20 @@
 use super::*;
 
 pub(super) async fn start_redis_container() -> Result<ContainerAsync<GenericImage>> {
-    GenericImage::new(REDIS_IMAGE, REDIS_TAG)
+    start_redis_container_on_port(None).await
+}
+
+pub(super) async fn start_redis_container_on_port(
+    host_port: Option<u16>,
+) -> Result<ContainerAsync<GenericImage>> {
+    let image = GenericImage::new(REDIS_IMAGE, REDIS_TAG)
         .with_exposed_port(6379.tcp())
-        .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-        .start()
-        .await
-        .context("start Valkey testcontainer")
+        .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"));
+    let image = match host_port {
+        Some(host_port) => image.with_mapped_port(host_port, 6379.tcp()),
+        None => image.into(),
+    };
+    image.start().await.context("start Valkey testcontainer")
 }
 
 pub(super) async fn wait_for_redis(redis_url: &str) -> Result<()> {

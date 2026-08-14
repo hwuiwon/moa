@@ -16,6 +16,7 @@ pub(super) fn operation_reservation(
         }
         ExecutionOperation::Review { .. }
         | ExecutionOperation::WaitSignal { .. }
+        | ExecutionOperation::WaitUntil { .. }
         | ExecutionOperation::Output { .. } => Ok(ExecutionEstimate {
             tasks: 1,
             ..ExecutionEstimate::default()

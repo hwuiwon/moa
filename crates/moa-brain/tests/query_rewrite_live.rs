@@ -1,4 +1,4 @@
-// Live counterpart: see query_rewrite_offline.rs for the wiremock version that runs in PR CI.
+// Live counterpart: see brain_offline/query_rewrite_offline.rs in the brain_offline harness for the wiremock PR-CI coverage.
 
 //! Ignored live smoke test for query rewrite gate behavior.
 

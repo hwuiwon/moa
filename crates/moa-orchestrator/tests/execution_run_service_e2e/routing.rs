@@ -68,6 +68,10 @@ const SECURITY_INPUT_TOOL_NAME: &str = "inspect_suspicious_fixture";
 const SECURITY_INPUT_FIRST_TOOL_ID: &str = "00000000-0000-0000-0000-000000000321";
 const SECURITY_INPUT_SECOND_TOOL_ID: &str = "00000000-0000-0000-0000-000000000322";
 const SECURITY_INPUT_WARNING_MARKER: &str = "fixture-warning-one";
+const SECURITY_INPUT_ADMISSION_PROBE: &str =
+    "Complete this independent turn while the security-input turn is parked";
+const SECURITY_INPUT_ADMISSION_PROBE_FINAL: &str =
+    "The independent turn completed while the first turn was parked.";
 const SYNTHESIS_MATCH: &str = "Synthesize the final user response for execution run";
 const TEMPLATE_SKILL_NAME: &str = "service-template-report";
 const TEMPLATE_FINAL: &str = "The pinned template produced the requested report.";
@@ -297,7 +301,7 @@ async fn recovery_matrix_coordinator_input_cancel_cleans_exact_wait_and_rejects_
     // Pins: cancellation after a hard restart drives the actual coordinator
     // awakeable select, clears its four-coordinate registration, releases the
     // active turn, and leaves an explicitly addressed late reply as a conflict.
-    let fixture = security_input_fixture(1_800_000).await?;
+    let fixture = security_input_fixture().await?;
     let test = fixture.isolated().await;
     let started = start_security_input_turn(&fixture, &test, "security-input-cancel").await?;
     await_security_input_registration(&fixture, test.client(), &started).await?;
@@ -329,12 +333,12 @@ async fn recovery_matrix_coordinator_input_cancel_cleans_exact_wait_and_rejects_
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn recovery_matrix_coordinator_input_timeout_survives_restart_and_releases_turn_service_e2e()
+async fn recovery_matrix_coordinator_input_wait_survives_restart_until_exact_reply_service_e2e()
 -> Result<()> {
-    // Pins: the durable timeout branch survives process loss, clears the exact
-    // pending input, and settles as the explicit safe failure instead of leaving
-    // the Session active forever.
-    let fixture = security_input_fixture(5_000).await?;
+    // Pins: a human-input wait has no expiry, releases the actual fleet/tenant
+    // admission lease, survives process loss, and resumes only after the exact
+    // authenticated reply reaches its durable awakeable.
+    let fixture = security_input_fixture().await?;
     let test = fixture.isolated().await;
     let started = start_security_input_turn(&fixture, &test, "security-input-timeout").await?;
     await_security_input_registration(&fixture, test.client(), &started).await?;
@@ -342,18 +346,60 @@ async fn recovery_matrix_coordinator_input_timeout_survives_restart_and_releases
     fixture
         .hard_crash_and_restart_orchestrator()
         .await
-        .context("restart before coordinator input timeout")?;
-    let outcome = await_turn_outcome(test.client(), &started).await?;
-    assert_eq!(outcome.kind, TurnOutcomeKind::Failed);
-    assert!(
-        outcome.message.contains("security-input timeout"),
-        "coordinator input timeout lost its stable reason: {outcome:?}"
+        .context("restart while coordinator input is parked")?;
+
+    // Both admission limits are one. Completing a distinct session before the
+    // parked turn receives its reply proves the first session released the real
+    // shared lease rather than merely changing its virtual-object state.
+    let admission_probe = start_turn(
+        &test,
+        "security-input-admission-probe",
+        SECURITY_INPUT_ADMISSION_PROBE,
+        None,
+    )
+    .await
+    .context("start a second session while the first human wait is parked")?;
+    let admission_probe_outcome = await_turn_outcome(test.client(), &admission_probe).await?;
+    assert_eq!(admission_probe_outcome.kind, TurnOutcomeKind::Completed);
+    assert_eq!(
+        admission_probe_outcome.message,
+        SECURITY_INPUT_ADMISSION_PROBE_FINAL
     );
+
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    let before_reply = test.client().get_session(started.session_id).await?;
+    assert_eq!(before_reply.status, SessionStatus::Running);
+    test.client()
+        .session(started.session_id.to_string())
+        .start_turn(
+            StartTurnRequest {
+                client_message_id: fresh_client_message_id(),
+                reply_to: Some(MessageReplyTarget::CoordinatorInput {
+                    turn_id: started.turn_id.clone(),
+                    generation: 1,
+                    input_request_id: format!(
+                        "security:{}:1:{}",
+                        started.turn_id, SECURITY_INPUT_SECOND_TOOL_ID
+                    ),
+                }),
+                stream_cursor: None,
+                user_message: "continue without the disabled capability".to_string(),
+                attachments: Vec::new(),
+                model: None,
+                contact: None,
+                max_turns: None,
+                resource_budget: Default::default(),
+                execution_template: None,
+            },
+            None,
+        )
+        .await?;
+    let outcome = await_turn_outcome(test.client(), &started).await?;
+    assert_eq!(outcome.kind, TurnOutcomeKind::Completed);
     assert_eq!(
         await_session_settled(test.client(), started.session_id).await?,
-        SessionStatus::Failed
+        SessionStatus::Idle
     );
-    assert_coordinator_input_late_reply_conflicts(test.client(), &started).await?;
     Ok(())
 }
 
@@ -620,7 +666,7 @@ async fn restate_query_rows(fixture: &OrchestratorTestFixture, query: &str) -> R
     }
 }
 
-async fn security_input_fixture(timeout_ms: u64) -> Result<OrchestratorTestFixture> {
+async fn security_input_fixture() -> Result<OrchestratorTestFixture> {
     OrchestratorTestFixture::with_execution_fixture(
         json!({
             "default": text_completion("unexpected security-input fallback"),
@@ -628,6 +674,10 @@ async fn security_input_fixture(timeout_ms: u64) -> Result<OrchestratorTestFixtu
                 route_classifier_completion(
                     ExecutionRouteKind::Execute,
                     RouteFixture::Inline,
+                ),
+                keyed_completion(
+                    SECURITY_INPUT_ADMISSION_PROBE,
+                    text_completion(SECURITY_INPUT_ADMISSION_PROBE_FINAL),
                 ),
                 keyed_completion(
                     SECURITY_INPUT_WARNING_MARKER,
@@ -678,10 +728,24 @@ async fn security_input_fixture(timeout_ms: u64) -> Result<OrchestratorTestFixtu
                     },
                 ],
             }],
-            orchestrator_env: vec![(
-                "MOA_SESSION_LIMITS_COORDINATOR_INPUT_TIMEOUT_MS".to_string(),
-                timeout_ms.to_string(),
-            )],
+            orchestrator_env: vec![
+                (
+                    "MOA_SESSION_LIMITS_TURN_ADMISSION_FLEET_LIMIT".to_string(),
+                    "1".to_string(),
+                ),
+                (
+                    "MOA_SESSION_LIMITS_TURN_ADMISSION_TENANT_LIMIT".to_string(),
+                    "1".to_string(),
+                ),
+                (
+                    "MOA_SESSION_LIMITS_TURN_ADMISSION_LEASE_TTL_MS".to_string(),
+                    "60000".to_string(),
+                ),
+                (
+                    "MOA_SESSION_LIMITS_TURN_ADMISSION_RETRY_AFTER_MS".to_string(),
+                    "50".to_string(),
+                ),
+            ],
         },
     )
     .await

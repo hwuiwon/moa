@@ -7,6 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use futures_util::StreamExt as _;
 use moa_core::error::{MoaError, Result};
 use serde::{Deserialize, Deserializer, de::Error as _};
+use sha2::{Digest as _, Sha256};
 use tempfile::{Builder, TempDir};
 use tokio::io::AsyncWriteExt as _;
 
@@ -80,8 +81,14 @@ where
     }
 }
 
-async fn create_operation_temp_dir(purpose: &str) -> Result<TempDir> {
-    let prefix = format!(".moa-e2b-{purpose}-");
+/// Returns the provider-resource-specific prefix used for operation scratch directories.
+pub(super) fn operation_temp_prefix(purpose: &str, sandbox_id: &str) -> String {
+    let discriminator = format!("{:x}", Sha256::digest(sandbox_id.as_bytes()));
+    format!(".moa-e2b-{purpose}-{}-", &discriminator[..16])
+}
+
+async fn create_operation_temp_dir(purpose: &str, sandbox_id: &str) -> Result<TempDir> {
+    let prefix = operation_temp_prefix(purpose, sandbox_id);
     let directory = Builder::new().prefix(&prefix).tempdir().map_err(|error| {
         MoaError::StorageError(format!("create E2B operation temp directory: {error}"))
     })?;
@@ -114,7 +121,7 @@ pub(super) async fn export_data_root(
     sandbox: &ConnectedSandbox,
     limits: ArchiveLimits,
 ) -> Result<CheckpointArchive> {
-    let temporary = create_operation_temp_dir("export").await?;
+    let temporary = create_operation_temp_dir("export", sandbox_id).await?;
     let result = export_into_temp(provider, attempt, sandbox_id, sandbox, &temporary, limits).await;
     let cleanup = cleanup_operation_temp_dir(temporary).await;
     match (result, cleanup) {
@@ -327,7 +334,7 @@ pub(super) async fn restore_checkpoint_data_root(
     sandbox: &ConnectedSandbox,
     limits: ArchiveLimits,
 ) -> Result<()> {
-    let temporary = create_operation_temp_dir("restore").await?;
+    let temporary = create_operation_temp_dir("restore", sandbox_id).await?;
     let restored_root = temporary.path().join("data");
     let result = async {
         store.restore(context, &restored_root).await?;

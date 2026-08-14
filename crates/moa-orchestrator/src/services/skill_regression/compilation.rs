@@ -96,15 +96,23 @@ pub(super) fn compile_skill_execution_template(
         .map_err(|error| MoaError::SerializationError(error.to_string()))?;
     let candidate_hash =
         execution_planning_hash("moa.execution.compile-candidate", &candidate_bytes);
+    let created_at = Utc::now();
+    let horizon_seconds = i64::try_from(request.config.execution.maximum_horizon_seconds)
+        .map_err(|_| MoaError::ConfigError("execution maximum horizon does not fit i64".into()))?;
+    let horizon = chrono::TimeDelta::try_seconds(horizon_seconds).ok_or_else(|| {
+        MoaError::ConfigError("execution maximum horizon does not fit chrono".into())
+    })?;
+    let deadline_at = created_at.checked_add_signed(horizon).ok_or_else(|| {
+        MoaError::ConfigError("execution maximum horizon exceeds timestamp range".into())
+    })?;
     let approved_budget = ExecutionBudgetLimit {
         max_cost_microusd: Some(request.config.execution.max_cost_microusd),
         max_tokens: Some(request.config.execution.max_tokens),
         max_tasks: Some(request.config.execution.max_tasks),
         max_tool_calls: Some(request.config.execution.max_tool_calls),
         max_retrieved_bytes: Some(request.config.execution.max_retrieved_bytes),
-        deadline_at: None,
+        deadline_at: Some(deadline_at),
     };
-    let created_at = Utc::now();
     let started = Instant::now();
     let mut outcome = if matches!(request.run_input, RegressionExecutionInput::Ambiguous) {
         CompileExecutionOutcome {

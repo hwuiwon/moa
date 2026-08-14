@@ -9,7 +9,8 @@ use moa_core::{
     types::{action_policy::ActionRuleScope, experience::LearningCandidate, provider::ModelTask},
 };
 use moa_eval_core::TestSuite;
-use moa_execution::repository::{CompileAuditWriteOutcome, ExecutionRepository, ExecutionScope};
+use moa_execution::repository::audit::CompileAuditWriteOutcome;
+use moa_execution::repository::{ExecutionRepository, ExecutionScope};
 use moa_providers::ProviderRegistry;
 use moa_session::PostgresSessionStore;
 use moa_skills::{

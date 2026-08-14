@@ -3843,6 +3843,8 @@ dependencies = [
  "hex",
  "ignore",
  "jsonschema",
+ "metrics",
+ "metrics-exporter-prometheus",
  "moa-artifacts",
  "moa-auth-providers",
  "moa-config",
@@ -4412,6 +4414,7 @@ dependencies = [
  "metrics",
  "moa-config",
  "moa-core",
+ "moa-eval-core",
  "moa-memory-graph",
  "moa-memory-pii",
  "moa-observability",
@@ -4585,6 +4588,7 @@ dependencies = [
  "moa-config",
  "moa-core",
  "moa-crypto",
+ "moa-eval-core",
  "moa-execution",
  "moa-kms",
  "moa-migrations",
@@ -5422,6 +5426,7 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "postgres-protocol",
+ "uuid",
 ]
 
 [[package]]

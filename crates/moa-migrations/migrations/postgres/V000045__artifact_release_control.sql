@@ -171,7 +171,7 @@ IMMUTABLE
 PARALLEL SAFE
 STRICT
 AS $$
-    SELECT digest(
+    SELECT public.digest(
         jsonb_build_object(
             'schema', 'moa.artifact_release_policy/v1',
             'name', p_name,
@@ -337,7 +337,7 @@ policy_body (
         '[{"id":"scenario_outcome","version":"v1","determinism":"deterministic"},{"id":"target_completed","version":"v1","determinism":"deterministic"},{"id":"result_produced","version":"v1","determinism":"deterministic"},{"id":"privacy_safe_output","version":"v1","determinism":"deterministic"}]'::JSONB,
         '[{"metric":"result_produced","direction":"higher_is_better","estimand":"paired difference in result-production probability","target_population":"approved artifact-release scenarios","independent_unit":"scenario_persona_profile","cluster_key":"scenario_persona_profile","paired_key":"scenario_persona_profile_repetition","confidence_method":"cluster_matched_risk_difference_bootstrap","unit":"proportion","margin_bp":500,"alpha_bp":250,"acceptable_alternative_bp":0,"unacceptable_alternative_bp":-1000,"resamples":2000,"min_independent_units":6,"holm_regression_alpha_bp":250}]'::JSONB,
         86400::BIGINT,
-        digest('moa.release.resource_policy.v1', 'sha256')
+        public.digest('moa.release.resource_policy.v1', 'sha256')
     )
 )
 INSERT INTO moa.artifact_release_policy (

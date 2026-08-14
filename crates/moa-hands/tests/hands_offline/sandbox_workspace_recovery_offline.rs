@@ -45,7 +45,6 @@ struct ProviderIoSnapshot {
     execute: u32,
     health: u32,
     status: u32,
-    pause: u32,
     resume: u32,
     destroy: u32,
 }
@@ -170,15 +169,6 @@ impl HandProvider for ObservableProvider {
             .io
             .status += 1;
         Ok(HandStatus::Running)
-    }
-
-    async fn pause(&self, _handle: &HandHandle) -> Result<()> {
-        self.state
-            .lock()
-            .expect("observable provider state should not be poisoned")
-            .io
-            .pause += 1;
-        Ok(())
     }
 
     async fn resume(&self, _handle: &HandHandle) -> Result<()> {

@@ -20,7 +20,7 @@ use moa_observability::{
 use moa_wire::session_store::AppendEventRequest;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
 use crate::action_reviews::app as action_review_app;
@@ -28,9 +28,14 @@ use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::objects::session::SessionClient;
 use crate::objects::worker::WorkerClient;
+use crate::services::action_review_dispatcher::{
+    ActionReviewDispatcherClient, DispatchActionReviewsRequest,
+};
+use crate::services::durable_timeout::{DurableTimeoutRequest, schedule_durable_timeout};
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::services::tool_executor::{
-    ExecutionToolCallOrigin, ExecutionToolCallOutcome, ExecutionToolCallRequest, ToolExecutorClient,
+    ExecutionToolCallOrigin, ExecutionToolCallOutcome, ExecutionToolCallPhase,
+    ExecutionToolCallRequest, ToolExecutorClient,
 };
 use crate::workflows::errors::moa_error_to_handler_error;
 use moa_core::traits::SessionEventLookupStore;
@@ -67,6 +72,8 @@ pub struct ActionReviewSummary {
     pub deny_reason: Option<String>,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
+    /// Exact durable timeout persisted with the review.
+    pub expires_at: DateTime<Utc>,
     /// Decision timestamp, when present.
     pub decided_at: Option<DateTime<Utc>>,
 }
@@ -115,6 +122,18 @@ pub struct SettleExecutionActionReviewRequest {
     pub owner: ActionReviewOwner,
 }
 
+/// Exact execution-owned review whose bounded owner durably parked before acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcknowledgeExecutionActionReviewRequest {
+    /// Tenant that owns the review row.
+    pub tenant_id: TenantId,
+    /// Stable review identifier returned by durable review admission.
+    pub review_id: Uuid,
+    /// Exact task or compensation owner parked under its generation fence.
+    pub owner: ActionReviewOwner,
+}
+
 /// Durable settlement chosen while holding the action-review row lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -156,6 +175,11 @@ pub trait ActionReviews {
     async fn settle_execution_owner_review(
         request: Json<SettleExecutionActionReviewRequest>,
     ) -> Result<Json<ExecutionActionReviewSettlement>, HandlerError>;
+
+    /// Makes an execution review decision-ready only after its owner park CAS committed.
+    async fn acknowledge_execution_owner_review(
+        request: Json<AcknowledgeExecutionActionReviewRequest>,
+    ) -> Result<(), HandlerError>;
 }
 
 /// Settles an execution-owned action review against the durable row state.
@@ -236,8 +260,9 @@ impl ActionReviews for ActionReviewsImpl {
             .name("action_reviews_request")
             .await?
             .into_inner();
-        let owner_needs_registration =
-            !stored.owner_registered && stored.summary.status == ActionReviewStatus::Pending;
+        let owner_needs_registration = !stored.owner_registered
+            && stored.summary.status == ActionReviewStatus::Pending
+            && requires_conversational_registration(&owner);
         if owner_needs_registration {
             // The database row is deliberately not decision-ready until the typed
             // owner has durably acknowledged registration. A crash between these
@@ -263,12 +288,31 @@ impl ActionReviews for ActionReviewsImpl {
             let storage_partition_id = storage_partition_id(stored.summary.tenant_id);
             let review_id = stored.summary.id;
             ctx.run(|| async move {
-                action_review_app::mark_owner_registered(pool, storage_partition_id, review_id)
-                    .await
-                    .map(Json::from)
+                action_review_app::mark_owner_registered(
+                    pool,
+                    storage_partition_id,
+                    review_id,
+                    None,
+                )
+                .await
+                .map(Json::from)
             })
             .name("action_reviews_mark_owner_registered")
             .await?;
+        }
+        if stored.summary.status == ActionReviewStatus::Pending {
+            let timeout_secs = u64::try_from(review_timeout_secs).map_err(|error| {
+                TerminalError::new(format!("action review timeout is invalid: {error}"))
+            })?;
+            schedule_durable_timeout(
+                &ctx,
+                DurableTimeoutRequest::action_review(
+                    stored.summary.tenant_id,
+                    stored.summary.id,
+                    owner,
+                ),
+                Duration::from_secs(timeout_secs),
+            );
         }
         if stored.newly_inserted {
             record_action_review_requested(
@@ -336,10 +380,13 @@ impl ActionReviews for ActionReviewsImpl {
             .name("action_reviews_decide")
             .await?
             .into_inner();
+        let owns_execution_attempt = !decided.owner.is_conversational();
 
-        if let Some(execution_request) =
-            execution_review_request(&decided.owner, decided.tool_request.as_ref())
-        {
+        if let Some(execution_request) = execution_review_request(
+            &decided.owner,
+            decided.review_id,
+            decided.tool_request.as_ref(),
+        ) {
             let execution = crate::restate_identity::replay_safe_request(
                 ctx.service_client::<ToolExecutorClient>()
                     .execute_execution(Json::from(execution_request)),
@@ -401,7 +448,7 @@ impl ActionReviews for ActionReviewsImpl {
         let mut executed_output: Option<SecuredToolOutput> = None;
         if let Some(tool_request) = decided.tool_request.as_ref() {
             if let Some(execution_request) =
-                execution_review_request(&decided.owner, Some(tool_request))
+                execution_review_request(&decided.owner, decided.review_id, Some(tool_request))
             {
                 crate::restate_identity::replay_safe_request(
                     ctx.service_client::<ToolExecutorClient>()
@@ -477,6 +524,15 @@ impl ActionReviews for ActionReviewsImpl {
                 deliver_conversational_resolution(&ctx, receipt).await?;
             }
         }
+        if owns_execution_attempt {
+            let handle = crate::restate_identity::replay_safe_request(
+                ctx.service_client::<ActionReviewDispatcherClient>()
+                    .dispatch(Json::from(DispatchActionReviewsRequest::default()))
+                    .idempotency_key(format!("execution-action-review-decision:{review_id}")),
+            )
+            .send();
+            let _invocation_id = handle.invocation_id().await?;
+        }
         Ok(())
     }
 
@@ -499,6 +555,47 @@ impl ActionReviews for ActionReviewsImpl {
             .name("action_reviews_settle_execution_owner_review")
             .await?)
     }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: invoked only after an exact execution attempt generation durably parks its review.
+    async fn acknowledge_execution_owner_review(
+        &self,
+        ctx: Context<'_>,
+        request: Json<AcknowledgeExecutionActionReviewRequest>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("ActionReviews", "acknowledge_execution_owner_review");
+        let request = request.into_inner();
+        if request.owner.execution_origin().is_none()
+            && request.owner.compensation_origin().is_none()
+        {
+            return Err(TerminalError::new(
+                "execution review acknowledgement requires a task or compensation owner",
+            )
+            .into());
+        }
+        let pool = self.pool.clone();
+        let storage_partition_id = storage_partition_id(request.tenant_id);
+        ctx.run(|| async move {
+            action_review_app::mark_owner_registered(
+                pool,
+                storage_partition_id,
+                request.review_id,
+                Some(&request.owner),
+            )
+            .await
+        })
+        .name("action_reviews_acknowledge_execution_owner")
+        .await
+        .map_err(HandlerError::from)
+    }
+}
+
+fn requires_conversational_registration(owner: &ActionReviewOwner) -> bool {
+    matches!(
+        owner,
+        ActionReviewOwner::Coordinator { .. } | ActionReviewOwner::Worker { .. }
+    )
 }
 
 /// Registers one pending conversational review on its typed owner.
@@ -621,6 +718,37 @@ async fn release_conversational_review(
     Ok(())
 }
 
+/// Releases a timed-out conversational review without scheduling continuation.
+pub(crate) async fn release_timed_out_conversational_review(
+    ctx: &Context<'_>,
+    release: moa_core::types::action_policy::ActionReviewRelease,
+) -> Result<(), HandlerError> {
+    let idempotency_key = release.review_id.to_string();
+    match release.owner.clone() {
+        ActionReviewOwner::Coordinator { session_id, .. } => {
+            crate::restate_identity::replay_safe_request(
+                ctx.object_client::<SessionClient>(session_id.to_string())
+                    .release_action_review(Json::from(release))
+                    .idempotency_key(idempotency_key),
+            )
+            .call()
+            .await?;
+        }
+        ActionReviewOwner::Worker { worker_id, .. } => {
+            crate::restate_identity::replay_safe_request(
+                ctx.object_client::<WorkerClient>(worker_id)
+                    .release_action_review(Json::from(release))
+                    .idempotency_key(idempotency_key),
+            )
+            .call()
+            .await?;
+        }
+        ActionReviewOwner::ExecutionTask { .. }
+        | ActionReviewOwner::ExecutionCompensation { .. } => {}
+    }
+    Ok(())
+}
+
 /// Builds the typed receipt for a conversational owner, or `None` when the
 /// terminal facts a callback depends on are not durable yet.
 ///
@@ -694,6 +822,13 @@ fn execution_review_resolution(
                 })?,
             })
         }
+        ExecutionToolCallOutcome::ExternalJob {
+            external_job_uid,
+            job,
+        } => Ok(ExecutionActionReviewResolution::ExternalJob {
+            external_job_uid,
+            job,
+        }),
         ExecutionToolCallOutcome::UnknownOutcome { message } => {
             Ok(ExecutionActionReviewResolution::UnknownOutcome { message })
         }
@@ -705,6 +840,7 @@ fn execution_review_resolution(
 
 fn execution_review_request(
     owner: &ActionReviewOwner,
+    review_uid: Uuid,
     tool_request: Option<&moa_core::types::tools::ToolCallRequest>,
 ) -> Option<ExecutionToolCallRequest> {
     let call = tool_request?.clone();
@@ -715,7 +851,11 @@ fn execution_review_request(
         }
         ActionReviewOwner::Coordinator { .. } | ActionReviewOwner::Worker { .. } => return None,
     };
-    Some(ExecutionToolCallRequest { call, origin })
+    Some(ExecutionToolCallRequest {
+        call,
+        origin,
+        phase: ExecutionToolCallPhase::Reviewed { review_uid },
+    })
 }
 
 /// Loads the terminal fact already durable for one reviewed call.
@@ -766,8 +906,13 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{executed_terminal_fact, execution_review_request, execution_review_resolution};
-    use crate::services::tool_executor::{ExecutionToolCallOrigin, ExecutionToolCallOutcome};
+    use super::{
+        executed_terminal_fact, execution_review_request, execution_review_resolution,
+        requires_conversational_registration,
+    };
+    use crate::services::tool_executor::{
+        ExecutionToolCallOrigin, ExecutionToolCallOutcome, ExecutionToolCallPhase,
+    };
     use moa_core::types::action_policy::{ToolResultSecurityMetadata, ToolTerminalFact};
     use moa_execution::wire::ExecutionActionReviewResolution;
 
@@ -806,6 +951,7 @@ mod tests {
             run_uid: Uuid::from_u128(10),
             task_uid: Uuid::from_u128(20),
             generation: 3,
+            attempt_generation: 4,
         };
         let call = ToolCallRequest {
             tool_call_id: ToolCallId::new(),
@@ -831,11 +977,16 @@ mod tests {
             session_id: call.session_id,
             origin,
         };
-        let request = execution_review_request(&owner, Some(&call))
+        let review_uid = Uuid::from_u128(21);
+        let request = execution_review_request(&owner, review_uid, Some(&call))
             .expect("execution provenance should select execution-task dispatch");
 
         assert_eq!(request.call, call);
         assert_eq!(request.origin, ExecutionToolCallOrigin::Task(origin));
+        assert_eq!(
+            request.phase,
+            ExecutionToolCallPhase::Reviewed { review_uid }
+        );
         assert!(
             execution_review_request(
                 &ActionReviewOwner::Coordinator {
@@ -843,6 +994,7 @@ mod tests {
                     turn_id: "turn-1".to_string(),
                     generation: 1,
                 },
+                Uuid::from_u128(22),
                 Some(&call),
             )
             .is_none()
@@ -876,13 +1028,15 @@ mod tests {
             run_uid: Uuid::from_u128(10),
             compensation_id: Uuid::from_u128(30),
             generation: 7,
+            attempt_generation: 8,
         };
         let owner = ActionReviewOwner::ExecutionCompensation {
             session_id: call.session_id,
             origin,
         };
 
-        let request = execution_review_request(&owner, Some(&call))
+        let review_uid = Uuid::from_u128(31);
+        let request = execution_review_request(&owner, review_uid, Some(&call))
             .expect("compensation provenance should select execution dispatch");
 
         assert_eq!(request.call, call);
@@ -890,6 +1044,54 @@ mod tests {
             request.origin,
             ExecutionToolCallOrigin::Compensation(origin)
         );
+        assert_eq!(
+            request.phase,
+            ExecutionToolCallPhase::Reviewed { review_uid }
+        );
+    }
+
+    #[test]
+    fn execution_review_registration_waits_for_the_attempt_park_offline() {
+        // Pins: execution-owned reviews cannot become decision-ready in the
+        // ActionReviews request handler before the attempt's Postgres park CAS.
+        let session_id = SessionId::new();
+        assert!(requires_conversational_registration(
+            &ActionReviewOwner::Coordinator {
+                session_id,
+                turn_id: "turn-1".to_string(),
+                generation: 1,
+            }
+        ));
+        assert!(requires_conversational_registration(
+            &ActionReviewOwner::Worker {
+                session_id,
+                worker_id: "worker-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                generation: 1,
+            }
+        ));
+        assert!(!requires_conversational_registration(
+            &ActionReviewOwner::ExecutionTask {
+                session_id,
+                origin: ExecutionTaskOrigin {
+                    run_uid: Uuid::from_u128(10),
+                    task_uid: Uuid::from_u128(20),
+                    generation: 3,
+                    attempt_generation: 4,
+                },
+            }
+        ));
+        assert!(!requires_conversational_registration(
+            &ActionReviewOwner::ExecutionCompensation {
+                session_id,
+                origin: ExecutionCompensationOrigin {
+                    run_uid: Uuid::from_u128(10),
+                    compensation_id: Uuid::from_u128(30),
+                    generation: 7,
+                    attempt_generation: 8,
+                },
+            }
+        ));
     }
 
     #[test]
@@ -930,6 +1132,36 @@ mod tests {
         assert_eq!(
             resolution,
             ExecutionActionReviewResolution::NotDispatched { reason }
+        );
+    }
+
+    #[test]
+    fn execution_review_preserves_pre_admitted_external_job_identity_offline() {
+        // Pins: review settlement must route the exact MOA-owned job reserved before
+        // provider dispatch; reconstructing a new UID would orphan capacity and callbacks.
+        let external_job_uid = Uuid::from_u128(41);
+        let job = moa_core::types::tools::AsyncToolJob {
+            provider: "fixture".to_string(),
+            provider_job_id: "provider-job-41".to_string(),
+            idempotency_key: "review-job-41".to_string(),
+            callback_auth_reference: "callback-41".to_string(),
+            progress_phase: "queued".to_string(),
+            cancel_supported: true,
+            next_reconcile_at: chrono::DateTime::UNIX_EPOCH,
+        };
+
+        let resolution = execution_review_resolution(ExecutionToolCallOutcome::ExternalJob {
+            external_job_uid,
+            job: job.clone(),
+        })
+        .expect("bound execution external job should remain a valid review resolution");
+
+        assert_eq!(
+            resolution,
+            ExecutionActionReviewResolution::ExternalJob {
+                external_job_uid,
+                job,
+            }
         );
     }
 }

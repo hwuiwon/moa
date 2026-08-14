@@ -105,6 +105,14 @@ uuid_id!(
 );
 
 uuid_id!(
+    /// Core boundary reference to one verified durable execution compensation.
+    ///
+    /// The owning `moa-execution` crate retains its `CompensationId` domain
+    /// type. Orchestration converts that verified UUID at the sandbox boundary.
+    pub struct ExecutionCompensationScopeId
+);
+
+uuid_id!(
     /// Identifier for one durable child-to-parent attention signal.
     pub struct AgentSignalId
 );
@@ -118,9 +126,9 @@ impl From<uuid::Uuid> for ToolCallId {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConnectorConnectionId, ExecutionRunScopeId, ExecutionTaskScopeId, ProviderAccountId,
-        SandboxWorkspaceId, StoragePartitionId, TenantId, WorkspaceCheckpointId,
-        WorkspaceOperationId,
+        ConnectorConnectionId, ExecutionCompensationScopeId, ExecutionRunScopeId,
+        ExecutionTaskScopeId, ProviderAccountId, SandboxWorkspaceId, StoragePartitionId, TenantId,
+        WorkspaceCheckpointId, WorkspaceOperationId,
     };
 
     #[test]
@@ -163,6 +171,7 @@ mod tests {
             ProviderAccountId(value),
             ExecutionRunScopeId(value),
             ExecutionTaskScopeId(value),
+            ExecutionCompensationScopeId(value),
         ))
         .expect("workspace identifiers should serialize");
         let decoded: (
@@ -172,6 +181,7 @@ mod tests {
             ProviderAccountId,
             ExecutionRunScopeId,
             ExecutionTaskScopeId,
+            ExecutionCompensationScopeId,
         ) = serde_json::from_str(&encoded).expect("workspace identifiers should deserialize");
 
         assert_eq!(
@@ -183,6 +193,7 @@ mod tests {
                 ProviderAccountId(value),
                 ExecutionRunScopeId(value),
                 ExecutionTaskScopeId(value),
+                ExecutionCompensationScopeId(value),
             )
         );
     }

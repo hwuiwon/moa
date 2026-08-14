@@ -65,6 +65,7 @@ use crate::adapters::trusted_command::{
     normalized_trusted_skill_path, resolve_trusted_skill_command, rewrite_bash_input,
 };
 use crate::core::leases::LeaseHandle;
+use crate::core::sandbox_workspace::capacity::PostgresWorkspaceCapacityRepository;
 use crate::core::sandbox_workspace::checkpoint::archive::build_checkpoint_archive;
 use crate::core::sandbox_workspace::checkpoint::revision::{
     next_workspace_revision, required_current_revision,
@@ -77,7 +78,7 @@ use crate::tools::{bash, file_outline, file_read, file_search, file_write, grep,
 
 const LOCAL_SUPPORTED_CAPABILITIES: &[SandboxToolCapability] = &SandboxToolCapability::ALL;
 const DEFAULT_DOCKER_IMAGE: &str = "alpine:3.20";
-const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_TOOL_TIMEOUT: Duration = crate::tools::bash::DEFAULT_BASH_TIMEOUT;
 const DOCKER_DETECTION_TIMEOUT: Duration = Duration::from_secs(2);
 const DOCKER_TMPFS_OPTIONS: &str = "rw,nosuid,nodev,size=64m";
 const HAND_SANDBOX_PREFIX: &str = "hand-";
@@ -314,6 +315,7 @@ pub struct LocalHandProvider {
     local_sandboxes: Arc<RwLock<HashMap<PathBuf, LocalSandbox>>>,
     docker_sandboxes: Arc<RwLock<HashMap<String, DockerSandbox>>>,
     checkpoint_store: Option<Arc<CheckpointObjectStore>>,
+    checkpoint_capacity: Option<Arc<PostgresWorkspaceCapacityRepository>>,
 }
 
 impl LocalHandProvider {
@@ -342,6 +344,7 @@ impl LocalHandProvider {
             local_sandboxes: Arc::new(RwLock::new(HashMap::new())),
             docker_sandboxes: Arc::new(RwLock::new(HashMap::new())),
             checkpoint_store: None,
+            checkpoint_capacity: None,
         })
     }
 
@@ -361,6 +364,16 @@ impl LocalHandProvider {
     #[must_use]
     pub fn with_checkpoint_store(mut self, checkpoint_store: Arc<CheckpointObjectStore>) -> Self {
         self.checkpoint_store = Some(checkpoint_store);
+        self
+    }
+
+    /// Installs provider-neutral pre-publication checkpoint admission.
+    #[must_use]
+    pub fn with_checkpoint_capacity(
+        mut self,
+        capacity: Arc<PostgresWorkspaceCapacityRepository>,
+    ) -> Self {
+        self.checkpoint_capacity = Some(capacity);
         self
     }
 
@@ -1502,26 +1515,19 @@ impl HandProvider for LocalHandProvider {
         }
     }
 
-    async fn pause(&self, handle: &HandHandle) -> Result<()> {
-        match handle {
-            HandHandle::Docker { container_id } => {
-                let output = Command::new("docker")
-                    .args(["pause", container_id])
-                    .output()
-                    .await?;
-                if !output.status.success() {
-                    return Err(MoaError::ProviderError(format!(
-                        "failed to pause docker sandbox: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    )));
-                }
-                Ok(())
-            }
-            HandHandle::Local { .. } => Ok(()),
-            _ => Err(MoaError::Unsupported(
-                "non-local hand handle passed to LocalHandProvider".to_string(),
-            )),
-        }
+    /// Refuses compute suspension: neither local backend can actually release compute.
+    ///
+    /// `docker pause` is a cgroup freeze — it stops CPU scheduling but keeps the
+    /// container's memory and disk allocated, so it releases nothing on any
+    /// billing model. `docker stop` would release them, but containers are
+    /// created with `--rm`, which makes a stop a destroy. A local sandbox
+    /// directory has no compute to release at all.
+    async fn suspend(&self, _handle: &HandHandle) -> Result<()> {
+        Err(MoaError::Unsupported(
+            "local sandboxes cannot release compute: `docker pause` is a cgroup freeze that keeps \
+             memory and disk allocated, and `--rm` containers are removed by `docker stop`"
+                .to_string(),
+        ))
     }
 
     async fn resume(&self, handle: &HandHandle) -> Result<()> {

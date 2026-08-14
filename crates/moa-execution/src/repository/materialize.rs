@@ -1,7 +1,9 @@
 //! Run confirmation and idempotent logical-task materialization.
 
 use super::*;
-use super::{projection::budget_ledger, rows::*, sql::*};
+use super::{projection::budget_ledger, rows::*, run::enqueue_run_activation_in_conn, sql::*};
+
+const MAX_MATERIALIZATION_PAGE_SIZE: usize = 1_000;
 
 impl ExecutionRepository {
     /// Confirms the exact displayed active-plan hash and atomically persists its budget.
@@ -65,6 +67,21 @@ impl ExecutionRepository {
             ));
         };
         let confirmed = run_from_row(&row)?;
+        enqueue_run_activation_in_conn(
+            conn.as_mut(),
+            confirmed.tenant_id,
+            confirmed.run_uid,
+            confirmed.controller_generation,
+            confirmed.updated_at,
+            json!({"reason": "run_confirmed"}),
+        )
+        .await?;
+        let row = sqlx::query(LOAD_RUN_SQL)
+            .bind(run_uid)
+            .fetch_one(conn.as_mut())
+            .await
+            .map_err(sqlx_error)?;
+        let confirmed = run_from_row(&row)?;
         conn.commit().await.map_err(storage_error)?;
         Ok(ConfirmationOutcome::Confirmed(confirmed))
     }
@@ -99,6 +116,13 @@ impl ExecutionRepository {
         marker: Option<ExecutionNodeMaterialization>,
         tasks: Vec<LogicalTask>,
     ) -> Result<MaterializationOutcome> {
+        if tasks.len() > MAX_MATERIALIZATION_PAGE_SIZE {
+            return Err(Error::InvalidRepositoryInput {
+                message: format!(
+                    "task materialization exceeds the bounded page size of {MAX_MATERIALIZATION_PAGE_SIZE}"
+                ),
+            });
+        }
         let plan_revision_db = to_i64(plan_revision, "plan revision")?;
         if let Some(marker) = marker.as_ref()
             && tasks.iter().any(|task| task.node_id != marker.node_id())

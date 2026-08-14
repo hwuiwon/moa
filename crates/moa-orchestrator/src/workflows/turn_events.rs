@@ -396,13 +396,10 @@ pub(super) async fn append_turn_failed(
 /// erasing it would collapse a typed contract into an indistinguishable
 /// generic failure. Only codes on this closed list survive sanitization;
 /// everything else keeps the fixed class sentence.
-pub(super) const COORDINATOR_SECURITY_INPUT_TIMEOUT_MESSAGE: &str = "The turn stopped safely because user direction was not received before the security-input timeout.";
-
 /// Repository-authored failure text that may survive catch-all sanitization.
 pub(super) const SAFE_TERMINAL_REJECTION_CODES: &[&str] = &[
     "durable_execution_requires_user_message_origin",
     "run_requires_user_message_origin",
-    COORDINATOR_SECURITY_INPUT_TIMEOUT_MESSAGE,
 ];
 
 /// Returns the stable rejection code carried by a hand-authored terminal

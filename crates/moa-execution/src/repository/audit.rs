@@ -1,6 +1,139 @@
 //! Execution-template admission and normalized planning audit persistence.
 
 use super::*;
+
+/// Input used to insert one immutable origin-bound planning-context snapshot.
+#[derive(Clone, Debug)]
+pub struct NewExecutionPlanningContext {
+    /// Exact immutable snapshot whose canonical bytes are hashed.
+    pub snapshot: ExecutionPlanningContextSnapshot,
+    /// Domain-separated hash of the canonical snapshot bytes.
+    pub planning_context_hash: ExecutionHash,
+}
+
+/// Persisted immutable planning-context projection.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ExecutionPlanningContextRecord {
+    /// Durable planning-context identifier.
+    pub planning_context_uid: Uuid,
+    /// Exact immutable snapshot.
+    pub snapshot: ExecutionPlanningContextSnapshot,
+    /// Domain-separated hash of the canonical snapshot bytes.
+    pub planning_context_hash: ExecutionHash,
+    /// Database-owned creation timestamp.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Result of inserting or replaying one unique origin-bound planning context.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlanningContextWriteOutcome {
+    /// The immutable snapshot was inserted.
+    Created(ExecutionPlanningContextRecord),
+    /// The exact immutable snapshot already existed for the origin.
+    Replayed(ExecutionPlanningContextRecord),
+    /// The unique origin already exists with different immutable bytes or scope.
+    Conflict,
+}
+
+/// Persisted low-cardinality evidence for one route-audit insertion.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RouteAuditEvidence {
+    /// Deterministic UUIDv5 audit identifier.
+    pub audit_uid: Uuid,
+    /// Respond, Execute, or NeedsInput decision.
+    pub decision: ExecutionRouteKind,
+    /// Selected strategy, present exactly for Execute.
+    pub strategy: Option<ExecutionStrategy>,
+    /// Redacted trusted-bypass or classifier provenance.
+    pub provenance: ExecutionRouteProvenance,
+    /// First durable acceptance timestamp.
+    pub accepted_at: DateTime<Utc>,
+}
+
+/// Durable result of inserting one normalized route audit.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum RouteAuditWriteOutcome {
+    /// This transaction inserted the first route row.
+    Applied(RouteAuditEvidence),
+    /// The exact semantic route row already existed.
+    Replayed(RouteAuditEvidence),
+    /// The logical key already carries different route semantics.
+    Conflict {
+        /// Deterministic audit identifier for the conflicting logical key.
+        audit_uid: Uuid,
+    },
+}
+
+/// Persisted low-cardinality evidence for one planner-call audit insertion.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PlannerCallAuditEvidence {
+    /// Deterministic UUIDv5 audit identifier.
+    pub audit_uid: Uuid,
+    /// Exact closed planner call kind.
+    pub call: ExecutionPlannerCallKind,
+    /// Exact closed planner outcome.
+    pub outcome: ExecutionPlannerOutcome,
+    /// First persisted measured duration.
+    pub duration_micros: u64,
+    /// Normalized provider token usage attributed to this call.
+    pub usage: ExecutionRouteUsage,
+    /// Provider cost attributed to this call in micro-US-dollars.
+    pub cost_microusd: u64,
+    /// Candidate hash when required by the outcome.
+    pub candidate_hash: Option<String>,
+}
+
+/// Durable result of inserting one normalized planner-call audit.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum PlannerCallAuditWriteOutcome {
+    /// This transaction inserted the first planner-call row.
+    Applied(PlannerCallAuditEvidence),
+    /// The exact semantic planner-call row already existed.
+    Replayed(PlannerCallAuditEvidence),
+    /// The logical key already carries different planner-call semantics.
+    Conflict {
+        /// Deterministic audit identifier for the conflicting logical key.
+        audit_uid: Uuid,
+    },
+}
+
+/// Persisted low-cardinality evidence for one compiler-audit insertion.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CompileAuditEvidence {
+    /// Deterministic UUIDv5 audit identifier.
+    pub audit_uid: Uuid,
+    /// Exact closed compiler source.
+    pub source: ExecutionCompileSource,
+    /// Exact closed compiler outcome.
+    pub outcome: ExecutionCompileOutcome,
+    /// First persisted measured duration.
+    pub duration_micros: u64,
+    /// Hash of the strict compile candidate.
+    pub candidate_hash: String,
+    /// Accepted final plan hash, when compilation succeeded.
+    pub final_plan_hash: Option<String>,
+}
+
+/// Durable result of inserting one normalized compiler audit.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum CompileAuditWriteOutcome {
+    /// This transaction inserted the first compiler row.
+    Applied(CompileAuditEvidence),
+    /// The exact semantic compiler row already existed.
+    Replayed(CompileAuditEvidence),
+    /// The logical key already carries different compiler semantics.
+    Conflict {
+        /// Deterministic audit identifier for the conflicting logical key.
+        audit_uid: Uuid,
+    },
+}
+
+const LOAD_PLANNING_CONTEXT_FOR_SESSION_SQL: &str = r#"
+    SELECT planning_context_uid, snapshot, planning_context_hash, created_at
+    FROM moa.execution_planning_context
+    WHERE planning_context_uid = $1
+      AND session_id = $2
+"#;
 use super::{audit_codec::*, rows::*, sql::*};
 
 impl ExecutionRepository {
@@ -177,6 +310,24 @@ impl ExecutionRepository {
         row.as_ref().map(planning_context_from_row).transpose()
     }
 
+    /// Loads one immutable planning context only when it belongs to the expected session.
+    pub async fn load_planning_context_for_session(
+        &self,
+        scope: ExecutionScope,
+        planning_context_uid: Uuid,
+        expected_session_id: SessionId,
+    ) -> Result<Option<ExecutionPlanningContextRecord>> {
+        let mut conn = scope.begin(&self.pool).await?;
+        let row = sqlx::query(LOAD_PLANNING_CONTEXT_FOR_SESSION_SQL)
+            .bind(planning_context_uid)
+            .bind(expected_session_id.0)
+            .fetch_optional(conn.as_mut())
+            .await
+            .map_err(sqlx_error)?;
+        conn.commit().await.map_err(storage_error)?;
+        row.as_ref().map(planning_context_from_row).transpose()
+    }
+
     /// Inserts or exactly replays one normalized route-audit row.
     pub async fn write_route_audit(
         &self,
@@ -310,6 +461,8 @@ impl ExecutionRepository {
                 outcome,
                 provider_model,
                 prompt_version,
+                usage,
+                cost_microusd,
                 candidate_hash,
                 candidate_json,
                 compiler_report,
@@ -361,6 +514,20 @@ impl ExecutionRepository {
             .bind(candidate_hash)
             .bind(candidate_json)
             .bind(compiler_report)
+            .bind(to_i64(
+                usage.input_tokens_uncached,
+                "planner uncached input tokens",
+            )?)
+            .bind(to_i64(
+                usage.input_tokens_cache_write,
+                "planner cache-write tokens",
+            )?)
+            .bind(to_i64(
+                usage.input_tokens_cache_read,
+                "planner cache-read tokens",
+            )?)
+            .bind(to_i64(usage.output_tokens, "planner output tokens")?)
+            .bind(to_i64(*cost_microusd, "planner cost")?)
             .bind(duration_micros_db)
             .bind(*created_at)
             .fetch_optional(conn.as_mut())

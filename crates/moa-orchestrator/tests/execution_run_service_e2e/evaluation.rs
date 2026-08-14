@@ -14,7 +14,7 @@ use moa_test_support::{FixtureCapabilityController, OrchestratorTestFixture, Tes
 
 use crate::execution_execution_support::{
     assertions::{assert_initial_route, assert_no_execution_lifecycle_events},
-    evaluation::{collect_execution_eval_snapshot, collect_repository_execution_eval_snapshot},
+    evaluation::collect_execution_eval_snapshot,
 };
 
 /// Collects one service snapshot, evaluates typed invariants, and hard-fails any violation.
@@ -52,30 +52,6 @@ pub(crate) async fn assert_execution_eval_case(
     let result = ExecutionEvalCaseResult::evaluate(case_id, &snapshot, specs, 0)?;
     if !result.passed {
         anyhow::bail!("execution eval case `{case_id}` failed: {result:#?}");
-    }
-    Ok(result)
-}
-
-/// Evaluates typed repository invariants for a service test that intentionally bypasses Session.
-pub(crate) async fn assert_repository_execution_eval_case(
-    fixture: &OrchestratorTestFixture,
-    repository: &ExecutionRepository,
-    scope: ExecutionScope,
-    request: &ExecutionRunRequest,
-    case_id: &str,
-    specs: &[ExecutionInvariantSpec],
-) -> Result<ExecutionEvalCaseResult> {
-    let snapshot = collect_repository_execution_eval_snapshot(
-        repository,
-        scope,
-        &fixture.postgres_url,
-        request.session_id,
-        request.run_uid,
-    )
-    .await?;
-    let result = ExecutionEvalCaseResult::evaluate(case_id, &snapshot, specs, 0)?;
-    if !result.passed {
-        anyhow::bail!("repository execution eval case `{case_id}` failed: {result:#?}");
     }
     Ok(result)
 }

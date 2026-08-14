@@ -1,11 +1,16 @@
 //! Public pure execution projection, task, waiting, and terminal state types.
 
-use std::{collections::BTreeMap, fmt, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    str::FromStr,
+};
 
 use moa_artifacts::{
     execution_plan::{
         CapabilityReference, ExecutionCitation, ExecutionCompensation, ExecutionFailureClass,
-        ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, InputAudience, RetryPolicy,
+        ExecutionTaskOutcome, ExecutionTaskResult, ExecutionTemporalTarget, ExecutionUsage,
+        ExecutionWaitPolicy, InputAudience, RetryPolicy,
     },
     reference::ArtifactRef,
 };
@@ -123,8 +128,20 @@ pub enum ExecutionRunStatus {
     WaitingInput,
     /// The run is waiting for a tenant review decision.
     WaitingReview,
+    /// The run is waiting for a named external signal.
+    WaitingSignal,
+    /// The run is waiting for an exact durable timer.
+    WaitingTimer,
+    /// The run is waiting for an asynchronous external job.
+    WaitingExternal,
     /// The run is waiting for a compiler-validated amendment.
     WaitingReplan,
+    /// An authorized caller requested a safe pause.
+    PauseRequested,
+    /// Active work is reaching safe checkpoint boundaries before pausing.
+    Pausing,
+    /// The run is durably parked without active compute.
+    Paused,
     /// Forward work is fenced while committed effects are undone in reverse order.
     Compensating,
     /// Every required completion check passed.
@@ -151,7 +168,13 @@ impl ExecutionRunStatus {
             Self::Running => "running",
             Self::WaitingInput => "waiting_input",
             Self::WaitingReview => "waiting_review",
+            Self::WaitingSignal => "waiting_signal",
+            Self::WaitingTimer => "waiting_timer",
+            Self::WaitingExternal => "waiting_external",
             Self::WaitingReplan => "waiting_replan",
+            Self::PauseRequested => "pause_requested",
+            Self::Pausing => "pausing",
+            Self::Paused => "paused",
             Self::Compensating => "compensating",
             Self::Completed => "completed",
             Self::Partial => "partial",
@@ -187,7 +210,13 @@ impl FromStr for ExecutionRunStatus {
             "running" => Ok(Self::Running),
             "waiting_input" => Ok(Self::WaitingInput),
             "waiting_review" => Ok(Self::WaitingReview),
+            "waiting_signal" => Ok(Self::WaitingSignal),
+            "waiting_timer" => Ok(Self::WaitingTimer),
+            "waiting_external" => Ok(Self::WaitingExternal),
             "waiting_replan" => Ok(Self::WaitingReplan),
+            "pause_requested" => Ok(Self::PauseRequested),
+            "pausing" => Ok(Self::Pausing),
+            "paused" => Ok(Self::Paused),
             "compensating" => Ok(Self::Compensating),
             "completed" => Ok(Self::Completed),
             "partial" => Ok(Self::Partial),
@@ -534,8 +563,6 @@ pub enum ExecutionTerminalCause {
         /// Exact exhausted limit, with deadline taking precedence over budget.
         reason: ExecutionLimitStop,
     },
-    /// Pending work existed but the scheduler could neither dispatch nor wait.
-    SchedulerNoProgress,
     /// Deterministic replan stop policy ended the run.
     ReplanStop {
         /// Exact closed replan stop reason.
@@ -572,7 +599,6 @@ enum StrictExecutionTerminalCause {
     LimitStop {
         reason: ExecutionLimitStop,
     },
-    SchedulerNoProgress {},
     ReplanStop {
         reason: ReplanStopReason,
     },
@@ -599,7 +625,6 @@ impl<'de> Deserialize<'de> for ExecutionTerminalCause {
                 }
                 StrictExecutionTerminalCause::TaskFailure { class } => Self::TaskFailure { class },
                 StrictExecutionTerminalCause::LimitStop { reason } => Self::LimitStop { reason },
-                StrictExecutionTerminalCause::SchedulerNoProgress {} => Self::SchedulerNoProgress,
                 StrictExecutionTerminalCause::ReplanStop { reason } => Self::ReplanStop { reason },
                 StrictExecutionTerminalCause::Cancellation {} => Self::Cancellation,
                 StrictExecutionTerminalCause::InternalFailure {} => Self::InternalFailure,
@@ -649,12 +674,24 @@ pub struct ExecutionTerminalEvidence {
 pub enum ExecutionTaskStatus {
     /// Task is materialized and ready for reservation.
     Pending,
+    /// Task is admitted to the bounded durable ready queue.
+    Ready,
     /// Worst-case budget is reserved.
     Reserved,
+    /// One generation-fenced attempt is awaiting durable delivery.
+    Dispatching,
     /// Current generation is executing or has a retry scheduled.
     Running,
     /// Task is waiting for audience input.
     WaitingInput,
+    /// Task is waiting for a tenant review decision.
+    WaitingReview,
+    /// Task is waiting for a named external signal.
+    WaitingSignal,
+    /// Task is waiting for an exact durable timer.
+    WaitingTimer,
+    /// Task is waiting for an asynchronous external job.
+    WaitingExternal,
     /// Task is waiting for a compiler-validated amendment.
     WaitingReplan,
     /// Task completed successfully.
@@ -663,6 +700,8 @@ pub enum ExecutionTaskStatus {
     Skipped,
     /// Task ended in terminal failure.
     Failed,
+    /// A non-idempotent attempt may have committed and requires reconciliation.
+    UnknownOutcome,
     /// Task was cancelled.
     Cancelled,
 }
@@ -673,13 +712,20 @@ impl ExecutionTaskStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::Ready => "ready",
             Self::Reserved => "reserved",
+            Self::Dispatching => "dispatching",
             Self::Running => "running",
             Self::WaitingInput => "waiting_input",
+            Self::WaitingReview => "waiting_review",
+            Self::WaitingSignal => "waiting_signal",
+            Self::WaitingTimer => "waiting_timer",
+            Self::WaitingExternal => "waiting_external",
             Self::WaitingReplan => "waiting_replan",
             Self::Completed => "completed",
             Self::Skipped => "skipped",
             Self::Failed => "failed",
+            Self::UnknownOutcome => "unknown_outcome",
             Self::Cancelled => "cancelled",
         }
     }
@@ -689,7 +735,7 @@ impl ExecutionTaskStatus {
     pub const fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Completed | Self::Skipped | Self::Failed | Self::Cancelled
+            Self::Completed | Self::Skipped | Self::Failed | Self::UnknownOutcome | Self::Cancelled
         )
     }
 }
@@ -700,13 +746,20 @@ impl FromStr for ExecutionTaskStatus {
     fn from_str(value: &str) -> Result<Self> {
         match value {
             "pending" => Ok(Self::Pending),
+            "ready" => Ok(Self::Ready),
             "reserved" => Ok(Self::Reserved),
+            "dispatching" => Ok(Self::Dispatching),
             "running" => Ok(Self::Running),
             "waiting_input" => Ok(Self::WaitingInput),
+            "waiting_review" => Ok(Self::WaitingReview),
+            "waiting_signal" => Ok(Self::WaitingSignal),
+            "waiting_timer" => Ok(Self::WaitingTimer),
+            "waiting_external" => Ok(Self::WaitingExternal),
             "waiting_replan" => Ok(Self::WaitingReplan),
             "completed" => Ok(Self::Completed),
             "skipped" => Ok(Self::Skipped),
             "failed" => Ok(Self::Failed),
+            "unknown_outcome" => Ok(Self::UnknownOutcome),
             "cancelled" => Ok(Self::Cancelled),
             _ => Err(Error::InvalidRepositoryData {
                 message: format!("unknown execution task status `{value}`"),
@@ -747,6 +800,20 @@ pub struct ExecutionProjection {
     pub node_statuses: BTreeMap<String, ExecutionNodeStatus>,
     /// Logical task projections.
     pub tasks: Vec<ExecutionTaskProjection>,
+}
+
+/// Compact bounded node/task evidence accepted by restricted plan amendments.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionAmendmentProjection {
+    /// Active immutable plan revision.
+    pub plan_revision: u64,
+    /// Exact aggregate status for every compiler-bounded plan node.
+    pub node_statuses: BTreeMap<String, ExecutionNodeStatus>,
+    /// Nodes with any persisted task materialization or non-pending aggregate state.
+    pub started_node_ids: BTreeSet<String>,
+    /// Bounded current replan origins; repository correctness requires exactly one.
+    pub replan_tasks: Vec<ExecutionTaskProjection>,
 }
 
 /// Pure description of one logical task ready for durable materialization or dispatch.
@@ -801,11 +868,22 @@ pub enum LogicalTaskKind {
     Review {
         /// Review prompt.
         prompt: String,
+        /// Absolute expiry and deterministic expiry action.
+        wait_policy: ExecutionWaitPolicy,
     },
     /// Pause for one named signal.
     WaitSignal {
         /// Stable signal name.
         signal_name: String,
+        /// Absolute expiry and deterministic expiry action.
+        wait_policy: ExecutionWaitPolicy,
+    },
+    /// Park until an exact or wait-entry-relative timestamp.
+    WaitUntil {
+        /// Exact or wait-entry-relative wake target.
+        wake: ExecutionTemporalTarget,
+        /// Structured output installed when the timer fires.
+        result: Value,
     },
     /// Validate and persist terminal output.
     Output {
@@ -832,26 +910,30 @@ impl LogicalTaskKind {
             Self::Agent { .. } => "agent",
             Self::Review { .. } => "review",
             Self::WaitSignal { .. } => "wait_signal",
+            Self::WaitUntil { .. } => "wait_until",
             Self::Output { .. } => "output",
             Self::CompletionVerifier { .. } => "completion_verifier",
         }
     }
 }
 
-/// Pure scheduler decision.
+/// One deterministic storage-only wait transition applied by the repository.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ScheduleDecision {
-    /// Newly ready logical tasks.
-    Ready(Vec<LogicalTask>),
-    /// Durable work is waiting on execution or an external condition.
-    Waiting(Vec<WaitingReason>),
-    /// The run has a terminal projection.
-    Terminal(TerminalProjection),
-    /// Unfinished nodes exist but no work or wait can advance them.
-    NoProgress {
-        /// Stable pending node IDs, sorted and duplicate-free.
-        pending_node_ids: Vec<String>,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WaitSettlement {
+    /// A `WaitUntil` node reached its resolved wake time.
+    TimerElapsed {
+        /// Stable waiting task ID.
+        task_id: ExecutionTaskId,
+        /// Structured node output declared by the immutable plan.
+        output: Value,
+    },
+    /// An input, review, or signal wait reached its resolved expiry time.
+    WaitExpired {
+        /// Stable waiting task ID.
+        task_id: ExecutionTaskId,
+        /// Deterministic expiry action declared by the immutable plan.
+        action: moa_artifacts::execution_plan::ExecutionWaitExpiryAction,
     },
 }
 
@@ -876,6 +958,8 @@ pub enum WaitingReason {
         task_id: ExecutionTaskId,
         /// Exact review prompt.
         prompt: String,
+        /// Absolute expiry and deterministic expiry action.
+        wait_policy: ExecutionWaitPolicy,
     },
     /// One task awaits a named signal.
     Signal {
@@ -883,6 +967,20 @@ pub enum WaitingReason {
         task_id: ExecutionTaskId,
         /// Stable signal name.
         signal_name: String,
+        /// Absolute expiry and deterministic expiry action.
+        wait_policy: ExecutionWaitPolicy,
+    },
+    /// One task is parked until an exact or wait-entry-relative timestamp.
+    Timer {
+        /// Stable waiting task ID.
+        task_id: ExecutionTaskId,
+        /// Exact or wait-entry-relative wake target.
+        wake: ExecutionTemporalTarget,
+    },
+    /// One task is awaiting completion of an asynchronous external job.
+    External {
+        /// Stable waiting task ID.
+        task_id: ExecutionTaskId,
     },
     /// Pending nodes still depend on unfinished predecessors.
     Dependencies {
@@ -999,26 +1097,6 @@ pub struct FailureFingerprintInput {
     pub message: String,
 }
 
-/// Compact task summary supplied to a completion verifier.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct VerifierTaskSummary {
-    /// Stable task ID.
-    pub task_id: ExecutionTaskId,
-    /// Stable node ID.
-    pub node_id: String,
-    /// Stable task item key.
-    pub item_key: String,
-    /// Current terminal task status.
-    pub status: ExecutionTaskStatus,
-    /// Canonical structured-output hash when output exists.
-    pub output_hash: Option<crate::capability::ExecutionHash>,
-    /// Typed failure when present.
-    pub failure: Option<ExecutionTaskFailure>,
-    /// Sorted unique citation source IDs.
-    pub citation_source_ids: Vec<String>,
-}
-
 /// Derives the durable task status implied by one persisted outcome.
 #[must_use]
 pub fn task_status_from_outcome(
@@ -1030,7 +1108,7 @@ pub fn task_status_from_outcome(
         ExecutionTaskResult::NeedsInput { .. } => ExecutionTaskStatus::WaitingInput,
         ExecutionTaskResult::NeedsReplan { .. } => ExecutionTaskStatus::WaitingReplan,
         ExecutionTaskResult::Cancelled { .. } => ExecutionTaskStatus::Cancelled,
-        ExecutionTaskResult::UnknownOutcome { .. } => ExecutionTaskStatus::Failed,
+        ExecutionTaskResult::UnknownOutcome { .. } => ExecutionTaskStatus::UnknownOutcome,
         ExecutionTaskResult::Failed {
             class: ExecutionFailureClass::Retryable,
             ..
@@ -1059,7 +1137,13 @@ pub fn run_status_after_task_outcome(
     current: ExecutionRunStatus,
     outcome: &ExecutionTaskOutcome,
 ) -> ExecutionRunStatus {
-    if current == ExecutionRunStatus::Compensating {
+    if matches!(
+        current,
+        ExecutionRunStatus::Compensating
+            | ExecutionRunStatus::PauseRequested
+            | ExecutionRunStatus::Pausing
+            | ExecutionRunStatus::Paused
+    ) {
         return current;
     }
     match &outcome.result {
@@ -1069,7 +1153,14 @@ pub fn run_status_after_task_outcome(
         | ExecutionTaskResult::Cancelled { .. }
         | ExecutionTaskResult::UnknownOutcome { .. }
         | ExecutionTaskResult::Failed { .. }
-            if current == ExecutionRunStatus::WaitingReview =>
+            if matches!(
+                current,
+                ExecutionRunStatus::WaitingInput
+                    | ExecutionRunStatus::WaitingReview
+                    | ExecutionRunStatus::WaitingSignal
+                    | ExecutionRunStatus::WaitingTimer
+                    | ExecutionRunStatus::WaitingExternal
+            ) =>
         {
             ExecutionRunStatus::Running
         }
@@ -1275,12 +1366,14 @@ fn append_frame(output: &mut Vec<u8>, value: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use moa_artifacts::execution_plan::{ExecutionFailureClass, ExecutionTaskResult, RetryPolicy};
+    use moa_artifacts::execution_plan::{
+        ExecutionFailureClass, ExecutionTaskResult, ExecutionUsage, RetryPolicy,
+    };
     use serde_json::json;
 
     use super::{
-        CompensationId, CompensationStatus, ExecutionLimitStop, ExecutionRunStatus,
-        ExecutionTaskId, ExecutionTerminalCause, ExecutionTerminalEvidence,
+        CompensationId, CompensationStatus, ExecutionCompensationOutcome, ExecutionLimitStop,
+        ExecutionRunStatus, ExecutionTaskId, ExecutionTerminalCause, ExecutionTerminalEvidence,
         ExecutionTerminalReason, PendingExecutionTerminal, exhaust_retry_outcome,
         failed_task_outcome, retry_delay_ms,
     };
@@ -1312,10 +1405,6 @@ mod tests {
                 json!({"kind":"limit_stop","reason":"budget_exceeded"}),
             ),
             (
-                ExecutionTerminalCause::SchedulerNoProgress,
-                json!({"kind":"scheduler_no_progress"}),
-            ),
-            (
                 ExecutionTerminalCause::ReplanStop {
                     reason: ReplanStopReason::DuplicateAmendment,
                 },
@@ -1328,6 +1417,37 @@ mod tests {
             (
                 ExecutionTerminalCause::InternalFailure,
                 json!({"kind":"internal_failure"}),
+            ),
+            (
+                ExecutionTerminalCause::CompensationFailure {
+                    original_status: ExecutionRunStatus::Cancelled,
+                    original_reason: ExecutionTerminalReason::Cancelled,
+                    original_cause: Box::new(ExecutionTerminalCause::Cancellation),
+                    compensation_id: compensation_id(),
+                    outcome: ExecutionCompensationOutcome::Failed {
+                        message: "undo rejected".to_string(),
+                        retryable: false,
+                        usage: usage(),
+                    },
+                },
+                json!({
+                    "kind":"compensation_failure",
+                    "original_status":"cancelled",
+                    "original_reason":"cancelled",
+                    "original_cause":{"kind":"cancellation"},
+                    "compensation_id": compensation_id().as_uuid(),
+                    "outcome":{
+                        "kind":"failed",
+                        "message":"undo rejected",
+                        "retryable":false,
+                        "usage":{
+                            "cost_microusd":7,
+                            "tokens":11,
+                            "tool_calls":1,
+                            "retrieved_bytes":0,
+                        },
+                    },
+                }),
             ),
         ];
         for (cause, expected) in cases {
@@ -1353,6 +1473,65 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            serde_json::from_value::<ExecutionTerminalCause>(json!({
+                "kind":"compensation_failure",
+                "original_status":"cancelled",
+                "original_reason":"cancelled",
+                "original_cause":{"kind":"cancellation","message":"not schema"},
+                "compensation_id": compensation_id().as_uuid(),
+                "outcome":{
+                    "kind":"failed",
+                    "message":"undo rejected",
+                    "retryable":false,
+                    "usage":{
+                        "cost_microusd":7,
+                        "tokens":11,
+                        "tool_calls":1,
+                        "retrieved_bytes":0,
+                    },
+                },
+            }))
+            .is_err(),
+            "the boxed original cause must stay closed to unknown fields"
+        );
+        assert!(
+            serde_json::from_value::<ExecutionTerminalCause>(json!({
+                "kind":"compensation_failure",
+                "original_status":"cancelled",
+                "original_reason":"cancelled",
+                "compensation_id": compensation_id().as_uuid(),
+                "outcome":{
+                    "kind":"failed",
+                    "message":"undo rejected",
+                    "retryable":false,
+                    "usage":{
+                        "cost_microusd":7,
+                        "tokens":11,
+                        "tool_calls":1,
+                        "retrieved_bytes":0,
+                    },
+                },
+            }))
+            .is_err(),
+            "a compensation failure must never default away the terminal decision it superseded"
+        );
+    }
+
+    fn compensation_id() -> CompensationId {
+        CompensationId::derive(ExecutionTaskId::from_uuid(
+            uuid::Uuid::parse_str("019c2222-3333-7444-8555-666666666666")
+                .expect("valid compensation forward task UUID"),
+        ))
+    }
+
+    fn usage() -> ExecutionUsage {
+        ExecutionUsage {
+            cost_microusd: 7,
+            tokens: 11,
+            tool_calls: 1,
+            retrieved_bytes: 0,
+        }
     }
 
     #[test]

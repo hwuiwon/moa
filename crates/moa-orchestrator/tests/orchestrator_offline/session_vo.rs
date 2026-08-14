@@ -132,11 +132,38 @@ fn active_execution_run(run_uid: Uuid, origin: u64) -> ActiveExecutionRunState {
 }
 
 fn execution_progress(run_uid: Uuid) -> moa_core::events::ExecutionProgress {
+    let now = moa_test_support::fixtures::pg_now();
     moa_core::events::ExecutionProgress {
         run_uid,
         originating_user_sequence_num: 7,
         plan_revision: 1,
         status: "running".to_string(),
+        phase: moa_core::events::ExecutionProgressPhase::Running,
+        waiting_since: None,
+        next_wake_at: None,
+        last_progress_at: now,
+        external_job_uid: None,
+        ready_tasks: 3,
+        active_tasks: 1,
+        parked_tasks: 0,
+        blocker_audience: None,
+        remaining_budget: moa_core::events::ExecutionRemainingBudget {
+            cost_microusd: Some(70),
+            tokens: Some(700),
+            tasks: Some(6),
+            tool_calls: Some(12),
+            retrieved_bytes: Some(7_000),
+            deadline_at: Some(now + chrono::Duration::hours(2)),
+        },
+        economics: Some(moa_core::events::ExecutionProgressEconomics {
+            consumed_cost_microusd: 30,
+            consumed_tokens: 300,
+            consumed_tasks: 3,
+            consumed_tool_calls: 4,
+            consumed_retrieved_bytes: 3_000,
+            requirements_total: 3,
+            requirements_satisfied: None,
+        }),
         total: 8,
         completed: 2,
         failed: 1,
@@ -155,6 +182,32 @@ fn session_progress_projects_exact_persisted_active_execution_values() {
         originating_user_sequence_num: 41,
         plan_revision: 5,
         status: "waiting_input".to_string(),
+        phase: moa_core::events::ExecutionProgressPhase::WaitingInput,
+        waiting_since: Some(chrono::Utc::now()),
+        next_wake_at: None,
+        last_progress_at: chrono::Utc::now(),
+        external_job_uid: None,
+        ready_tasks: 1,
+        active_tasks: 0,
+        parked_tasks: 1,
+        blocker_audience: Some(moa_core::events::ExecutionBlockerAudience::User),
+        remaining_budget: moa_core::events::ExecutionRemainingBudget {
+            cost_microusd: Some(40),
+            tokens: Some(400),
+            tasks: Some(5),
+            tool_calls: Some(10),
+            retrieved_bytes: Some(4_000),
+            deadline_at: None,
+        },
+        economics: Some(moa_core::events::ExecutionProgressEconomics {
+            consumed_cost_microusd: 60,
+            consumed_tokens: 600,
+            consumed_tasks: 12,
+            consumed_tool_calls: 8,
+            consumed_retrieved_bytes: 6_000,
+            requirements_total: 3,
+            requirements_satisfied: None,
+        }),
         total: 13,
         completed: 8,
         failed: 3,
@@ -174,9 +227,9 @@ fn session_progress_projects_exact_persisted_active_execution_values() {
 }
 
 #[test]
-fn execution_progress_requires_cadence_and_changed_exact_aggregate_tuple() {
-    // Pins: every tuple member participates in delta detection, while an early changed tuple
-    // and a due identical tuple are both suppressed.
+fn execution_progress_requires_cadence_and_changed_exact_public_projection() {
+    // Pins: every public progress member participates in delta detection, while an early changed
+    // projection and a due identical projection are both suppressed.
     let run_uid = Uuid::from_u128(70);
     let start = moa_test_support::fixtures::pg_now();
     let baseline = execution_progress(run_uid);
@@ -215,6 +268,33 @@ fn execution_progress_requires_cadence_and_changed_exact_aggregate_tuple() {
     plan_revision_changed.plan_revision += 1;
     let mut status_changed = baseline.clone();
     status_changed.status = "waiting_input".to_string();
+    let mut phase_changed = baseline.clone();
+    phase_changed.phase = moa_core::events::ExecutionProgressPhase::WaitingInput;
+    let mut waiting_since_changed = baseline.clone();
+    waiting_since_changed.waiting_since = Some(start);
+    let mut next_wake_at_changed = baseline.clone();
+    next_wake_at_changed.next_wake_at = Some(start + chrono::Duration::hours(1));
+    let mut last_progress_at_changed = baseline.clone();
+    last_progress_at_changed.last_progress_at += chrono::Duration::seconds(1);
+    let mut external_job_uid_changed = baseline.clone();
+    external_job_uid_changed.external_job_uid = Some(Uuid::from_u128(701));
+    let mut ready_tasks_changed = baseline.clone();
+    ready_tasks_changed.ready_tasks += 1;
+    let mut active_tasks_changed = baseline.clone();
+    active_tasks_changed.active_tasks += 1;
+    let mut parked_tasks_changed = baseline.clone();
+    parked_tasks_changed.parked_tasks += 1;
+    let mut blocker_audience_changed = baseline.clone();
+    blocker_audience_changed.blocker_audience =
+        Some(moa_core::events::ExecutionBlockerAudience::External);
+    let mut remaining_budget_changed = baseline.clone();
+    remaining_budget_changed.remaining_budget.tasks = Some(5);
+    let mut economics_changed = baseline.clone();
+    economics_changed
+        .economics
+        .as_mut()
+        .expect("baseline reports economics")
+        .consumed_cost_microusd += 1;
     let mut total_changed = baseline.clone();
     total_changed.total += 1;
     let mut completed_changed = baseline.clone();
@@ -226,6 +306,17 @@ fn execution_progress_requires_cadence_and_changed_exact_aggregate_tuple() {
     let changed_members = [
         ("plan_revision", plan_revision_changed),
         ("status", status_changed),
+        ("phase", phase_changed),
+        ("waiting_since", waiting_since_changed),
+        ("next_wake_at", next_wake_at_changed),
+        ("last_progress_at", last_progress_at_changed),
+        ("external_job_uid", external_job_uid_changed),
+        ("ready_tasks", ready_tasks_changed),
+        ("active_tasks", active_tasks_changed),
+        ("parked_tasks", parked_tasks_changed),
+        ("blocker_audience", blocker_audience_changed),
+        ("remaining_budget", remaining_budget_changed),
+        ("economics", economics_changed),
         ("total", total_changed),
         ("completed", completed_changed),
         ("failed", failed_changed),
@@ -252,6 +343,113 @@ fn execution_progress_requires_cadence_and_changed_exact_aggregate_tuple() {
             "tuple member {member} must participate in delta detection"
         );
     }
+}
+
+#[test]
+fn execution_progress_emits_parked_transitions_inside_cadence_and_throttles_counters() {
+    // Pins: counter-only churn updates the hot projection without emitting inside cadence, while
+    // Pausing->Paused and WaitingExternal transitions publish immediately with exact wait data.
+    let run_uid = Uuid::from_u128(702);
+    let start = moa_test_support::fixtures::pg_now();
+    let mut state = SessionVoState::default();
+    state
+        .active_execution_runs
+        .push(active_execution_run(run_uid, 7));
+
+    let mut pausing = execution_progress(run_uid);
+    pausing.status = "pausing".to_string();
+    pausing.phase = moa_core::events::ExecutionProgressPhase::Pausing;
+    assert!(
+        state
+            .apply_execution_progress(pausing.clone(), start, 1_000)
+            .expect("initial pausing projection emits")
+    );
+
+    let mut counter_only = pausing.clone();
+    counter_only.completed += 1;
+    counter_only.ready_tasks += 1;
+    assert!(
+        !state
+            .apply_execution_progress(
+                counter_only.clone(),
+                start + chrono::Duration::milliseconds(1),
+                1_000,
+            )
+            .expect("counter-only projection is cadence-throttled")
+    );
+    assert_eq!(
+        state.active_execution_runs[0].progress.as_ref(),
+        Some(&counter_only),
+        "throttling the event must not leave Session/progress stale"
+    );
+
+    let mut parked_changed = counter_only.clone();
+    parked_changed.parked_tasks += 1;
+    assert!(
+        state
+            .apply_execution_progress(
+                parked_changed.clone(),
+                start + chrono::Duration::milliseconds(2),
+                1_000,
+            )
+            .expect("parked-count changes are immediate wait semantics")
+    );
+
+    let mut blocker_changed = parked_changed;
+    blocker_changed.blocker_audience =
+        Some(moa_core::events::ExecutionBlockerAudience::TenantReviewer);
+    assert!(
+        state
+            .apply_execution_progress(
+                blocker_changed.clone(),
+                start + chrono::Duration::milliseconds(3),
+                1_000,
+            )
+            .expect("blocker audience is immediate wait semantics")
+    );
+
+    let mut paused = blocker_changed;
+    paused.status = "paused".to_string();
+    paused.phase = moa_core::events::ExecutionProgressPhase::Paused;
+    paused.waiting_since = Some(start + chrono::Duration::milliseconds(4));
+    assert!(
+        state
+            .apply_execution_progress(
+                paused.clone(),
+                start + chrono::Duration::milliseconds(4),
+                1_000,
+            )
+            .expect("paused transition emits inside cadence")
+    );
+
+    let mut waiting_external = paused;
+    waiting_external.status = "waiting_external".to_string();
+    waiting_external.phase = moa_core::events::ExecutionProgressPhase::WaitingExternal;
+    waiting_external.waiting_since = Some(start + chrono::Duration::milliseconds(5));
+    waiting_external.next_wake_at = Some(start + chrono::Duration::hours(1));
+    waiting_external.external_job_uid = Some(Uuid::from_u128(703));
+    assert!(
+        state
+            .apply_execution_progress(
+                waiting_external.clone(),
+                start + chrono::Duration::milliseconds(5),
+                1_000,
+            )
+            .expect("external wait transition emits inside cadence")
+    );
+    assert_eq!(
+        state.active_execution_runs[0].progress,
+        Some(waiting_external.clone())
+    );
+    assert!(
+        !state
+            .apply_execution_progress(
+                waiting_external,
+                start + chrono::Duration::milliseconds(6),
+                1_000,
+            )
+            .expect("identical external wait is delta-suppressed")
+    );
 }
 
 #[test]

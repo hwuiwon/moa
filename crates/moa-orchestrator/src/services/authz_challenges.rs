@@ -11,6 +11,8 @@ use uuid::Uuid;
 use crate::authz_challenges::app as authz_challenge_app;
 use crate::authz_challenges::store as authz_challenge_store;
 use crate::handlers::authz_shim::require_identity;
+use crate::services::durable_timeout::{DurableTimeoutRequest, schedule_durable_timeout};
+use crate::workflows::errors::sqlx_error_to_handler_error;
 
 /// Async authorization challenge summary returned to users.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +42,16 @@ pub struct AuthzChallengeDecisionRequest {
     pub reason: Option<String>,
 }
 
+/// Internal request to schedule one builtin challenge's durable timeout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleAuthzChallengeTimeoutRequest {
+    /// Stable challenge row identifier returned by the builtin provider.
+    pub challenge_id: Uuid,
+    /// Exact awakeable returned for this challenge incarnation.
+    pub awakeable_id: String,
+}
+
 /// Restate service surface for builtin async authorization challenges.
 #[restate_sdk::service]
 #[name = "AuthzChallenges"]
@@ -49,6 +61,11 @@ pub trait AuthzChallenges {
 
     /// Resolve one async authorization challenge with an approve or deny decision.
     async fn decide(request: Json<AuthzChallengeDecisionRequest>) -> Result<(), HandlerError>;
+
+    /// Schedule fail-closed expiry for one newly persisted builtin challenge.
+    async fn schedule_timeout(
+        request: Json<ScheduleAuthzChallengeTimeoutRequest>,
+    ) -> Result<(), HandlerError>;
 }
 
 /// Concrete async authorization challenge service implementation.
@@ -137,6 +154,43 @@ impl AuthzChallenges for AuthzChallengesImpl {
         })
         .name("authz_challenges_mark_resolved")
         .await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: ingress-private creation hook only schedules fail-closed delivery for an exact persisted id/awakeable pair; it cannot approve a challenge.
+    async fn schedule_timeout(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ScheduleAuthzChallengeTimeoutRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("AuthzChallenges", "schedule_timeout");
+        let request = request.into_inner();
+        let challenge_id = request.challenge_id;
+        let awakeable_id = request.awakeable_id;
+        let lookup = authz_challenge_store::BuiltinChallengeTimeoutLookup {
+            challenge_id,
+            awakeable_id: awakeable_id.clone(),
+        };
+        let pool = self.pool.clone();
+        let delay = ctx
+            .run(|| async move {
+                authz_challenge_store::load_builtin_challenge_timeout_delay(&pool, &lookup)
+                    .await
+                    .map(Json::from)
+                    .map_err(sqlx_error_to_handler_error)
+            })
+            .name("authz_challenges_timeout_delay")
+            .await?
+            .into_inner();
+        let Some(delay) = delay else {
+            return Ok(());
+        };
+        schedule_durable_timeout(
+            &ctx,
+            DurableTimeoutRequest::authz_challenge(challenge_id, awakeable_id),
+            std::time::Duration::from_millis(delay.delay_millis),
+        );
         Ok(())
     }
 }

@@ -12,6 +12,7 @@ use clap::Parser;
 use moa_authz::{FgaClient, FgaConfig};
 use moa_config::{AuthzEngine, optional_config_secret};
 use moa_edge::connector_credential_proxy::ConnectorCredentialProxy;
+use moa_edge::external_job_callback_proxy::ExternalJobCallbackProxy;
 use moa_edge::mcp::{self, McpHttpConfig};
 use moa_edge::proxy::OrchestratorProxy;
 use moa_edge::routes::{AppState, KnowledgeWebhookEdgeConfig};
@@ -27,9 +28,9 @@ struct Args {
     /// Internal Restate ingress base URL.
     #[arg(long, env = "MOA_EDGE_UPSTREAM")]
     upstream: Option<String>,
-    /// Private orchestrator origin for connector credential ingress.
-    #[arg(long, env = "MOA_EDGE_CONNECTOR_CREDENTIAL_UPSTREAM")]
-    connector_credential_upstream: String,
+    /// Private orchestrator origin for credential and provider-callback ingresses.
+    #[arg(long, env = "MOA_EDGE_INTERNAL_INGRESS_UPSTREAM")]
+    internal_ingress_upstream: String,
     /// Exposes connector management and credential routes during staged rollout.
     #[arg(
         long,
@@ -148,8 +149,12 @@ async fn main() -> anyhow::Result<()> {
         delivery,
         proxy: Arc::new(OrchestratorProxy::new(&upstream).context("build orchestrator proxy")?),
         connector_credentials: Arc::new(
-            ConnectorCredentialProxy::new(&args.connector_credential_upstream)
+            ConnectorCredentialProxy::new(&args.internal_ingress_upstream)
                 .context("build private connector credential proxy")?,
+        ),
+        external_job_callbacks: Arc::new(
+            ExternalJobCallbackProxy::new(&args.internal_ingress_upstream)
+                .context("build private external-job callback proxy")?,
         ),
         clickhouse_lineage: moa_config
             .clickhouse

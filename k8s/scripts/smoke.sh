@@ -46,6 +46,64 @@ assert_occurrences() {
     || die "${description}: expected ${expected}, found ${observed}"
 }
 
+container_image_pairs() {
+  awk '
+    function indentation(line, copy) {
+      copy = line
+      sub(/[^ ].*$/, "", copy)
+      return length(copy)
+    }
+    function emit_item() {
+      if (item_name != "" && item_image != "") {
+        print item_name "=" item_image
+      }
+      item_name = ""
+      item_image = ""
+    }
+    {
+      indent = indentation($0)
+      if ($0 ~ /^[[:space:]]*containers:$/ || $0 ~ /^[[:space:]]*initContainers:$/) {
+        emit_item()
+        in_section = 1
+        section_indent = indent
+        next
+      }
+      if (in_section && indent <= section_indent && $0 !~ /^[[:space:]]*-/) {
+        emit_item()
+        in_section = 0
+      }
+      if (!in_section) {
+        next
+      }
+      if (indent == section_indent && $0 ~ /^[[:space:]]*-[[:space:]]/) {
+        emit_item()
+      }
+      if (indent == section_indent + 2 && $1 == "image:") {
+        item_image = $2
+      }
+      if (indent == section_indent + 2 && $1 == "name:") {
+        item_name = $2
+      }
+    }
+    END { emit_item() }
+  ' <<<"$1"
+}
+
+assert_workload_image_contract() {
+  local content="$1"
+  local expected_image="$2"
+  local description="$3"
+  local pairs expected_name
+  shift 3
+  pairs="$(container_image_pairs "${content}")"
+  assert_occurrences "${pairs}" "$#" "=${expected_image}" \
+    "${description} has an unexpected number of containers using ${expected_image}"
+  for expected_name in "$@"; do
+    assert_contains "${pairs}" "${expected_name}=${expected_image}" \
+      "${description} container ${expected_name} does not use ${expected_image}"
+  done
+}
+
 manifest_document() {
   local manifest="$1"
   local target_kind="$2"
@@ -134,7 +192,7 @@ validate_manifests() {
   local work_dir local_manifest production_manifest jobs_manifest rendered_dir
   local local_orchestrator production_orchestrator local_edge production_edge
   local local_bootstrap production_bootstrap local_bootstrap_sa production_bootstrap_sa
-  local local_status_migrator production_status_migrator
+  local local_status_migrator production_status_migrator local_maintenance production_maintenance
   local local_orchestrator_service production_orchestrator_service
   local local_orchestrator_policy production_orchestrator_policy
   local local_edge_service production_edge_service
@@ -143,7 +201,7 @@ validate_manifests() {
   local local_rustfs_pvc local_postgres_pvc
   local local_restate production_restate
   local local_orchestrator_readiness production_orchestrator_readiness
-  local rewrap_job application_content
+  local rewrap_job application_content local_orchestrator_image production_orchestrator_image
   work_dir="$(mktemp -d)"
   trap 'rm -rf -- "${work_dir}"' RETURN
   local_manifest="${work_dir}/local.yaml"
@@ -184,6 +242,8 @@ validate_manifests() {
   production_bootstrap="$(manifest_document "${production_manifest}" Job moa-restate-bootstrap-image-revision)"
   local_status_migrator="$(manifest_document "${local_manifest}" Job moa-session-status-migrator-image-revision)"
   production_status_migrator="$(manifest_document "${production_manifest}" Job moa-session-status-migrator-image-revision)"
+  local_maintenance="$(manifest_document "${local_manifest}" Deployment moa-maintenance)"
+  production_maintenance="$(manifest_document "${production_manifest}" Deployment moa-maintenance)"
   local_bootstrap_sa="$(manifest_document "${local_manifest}" ServiceAccount moa-restate-bootstrap)"
   production_bootstrap_sa="$(manifest_document "${production_manifest}" ServiceAccount moa-restate-bootstrap)"
   local_orchestrator_readiness="$(readiness_probe_path "${local_orchestrator}")"
@@ -229,11 +289,24 @@ validate_manifests() {
     assert_excludes "${orchestrator}" "MOA_DEREGISTER_""ON_SHUTDOWN" \
       "normal orchestrator still owns shutdown deregistration"
   done
-  assert_occurrences "$(<"${local_manifest}")" 5 "image: moa/orchestrator:kind" \
-    "local runtime, migration-only stage, and bootstrap must use the same orchestrator image"
-  assert_occurrences "$(<"${production_manifest}")" 6 \
-    "image: moa/orchestrator@sha256:0000000000000000000000000000000000000000000000000000000000000000" \
-    "unrendered production runtime, migration-only stage, and bootstrap must use the same immutable sentinel"
+  local_orchestrator_image="moa/orchestrator:kind"
+  production_orchestrator_image="moa/orchestrator@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  assert_workload_image_contract "${local_orchestrator}" "${local_orchestrator_image}" \
+    "local orchestrator" orchestrator wait-status-cutover
+  assert_workload_image_contract "${local_maintenance}" "${local_orchestrator_image}" \
+    "local maintenance runtime" maintenance wait-status-cutover
+  assert_workload_image_contract "${local_status_migrator}" "${local_orchestrator_image}" \
+    "local status migrator" status-migrator database-migrations
+  assert_workload_image_contract "${local_bootstrap}" "${local_orchestrator_image}" \
+    "local Restate bootstrap" bootstrap
+  assert_workload_image_contract "${production_orchestrator}" "${production_orchestrator_image}" \
+    "production orchestrator" orchestrator wait-status-cutover prepare-hand-provider-credentials
+  assert_workload_image_contract "${production_maintenance}" "${production_orchestrator_image}" \
+    "production maintenance runtime" maintenance wait-status-cutover prepare-hand-provider-credentials
+  assert_workload_image_contract "${production_status_migrator}" "${production_orchestrator_image}" \
+    "production status migrator" status-migrator database-migrations
+  assert_workload_image_contract "${production_bootstrap}" "${production_orchestrator_image}" \
+    "production Restate bootstrap" bootstrap
   assert_occurrences "${production_edge}" 1 \
     "image: moa/edge@sha256:0000000000000000000000000000000000000000000000000000000000000000" \
     "unrendered production edge must use the immutable sentinel"
@@ -385,15 +458,15 @@ validate_manifests() {
     assert_excludes "${edge}" "MOA_KMS_" "edge unexpectedly receives KMS configuration"
     assert_excludes "${edge}" "moa-kms-root-keys" "edge unexpectedly mounts the KMS Secret"
     assert_excludes "${edge}" "/var/run/secrets/moa-kms" "edge unexpectedly exposes the KMS keyring"
-    assert_contains "${edge}" "name: MOA_EDGE_CONNECTOR_CREDENTIAL_UPSTREAM" \
-      "edge is missing the private connector credential upstream"
+    assert_contains "${edge}" "name: MOA_EDGE_INTERNAL_INGRESS_UPSTREAM" \
+      "edge is missing the private orchestrator ingress upstream"
     assert_contains "${edge}" "http://moa-orchestrator.moa-system.svc.cluster.local:10023" \
-      "edge connector credential upstream does not target the private orchestrator listener"
+      "edge internal ingress upstream does not target the private orchestrator listener"
   done
   for orchestrator in "${local_orchestrator}" "${production_orchestrator}"; do
     assert_contains "${orchestrator}" "- --credential-port" \
-      "orchestrator does not configure the private credential listener"
-    assert_contains "${orchestrator}" "name: credentials" \
+      "orchestrator does not configure the private internal ingress listener"
+    assert_contains "${orchestrator}" "name: internal" \
       "orchestrator pod does not declare its private credential port"
     assert_contains "${orchestrator}" "containerPort: 10023" \
       "orchestrator private credential listener is not on the expected port"
@@ -401,11 +474,11 @@ validate_manifests() {
   for service in "${local_orchestrator_service}" "${production_orchestrator_service}"; do
     assert_contains "${service}" "type: ClusterIP" \
       "orchestrator Service is not explicitly internal-only"
-    assert_contains "${service}" "name: credentials" \
+    assert_contains "${service}" "name: internal" \
       "orchestrator Service does not route the private credential listener"
     assert_contains "${service}" "port: 10023" \
       "orchestrator Service has the wrong credential port"
-    assert_contains "${service}" "targetPort: credentials" \
+    assert_contains "${service}" "targetPort: internal" \
       "orchestrator Service does not target the named credential port"
   done
   for service in "${local_edge_service}" "${production_edge_service}"; do

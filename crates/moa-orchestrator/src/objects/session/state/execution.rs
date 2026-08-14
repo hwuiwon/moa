@@ -49,15 +49,17 @@ impl SessionVoState {
 
         let signature = ExecutionProgressSignature::from(&progress);
         let changed = run.last_progress_signature.as_ref() != Some(&signature);
+        let immediate_transition =
+            progress_transition_requires_immediate_publication(run.progress.as_ref(), &progress);
         let cadence_due = run.last_progress_at.is_none_or(|last| {
             let elapsed_ms = now.signed_duration_since(last).num_milliseconds();
             elapsed_ms >= i64::try_from(progress_interval_ms).unwrap_or(i64::MAX)
         });
-        if !(changed && cadence_due) {
+        run.progress = Some(progress);
+        if !(changed && (immediate_transition || cadence_due)) {
             return Ok(false);
         }
 
-        run.progress = Some(progress);
         run.last_progress_signature = Some(signature);
         run.last_progress_at = Some(now);
         Ok(true)
@@ -115,6 +117,22 @@ impl SessionVoState {
             .retain(|target| !pending_reply_belongs_to_run(target, marker.run_uid));
         Ok(())
     }
+}
+
+fn progress_transition_requires_immediate_publication(
+    previous: Option<&moa_core::events::ExecutionProgress>,
+    next: &moa_core::events::ExecutionProgress,
+) -> bool {
+    previous.is_none_or(|previous| {
+        previous.plan_revision != next.plan_revision
+            || previous.status != next.status
+            || previous.phase != next.phase
+            || previous.waiting_since != next.waiting_since
+            || previous.next_wake_at != next.next_wake_at
+            || previous.external_job_uid != next.external_job_uid
+            || previous.parked_tasks != next.parked_tasks
+            || previous.blocker_audience != next.blocker_audience
+    })
 }
 
 fn pending_reply_belongs_to_run(target: &PendingUserReplyTarget, run_uid: uuid::Uuid) -> bool {

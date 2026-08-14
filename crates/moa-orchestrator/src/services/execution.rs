@@ -7,11 +7,9 @@ use chrono::Utc;
 use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
 use moa_artifacts::execution_plan::{
     CapabilityReference, CompensationInputBinding, CompensationInputMapping,
-    CompensationValueSource, ExecutionBudgetLimit, ExecutionPlanDefinition,
-};
-use moa_artifacts::execution_plan::{
-    ExecutionFailureClass, ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage,
-    PlanAmendment, PlanAmendmentOperation,
+    CompensationValueSource, ExecutionBudgetLimit, ExecutionFailureClass, ExecutionPlanDefinition,
+    ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, PlanAmendment,
+    PlanAmendmentOperation,
 };
 use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::registry::{ArtifactRegistry, StoredArtifactRevision};
@@ -46,27 +44,27 @@ use moa_execution::capability::{
 use moa_execution::{
     budget::{BudgetLedger, estimate_fits_limit},
     compiler::{CompileExecutionRequest, ValidateAmendmentRequest, compile, validate_amendment},
-    completion::{
-        CompletionEvaluationRequest, cancellation_terminal_evidence, evaluate_completion,
-        execution_terminal_reason, terminal_evidence_from_evaluation,
-        terminal_projection_from_evaluation,
-    },
+    completion::cancellation_terminal_evidence_from_completed_nodes,
     replan::{
         ReplanDecision, ReplanEvaluationRequest, ReplanLoopEvaluationRequest,
         evaluate_replan_loop_stop, evaluate_replan_resource_stop, evaluate_replan_stop,
-        failure_fingerprint, replan_stop_gaps, replan_stop_status,
+    },
+    repository::amendment::{
+        AmendmentProjectionOutcome, AmendmentProjectionRequest, ExecutionAmendmentSnapshot,
     },
     repository::{
         AmendmentReplayOutcome, AmendmentWrite, ConfirmationConflict, ConfirmationOutcome,
         ExecutionRepository, ExecutionRunPageRequest, ExecutionRunRecord, ExecutionScope,
-        ExecutionTaskPageRequest, ExecutionTaskRecord, NewExecutionPlanningContext,
-        NewExecutionRun, PlanningContextWriteOutcome, ReplanStopReceipt, TaskOutcomeWrite,
-        TerminalFenceOutcome, TransitionOutcome, TransitionRejection, ValidatedAmendment,
+        ExecutionTaskPageRequest, ExecutionTaskRecord, NewExecutionRun, TaskOutcomeWrite,
+        TransitionOutcome, TransitionRejection, ValidatedAmendment,
+        audit::{NewExecutionPlanningContext, PlanningContextWriteOutcome},
+        replan_stop::{NewExecutionReplanStopIntent, ReplanStopIntentWriteOutcome},
+        terminal::PendingTerminalAdvanceOutcome,
     },
     schema::validate_instance,
     state::{
-        ExecutionRunStatus, ExecutionTaskProjection, ExecutionTaskStatus, ExecutionTerminalCause,
-        ExecutionTerminalReason, FailureFingerprintInput, PendingExecutionTerminal,
+        ExecutionRunStatus, ExecutionTaskProjection, ExecutionTaskStatus, ExecutionTerminalReason,
+        FailureFingerprintInput, PendingExecutionTerminal,
     },
     wire::{
         ExecutionAmendmentRequest, ExecutionCancelRequest, ExecutionConfirmRequest,
@@ -74,8 +72,7 @@ use moa_execution::{
         ExecutionPlanningContextRequest, ExecutionPlanningContextResponse,
         ExecutionPlanningContextSnapshot, ExecutionReviewDecision, ExecutionReviewDecisionRequest,
         ExecutionRunCursor, ExecutionRunListRequest, ExecutionRunListResponse, ExecutionRunRequest,
-        ExecutionRunSummary, ExecutionRunWakeReason, ExecutionRunWakeRequest,
-        ExecutionSignalRequest, ExecutionStartRequest, ExecutionStartResponse,
+        ExecutionRunSummary, ExecutionSignalRequest, ExecutionStartRequest, ExecutionStartResponse,
         ExecutionStatusResponse, ExecutionSynthesisEvidence, ExecutionSynthesisEvidenceRequest,
         ExecutionTaskCursor, ExecutionTaskListRequest, ExecutionTaskListResponse,
         PinnedExecutionTemplate, PinnedInstructionSkill, decode_cursor, encode_cursor,
@@ -98,10 +95,48 @@ use crate::connector_catalog::ScopedConnectorCatalogProvider;
 use crate::handlers::authz_shim::AuthzEnforcer;
 use crate::objects::session::{ExecutionRunStartedDelivery, SessionClient};
 use crate::restate_identity::with_identity_headers;
-use crate::services::llm_gateway::{LLMCompletionOwner, cancel_completion_owner_from_service};
 use crate::workflows::errors::moa_error_to_status_handler_error;
-use crate::workflows::execution_run::ExecutionRunClient;
-use crate::workflows::execution_task::ExecutionTaskClient;
+
+/// Authorized compare-and-set request for pausing or resuming one durable run.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionRunControlRequest {
+    /// Exact caller-owned run scope.
+    pub run: ExecutionRunRequest,
+    /// Current controller generation displayed to the caller.
+    pub expected_controller_generation: u64,
+}
+
+/// Public pause/resume result including the exact durable controller fence.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionRunControlResponse {
+    /// The control mutation changed durable state.
+    Applied {
+        /// Current run projection.
+        run: ExecutionRunSummary,
+        /// Exact current controller generation.
+        controller_generation: u64,
+        /// Exact current wake epoch.
+        wake_epoch: u64,
+    },
+    /// The exact generation-fenced mutation was already committed.
+    Replayed {
+        /// Current run projection.
+        run: ExecutionRunSummary,
+        /// Exact current controller generation.
+        controller_generation: u64,
+        /// Exact current wake epoch.
+        wake_epoch: u64,
+    },
+    /// A stable compare-and-set or lifecycle conflict changed nothing.
+    Conflict {
+        /// Stable conflict reason.
+        reason: ExecutionConflictReason,
+    },
+    /// No scoped run exists.
+    NotFound,
+}
 
 /// Restate service surface for durable execution-run operations.
 #[restate_sdk::service]
@@ -147,6 +182,16 @@ pub trait Execution {
         request: Json<ExecutionCancelRequest>,
     ) -> Result<Json<ExecutionMutationResponse>, HandlerError>;
 
+    /// Fences new reservations and drains active bounded attempts before parking the run.
+    async fn pause(
+        request: Json<ExecutionRunControlRequest>,
+    ) -> Result<Json<ExecutionRunControlResponse>, HandlerError>;
+
+    /// Generation-bumps one fully drained paused run and enqueues exactly one activation.
+    async fn resume(
+        request: Json<ExecutionRunControlRequest>,
+    ) -> Result<Json<ExecutionRunControlResponse>, HandlerError>;
+
     /// Delivers audience-authorized input to one waiting task generation.
     async fn deliver_input(
         request: Json<ExecutionInputRequest>,
@@ -164,11 +209,6 @@ pub trait Execution {
 
     /// Validates and applies an externally supplied amendment.
     async fn apply_amendment(
-        request: Json<ExecutionAmendmentRequest>,
-    ) -> Result<Json<ExecutionMutationResponse>, HandlerError>;
-
-    /// Applies a workflow-generated amendment using only its persisted run scope.
-    async fn apply_planned_amendment(
         request: Json<ExecutionAmendmentRequest>,
     ) -> Result<Json<ExecutionMutationResponse>, HandlerError>;
 

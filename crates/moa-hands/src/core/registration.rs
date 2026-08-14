@@ -413,6 +413,7 @@ impl RegisteredTool {
                 schema,
                 policy,
                 idempotency_class,
+                async_mode: moa_core::types::tools::ToolAsyncMode::SynchronousOnly,
                 rollback: None,
                 max_output_tokens: default_budget_for_tool(name),
             },
@@ -475,6 +476,7 @@ impl RegisteredTool {
                     diff_strategy: ToolDiffStrategy::None,
                 },
                 idempotency_class,
+                async_mode: moa_core::types::tools::ToolAsyncMode::SynchronousOnly,
                 rollback: None,
                 max_output_tokens: 8_000,
             },
@@ -672,6 +674,7 @@ impl ToolRegistry {
                 diff_strategy: ToolDiffStrategy::None,
             },
             idempotency_class: operation_policy.idempotency,
+            async_mode: moa_core::types::tools::ToolAsyncMode::SynchronousOnly,
             rollback: None,
             max_output_tokens: default_budget_for_tool(&name),
         };
@@ -885,6 +888,25 @@ impl ToolRegistry {
 }
 
 impl ToolRouter {
+    /// Adds one deployment-owned built-in before the router is shared.
+    ///
+    /// The returned router publishes the tool through the same immutable catalog
+    /// snapshot used by prompt compilation and effect admission. Duplicate names
+    /// are rejected so an integration cannot silently replace a production tool.
+    pub fn with_additional_builtin(self, tool: Arc<dyn BuiltInTool>) -> Result<Self> {
+        let name = tool.name();
+        let mut registry = (*self.registry()).clone();
+        if registry.tools.contains_key(name) {
+            return Err(MoaError::ValidationError(format!(
+                "additional built-in tool `{name}` is already registered"
+            )));
+        }
+        registry.register_builtin(tool);
+        registry.apply_budgets(self.bindings.tool_budgets());
+        self.publish_registry(registry);
+        Ok(self)
+    }
+
     /// Returns live registered definitions with their executable owners in stable name order.
     pub fn capability_registrations(&self) -> Vec<(ToolDefinition, ToolExecution)> {
         self.registry().capability_registrations()
@@ -903,6 +925,9 @@ fn default_budget_for_tool(tool_name: &str) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use moa_core::types::hands::{BuiltinPolicyRevision, SandboxPolicySnapshot};
     use moa_core::types::sandbox_workspace::WorkspaceEffect;
     use serde_json::json;
 
@@ -911,7 +936,27 @@ mod tests {
         default_sandbox_tool_descriptors, sandbox_tool_descriptors,
     };
 
-    use super::{ToolRegistry, mcp_tool_reference};
+    use super::{ToolRegistry, ToolRouter, mcp_tool_reference};
+
+    #[test]
+    fn additional_builtin_publishes_once_without_replacing_an_owner_offline() {
+        // Pins: integration composition publishes through the immutable router catalog and a
+        // duplicate fixture name cannot silently replace a production executable owner.
+        let router = ToolRouter::new(
+            ToolRegistry::new(),
+            HashMap::new(),
+            SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::RouteUnset),
+        )
+        .with_additional_builtin(Arc::new(crate::tools::memory::MemoryRememberTool))
+        .expect("a unique deployment built-in should publish");
+        assert!(router.tool_definition("memory_remember").is_some());
+
+        let error = router
+            .with_additional_builtin(Arc::new(crate::tools::memory::MemoryRememberTool))
+            .err()
+            .expect("a duplicate built-in must be rejected");
+        assert!(error.to_string().contains("already registered"));
+    }
 
     fn discovered_tool(name: &str, description: &str) -> McpDiscoveredTool {
         McpDiscoveredTool {

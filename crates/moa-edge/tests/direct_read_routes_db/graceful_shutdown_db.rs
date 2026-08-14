@@ -106,10 +106,7 @@ impl SpawnedEdge {
             .env("MOA_DATABASE_URL", database_url)
             .env("MOA_EDGE_BIND", format!("127.0.0.1:{port}"))
             .env("MOA_EDGE_UPSTREAM", "http://127.0.0.1:1")
-            .env(
-                "MOA_EDGE_CONNECTOR_CREDENTIAL_UPSTREAM",
-                "http://127.0.0.1:1",
-            )
+            .env("MOA_EDGE_INTERNAL_INGRESS_UPSTREAM", "http://127.0.0.1:1")
             .env("MOA_METRICS_EXPORTER", "disabled")
             // The shutdown arms log at info; the process default is warn, which
             // would leave the distinguishing line out of stdout entirely.
@@ -121,6 +118,12 @@ impl SpawnedEdge {
             // `prefer-dynamic` test binaries need Cargo's Rust dylib path even
             // though application configuration remains fully sanitized.
             command.env("DYLD_FALLBACK_LIBRARY_PATH", dylib_path);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(dylib_path) = std::env::var_os("LD_LIBRARY_PATH") {
+            // CI also builds with `prefer-dynamic`; clearing Cargo's Rust dylib
+            // path would make the shipped child fail before it installs signals.
+            command.env("LD_LIBRARY_PATH", dylib_path);
         }
         let child = command.spawn().expect("spawn moa-edge binary");
         let mut edge = Self { child, port };

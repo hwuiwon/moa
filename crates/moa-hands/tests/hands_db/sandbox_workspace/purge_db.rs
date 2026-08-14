@@ -67,6 +67,12 @@ async fn tenant_purge_fences_access_before_external_delete_and_requires_exact_ab
         })
         .await
         .expect("persist storage create operation through production repository");
+    assert!(
+        operations
+            .begin_provider_attempt(tenant_id, operation_id)
+            .await
+            .expect("fence the provider create before storage I/O")
+    );
     let storage_resource_id = Uuid::now_v7();
     let provider_reference = format!("purge-volume-{storage_resource_id}");
     let resources = PostgresWorkspaceStorageResourceRepository::new(runtime.clone());
