@@ -59,6 +59,10 @@ impl ExecutionRepository {
             conn.commit().await.map_err(storage_error)?;
             return Ok(PendingTerminalAdvanceOutcome::Conflict);
         }
+        if run.budget_deadline_suspended_at.is_some() {
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(PendingTerminalAdvanceOutcome::Conflict);
+        }
         if expected_wake_epoch <= run.processed_wake_epoch {
             let commit = replayed_pending_terminal_commit(&mut conn, config, run).await?;
             conn.commit().await.map_err(storage_error)?;
@@ -155,6 +159,88 @@ impl ExecutionRepository {
             run,
             controller_generation,
             expected_wake_epoch,
+            Some(pending),
+            now,
+            page_limit,
+        )
+        .await
+    }
+
+    /// Persists one externally requested cancellation and advances its first bounded drain page.
+    ///
+    /// Unlike completion-derived terminalization, a public cancellation may arrive after a
+    /// storage-only run has already acknowledged its current controller wake. In that case this
+    /// transition claims a fresh wake inside the same transaction without dispatching a controller
+    /// activation or moving the parked run into active capacity.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fence_cancellation_terminal_and_enqueue_settlement(
+        &self,
+        config: &ExecutionConfig,
+        scope: ExecutionScope,
+        run_uid: Uuid,
+        controller_generation: u64,
+        expected_wake_epoch: u64,
+        pending: PendingExecutionTerminal,
+        now: DateTime<Utc>,
+        page_limit: u32,
+    ) -> Result<PendingTerminalAdvanceOutcome> {
+        validate_pending_terminal_page_limit(page_limit)?;
+        pending.validate()?;
+        if pending.status != ExecutionRunStatus::Cancelled
+            || pending.reason != ExecutionTerminalReason::Cancelled
+            || pending.terminal_evidence.cause != ExecutionTerminalCause::Cancellation
+        {
+            return Err(Error::InvalidRepositoryInput {
+                message:
+                    "external cancellation fence requires an exact cancellation terminal intent"
+                        .to_string(),
+            });
+        }
+        let mut conn = scope.begin(&self.pool).await?;
+        let Some(mut run) = load_and_lock_pending_terminal_run(&mut conn, config, run_uid).await?
+        else {
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(PendingTerminalAdvanceOutcome::NotFound);
+        };
+        if run.status == ExecutionRunStatus::Cancelled {
+            let commit = replayed_pending_terminal_commit(&mut conn, config, run).await?;
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(PendingTerminalAdvanceOutcome::Replayed(Box::new(commit)));
+        }
+        if run.status.is_terminal() || run.status == ExecutionRunStatus::Compensating {
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(PendingTerminalAdvanceOutcome::Conflict);
+        }
+        if let Some(current) = &run.pending_terminal {
+            if current != &pending {
+                conn.commit().await.map_err(storage_error)?;
+                return Ok(PendingTerminalAdvanceOutcome::Conflict);
+            }
+            let commit = replayed_pending_terminal_commit(&mut conn, config, run).await?;
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(PendingTerminalAdvanceOutcome::Replayed(Box::new(commit)));
+        }
+        if run.controller_generation != controller_generation
+            || run.wake_epoch != expected_wake_epoch
+        {
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(PendingTerminalAdvanceOutcome::Conflict);
+        }
+        let terminal_wake_epoch = if run.processed_wake_epoch == expected_wake_epoch {
+            run = claim_fresh_terminal_mutation_wake_in_conn(&mut conn, &run, now).await?;
+            run.wake_epoch
+        } else if run.processed_wake_epoch < expected_wake_epoch {
+            expected_wake_epoch
+        } else {
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(PendingTerminalAdvanceOutcome::Conflict);
+        };
+        advance_pending_terminal_page_in_conn(
+            conn,
+            config,
+            run,
+            controller_generation,
+            terminal_wake_epoch,
             Some(pending),
             now,
             page_limit,
@@ -705,6 +791,31 @@ async fn load_and_lock_pending_terminal_run(
     Ok(Some(run))
 }
 
+async fn claim_fresh_terminal_mutation_wake_in_conn(
+    conn: &mut ScopedConn<'_>,
+    run: &ExecutionRunRecord,
+    now: DateTime<Utc>,
+) -> Result<ExecutionRunRecord> {
+    let row = sqlx::query(
+        "UPDATE moa.execution_run SET wake_epoch=wake_epoch+1, updated_at=$4 \
+         WHERE run_uid=$1 AND controller_generation=$2 AND wake_epoch=$3 \
+           AND processed_wake_epoch=wake_epoch AND pending_terminal_status IS NULL \
+           AND status NOT IN ('completed','partial','blocked','unsupported','failed','cancelled', \
+                              'compensating') RETURNING *",
+    )
+    .bind(run.run_uid)
+    .bind(to_i64(run.controller_generation, "controller generation")?)
+    .bind(to_i64(run.wake_epoch, "wake epoch")?)
+    .bind(now)
+    .fetch_optional(conn.as_mut())
+    .await
+    .map_err(sqlx_error)?
+    .ok_or_else(|| Error::Storage {
+        message: "external cancellation lost its fresh terminal-wake fence".to_string(),
+    })?;
+    run_from_row(&row)
+}
+
 async fn replayed_pending_terminal_commit(
     conn: &mut ScopedConn<'_>,
     config: &ExecutionConfig,
@@ -748,6 +859,9 @@ async fn replayed_pending_terminal_commit(
     } else {
         None
     };
+    let cancellation_dispatches =
+        load_current_terminal_task_cancellation_dispatches(conn, &run, config.max_in_flight_tasks)
+            .await?;
     let continuation = load_pending_terminal_continuation(conn, &run).await?;
     let stage = if run.status.is_terminal() {
         if run.manual_repair_required {
@@ -767,7 +881,7 @@ async fn replayed_pending_terminal_commit(
         stage,
         settled_task_count: 0,
         drained_trigger_count: 0,
-        cancellation_dispatches: Vec::new(),
+        cancellation_dispatches,
         compensation_admission,
         continuation: continuation.map(Box::new),
         work_remaining,
@@ -881,8 +995,14 @@ async fn advance_pending_terminal_page_in_conn(
     let task_rows = sqlx::query(
         "SELECT task.* FROM moa.execution_task AS task WHERE task.run_uid=$1 \
            AND task.status NOT IN ('completed','skipped','failed','cancelled','unknown_outcome') \
-           AND task.attempt_state <> 'cancelling' \
-         ORDER BY CASE WHEN task.attempt_state IN ('dispatching','running') THEN 0 ELSE 1 END, \
+           AND (task.attempt_state <> 'cancelling' OR (task.external_job_uid IS NULL AND EXISTS ( \
+               SELECT 1 FROM moa.execution_capacity_reservation AS active \
+               WHERE active.run_uid=task.run_uid AND active.task_id=task.task_id \
+                 AND active.attempt_generation=task.attempt_generation \
+                 AND active.resource_dimension='active_tasks' \
+                 AND active.state IN ('reserved','reconciling')))) \
+         ORDER BY CASE WHEN task.attempt_state IN ('dispatching','running','cancelling') \
+                       THEN 0 ELSE 1 END, \
                   task.task_id LIMIT $2 FOR UPDATE",
     )
     .bind(run.run_uid)
@@ -959,7 +1079,9 @@ async fn advance_pending_terminal_page_in_conn(
         }
         if matches!(
             task.attempt_state,
-            ExecutionAttemptState::Dispatching | ExecutionAttemptState::Running
+            ExecutionAttemptState::Dispatching
+                | ExecutionAttemptState::Running
+                | ExecutionAttemptState::Cancelling
         ) {
             cancellation_dispatches.push(
                 enqueue_pending_terminal_task_cancellation(
@@ -975,6 +1097,21 @@ async fn advance_pending_terminal_page_in_conn(
             continue;
         }
         let original_status = task.status;
+        let input_audience = if original_status == ExecutionTaskStatus::WaitingInput {
+            Some(
+                task.current_outcome
+                    .as_ref()
+                    .and_then(|outcome| match &outcome.result {
+                        ExecutionTaskResult::NeedsInput { audience, .. } => Some(audience.clone()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| Error::InvalidRepositoryData {
+                        message: "terminal drain lost the waiting-input audience".to_string(),
+                    })?,
+            )
+        } else {
+            None
+        };
         match record_task_outcome_in_conn(
             &mut conn,
             run.run_uid,
@@ -988,15 +1125,35 @@ async fn advance_pending_terminal_page_in_conn(
         .await?
         {
             TaskOutcomeWrite::Applied { task, .. } | TaskOutcomeWrite::Replayed { task, .. } => {
-                transition_node_counters_in_tx(
-                    &mut conn,
-                    run.run_uid,
-                    &task.node_id,
-                    &task.item_key,
-                    original_status,
-                    ExecutionTaskStatus::Cancelled,
-                )
-                .await?;
+                if let Some(audience) = input_audience.as_ref() {
+                    transition_node_counters_with_input_audience_in_tx(
+                        &mut conn,
+                        run.run_uid,
+                        &task.node_id,
+                        &task.item_key,
+                        original_status,
+                        ExecutionTaskStatus::Cancelled,
+                        audience,
+                    )
+                    .await?;
+                    refresh_run_after_wait_settlement_in_conn(
+                        &mut conn,
+                        run.run_uid,
+                        task.task_id,
+                        now,
+                    )
+                    .await?;
+                } else {
+                    transition_node_counters_in_tx(
+                        &mut conn,
+                        run.run_uid,
+                        &task.node_id,
+                        &task.item_key,
+                        original_status,
+                        ExecutionTaskStatus::Cancelled,
+                    )
+                    .await?;
+                }
             }
             TaskOutcomeWrite::Rejected { reason, .. } => {
                 return Err(Error::InvalidRepositoryData {
@@ -1393,7 +1550,8 @@ async fn enqueue_pending_terminal_task_cancellation(
     now: DateTime<Utc>,
 ) -> Result<ExecutionDispatchRecord> {
     let row = sqlx::query(
-        "SELECT reservation.reservation_uid, trigger.trigger_uid \
+        "SELECT reservation.reservation_uid, reservation.controller_generation, \
+                trigger.trigger_uid \
          FROM moa.execution_capacity_reservation AS reservation \
          JOIN moa.execution_trigger AS trigger ON trigger.run_uid=reservation.run_uid \
           AND trigger.task_id=reservation.task_id \
@@ -1402,13 +1560,12 @@ async fn enqueue_pending_terminal_task_cancellation(
           AND trigger.trigger_kind='task_watchdog' \
           AND trigger.state = 'pending' \
          WHERE reservation.run_uid=$1 AND reservation.task_id=$2 \
-          AND reservation.controller_generation=$3 AND reservation.attempt_generation=$4 \
+          AND reservation.attempt_generation=$3 \
           AND reservation.resource_dimension='active_tasks' \
           AND reservation.state IN ('reserved','reconciling') FOR UPDATE OF reservation, trigger",
     )
     .bind(run.run_uid)
     .bind(task.task_id.as_uuid())
-    .bind(to_i64(run.controller_generation, "controller generation")?)
     .bind(to_i64(task.attempt_generation, "task attempt generation")?)
     .fetch_optional(conn.as_mut())
     .await
@@ -1428,6 +1585,7 @@ async fn enqueue_pending_terminal_task_cancellation(
                 ),
             })?;
     let capacity_reservation_uid: Uuid = row.try_get("reservation_uid").map_err(row_error)?;
+    let attempt_controller_generation = required_u64(&row, "controller_generation")?;
     let watchdog_trigger_uid: Uuid = row.try_get("trigger_uid").map_err(row_error)?;
     let cancellation_dispatch_uid = pending_terminal_cancel_dispatch_uid(
         active_dispatch_uid,
@@ -1439,7 +1597,7 @@ async fn enqueue_pending_terminal_task_cancellation(
              last_progress_at=GREATEST(last_progress_at,$6), updated_at=NOW() \
              WHERE run_uid=$1 AND task_id=$2 \
              AND generation=$3 AND attempt_generation=$4 AND active_dispatch_uid=$5 \
-             AND attempt_state IN ('dispatching','running')",
+             AND attempt_state IN ('dispatching','running','cancelling')",
     )
     .bind(run.run_uid)
     .bind(task.task_id.as_uuid())
@@ -1475,7 +1633,7 @@ async fn enqueue_pending_terminal_task_cancellation(
         run_uid: run.run_uid,
         task_id: task.task_id,
         controller_generation: run.controller_generation,
-        attempt_controller_generation: run.controller_generation,
+        attempt_controller_generation,
         task_generation: task.generation,
         attempt_generation: task.attempt_generation,
         active_dispatch_uid,
@@ -1791,7 +1949,7 @@ async fn checkpoint_pending_terminal_wake(
              last_progress_at=GREATEST(last_progress_at,$7), updated_at=NOW() \
          WHERE run_uid=$1 AND controller_generation=$2 AND wake_epoch >= $3 \
            AND processed_wake_epoch < $3 \
-           AND activation_state IN ('queued','advancing','paused') RETURNING *",
+           AND activation_state IN ('idle','queued','advancing','paused') RETURNING *",
     )
     .bind(run_uid)
     .bind(to_i64(controller_generation, "controller generation")?)
@@ -1918,6 +2076,7 @@ async fn finalize_pending_terminal_exact(
              reserved_cost_microusd=0, reserved_tokens=0, reserved_tasks=0, \
              reserved_tool_calls=0, reserved_retrieved_bytes=0, \
              activation_state='terminal', waiting_reasons='[]'::JSONB, next_wake_at=NULL, \
+             budget_deadline_suspended_at=NULL, \
              waiting_task_count=0, waiting_input_task_count=0, waiting_review_task_count=0, \
              waiting_signal_task_count=0, waiting_timer_task_count=0, \
              waiting_external_task_count=0, waiting_replan_task_count=0, \

@@ -5,6 +5,7 @@ use super::planning_context::{PlanningContextInput, planning_context_inner};
 use super::start::start_inner;
 use super::support::*;
 use super::*;
+use crate::services::llm_gateway::{LLMCompletionOwner, LLMGatewayClient};
 
 impl Execution for ExecutionImpl {
     #[tracing::instrument(skip(self, ctx, request))]
@@ -313,10 +314,24 @@ impl Execution for ExecutionImpl {
         let pool = self.pool.clone();
         let config = self.config.clone();
         let accepted = ctx
-            .run(|| async move { cancel_inner(pool, config, request).await.map(Json::from) })
+            .run(|| async move {
+                let accepted = cancel_inner(pool, config, request).await?;
+                pause_execution_cancel_db_handoff_for_test().await;
+                Ok::<_, HandlerError>(Json::from(accepted))
+            })
             .name("execution_cancel")
             .await?
             .into_inner();
+        for dispatch_uid in accepted.llm_owner_dispatch_uids() {
+            crate::restate_identity::replay_safe_request(
+                ctx.service_client::<LLMGatewayClient>()
+                    .cancel_owner(Json::from(LLMCompletionOwner::execution_task_attempt(
+                        *dispatch_uid,
+                    ))),
+            )
+            .call()
+            .await?;
+        }
         if let Some(wake_epoch) = accepted.wake_epoch() {
             pause_execution_mutation_handoff_for_test().await;
             kick_execution_dispatcher(&ctx, run_request.run_uid, wake_epoch, "cancel").await?;
@@ -754,6 +769,7 @@ pub(super) async fn cancel_inner(
             scope,
             request.run.run_uid,
             request.run.session_id,
+            config.max_in_flight_tasks,
         )
         .await
         .map_err(execution_error)?
@@ -761,12 +777,16 @@ pub(super) async fn cancel_inner(
         return Ok(not_found_mutation());
     };
     verify_run_request(&cancellation.run, &request.run)?;
+    let replay_owner_dispatch_uids =
+        terminal_task_llm_owner_dispatch_uids(&cancellation.task_cancellation_dispatches)?;
     if cancellation.run.status == ExecutionRunStatus::Cancelled {
-        return Ok(replayed_mutation(&cancellation.run));
+        return Ok(replayed_mutation(&cancellation.run)
+            .with_llm_owner_dispatch_uids(replay_owner_dispatch_uids));
     }
     if let Some(pending) = &cancellation.run.pending_terminal {
         return Ok(if pending.status == ExecutionRunStatus::Cancelled {
             replayed_mutation(&cancellation.run)
+                .with_llm_owner_dispatch_uids(replay_owner_dispatch_uids)
         } else {
             conflict_mutation(ExecutionConflictReason::AlreadyTerminal)
         });
@@ -792,7 +812,7 @@ pub(super) async fn cancel_inner(
     };
     Ok(
         match repository
-            .fence_completion_terminal_and_enqueue_settlement(
+            .fence_cancellation_terminal_and_enqueue_settlement(
                 &config,
                 scope,
                 cancellation.run.run_uid,
@@ -800,19 +820,22 @@ pub(super) async fn cancel_inner(
                 cancellation.run.wake_epoch,
                 pending_terminal,
                 chrono::Utc::now(),
-                u32::try_from(
-                    config
-                        .maximum_activation_steps
-                        .min(config.max_in_flight_tasks)
-                        .min(1_000),
-                )
-                .map_err(|_| invalid_execution_request("terminal page limit exceeds u32"))?,
+                u32::try_from(config.max_in_flight_tasks)
+                    .map_err(|_| invalid_execution_request("terminal page limit exceeds u32"))?,
             )
             .await
             .map_err(execution_error)?
         {
-            PendingTerminalAdvanceOutcome::Applied(commit) => applied_mutation(&commit.run),
-            PendingTerminalAdvanceOutcome::Replayed(commit) => replayed_mutation(&commit.run),
+            PendingTerminalAdvanceOutcome::Applied(commit) => {
+                let owner_dispatch_uids =
+                    terminal_task_llm_owner_dispatch_uids(&commit.cancellation_dispatches)?;
+                applied_mutation(&commit.run).with_llm_owner_dispatch_uids(owner_dispatch_uids)
+            }
+            PendingTerminalAdvanceOutcome::Replayed(commit) => {
+                let owner_dispatch_uids =
+                    terminal_task_llm_owner_dispatch_uids(&commit.cancellation_dispatches)?;
+                replayed_mutation(&commit.run).with_llm_owner_dispatch_uids(owner_dispatch_uids)
+            }
             PendingTerminalAdvanceOutcome::NotFound => not_found_mutation(),
             PendingTerminalAdvanceOutcome::Conflict => {
                 conflict_mutation(ExecutionConflictReason::AlreadyTerminal)

@@ -38,12 +38,6 @@ definition:
               kind: output_schema
       plan:
         cancel_policy: retain_effects
-        input_wait_policy:
-          expiry:
-            kind: after
-            delay_seconds: 86400
-          on_expiry:
-            kind: fail_task
         input_schema:
           type: object
           required: [priority, retry]

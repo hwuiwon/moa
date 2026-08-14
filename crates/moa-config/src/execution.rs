@@ -8,6 +8,7 @@ use super::require_positive_limit;
 
 /// Provisional physical execution-task window pending the measured T3.3 default.
 const DEFAULT_MAX_IN_FLIGHT_TASKS: usize = 64;
+const MAX_TERMINAL_DRAIN_PAGE_TASKS: usize = 1_000;
 
 /// Tenant-independent defaults for execution planning and resource envelopes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,6 +263,11 @@ impl ExecutionConfig {
                     .to_string(),
             ));
         }
+        if self.max_in_flight_tasks > MAX_TERMINAL_DRAIN_PAGE_TASKS {
+            return Err(MoaError::ConfigError(format!(
+                "execution.max_in_flight_tasks must not exceed {MAX_TERMINAL_DRAIN_PAGE_TASKS} so one terminal drain page fences every current task owner"
+            )));
+        }
         if self.dispatch_batch_size < 3 {
             return Err(MoaError::ConfigError(
                 "execution.dispatch_batch_size must be at least 3 so every reconciliation lane makes progress"
@@ -349,7 +355,7 @@ fn usize_as_u64(name: &str, value: usize) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_MAX_IN_FLIGHT_TASKS, ExecutionConfig};
+    use super::{DEFAULT_MAX_IN_FLIGHT_TASKS, ExecutionConfig, MAX_TERMINAL_DRAIN_PAGE_TASKS};
 
     #[test]
     fn execution_config_defaults_match_the_resource_contract() {
@@ -413,6 +419,19 @@ mod tests {
         let mut batch = ExecutionConfig::default();
         batch.dispatch_batch_size = batch.max_in_flight_tasks + 1;
         assert!(batch.validate().is_err());
+
+        let oversized_in_flight = ExecutionConfig {
+            max_in_flight_tasks: MAX_TERMINAL_DRAIN_PAGE_TASKS + 1,
+            ..ExecutionConfig::default()
+        };
+        let error = oversized_in_flight
+            .validate()
+            .expect_err("one terminal page must cover every current task owner");
+        assert!(
+            error
+                .to_string()
+                .contains("max_in_flight_tasks must not exceed 1000")
+        );
 
         let starving_batch = ExecutionConfig {
             dispatch_batch_size: 2,

@@ -23,7 +23,7 @@ use moa_execution::repository::{
 };
 use moa_execution::state::{
     ExecutionRunStatus, ExecutionTaskProjection, ExecutionTaskStatus, ExecutionTerminalCause,
-    ExecutionTerminalEvidence,
+    ExecutionTerminalEvidence, ExecutionTerminalReason,
 };
 use moa_execution::wire::{
     ExecutionAmendmentRequest, ExecutionCancelRequest, ExecutionConflictReason,
@@ -53,6 +53,8 @@ const USEFUL_OUTPUT_INSTRUCTION: &str = "USEFUL_REPLAN_OUTPUT_AGENT";
 const USEFUL_OUTPUT_REQUIREMENT: &str = "useful_result";
 const REPAIR_REQUIREMENT: &str = "repair_result";
 const USEFUL_OUTPUT: &str = "preserved-useful-output";
+const FIXTURE_RELEASE_BATCH_SIZE: usize = 1;
+const FIXTURE_EXECUTION_WINDOW: usize = 8;
 
 struct StartedExecution {
     originating_user_sequence_num: u64,
@@ -770,15 +772,21 @@ async fn completion_gate_missing_company_service_e2e() -> Result<()> {
         .map(|item| extract_map_key(item, "/ticker"))
         .collect::<Result<Vec<_>, _>>()?;
     let missing_key = extract_map_key(&json!({"ticker": MISSING_COMPANY}), "/ticker")?;
-    let max_in_flight_tasks = ExecutionConfig::default().max_in_flight_tasks;
+    let max_in_flight_tasks = FIXTURE_EXECUTION_WINDOW;
     let fixture = replan_fixture(
         default_script(),
         FixtureCapabilityOptions {
             tools: vec![map_tool(TOOL, "/ticker")],
-            orchestrator_env: vec![(
-                "MOA_EXECUTION_MAX_IN_FLIGHT_TASKS".to_string(),
-                max_in_flight_tasks.to_string(),
-            )],
+            orchestrator_env: vec![
+                (
+                    "MOA_EXECUTION_MAX_IN_FLIGHT_TASKS".to_string(),
+                    max_in_flight_tasks.to_string(),
+                ),
+                (
+                    "MOA_EXECUTION_DISPATCH_BATCH_SIZE".to_string(),
+                    max_in_flight_tasks.to_string(),
+                ),
+            ],
         },
     )
     .await?;
@@ -898,15 +906,21 @@ async fn run_silent_incomplete_universe(universe_size: usize, tool_name: &str) -
         .map(|item| extract_map_key(item, "/ticker"))
         .collect::<Result<Vec<_>, _>>()?;
     let missing_keys = expected_keys[returned_count..].to_vec();
-    let max_in_flight_tasks = ExecutionConfig::default().max_in_flight_tasks;
+    let max_in_flight_tasks = FIXTURE_EXECUTION_WINDOW;
     let fixture = replan_fixture(
         default_script(),
         FixtureCapabilityOptions {
             tools: vec![map_tool(tool_name, "/ticker")],
-            orchestrator_env: vec![(
-                "MOA_EXECUTION_MAX_IN_FLIGHT_TASKS".to_string(),
-                max_in_flight_tasks.to_string(),
-            )],
+            orchestrator_env: vec![
+                (
+                    "MOA_EXECUTION_MAX_IN_FLIGHT_TASKS".to_string(),
+                    max_in_flight_tasks.to_string(),
+                ),
+                (
+                    "MOA_EXECUTION_DISPATCH_BATCH_SIZE".to_string(),
+                    max_in_flight_tasks.to_string(),
+                ),
+            ],
         },
     )
     .await?;
@@ -996,7 +1010,7 @@ async fn release_fixture_calls_in_window(
     }
     let mut released = 0;
     while released < total {
-        let batch_size = max_in_flight_tasks.min(total - released);
+        let batch_size = FIXTURE_RELEASE_BATCH_SIZE.min(total - released);
         controller
             .wait_for_calls(released + batch_size, SERVICE_TIMEOUT)
             .await?;
@@ -1364,14 +1378,6 @@ async fn execution_eval_injected_tool_instruction_cannot_escape_envelope_service
             requirement_count: 1,
         })
     );
-    assert!(
-        terminal
-            .gaps
-            .iter()
-            .any(|gap| gap.contains("agent emitted an undeclared capability")),
-        "terminal evidence omitted the envelope rejection: {:?}",
-        terminal.gaps
-    );
     assert_eq!(
         controller
             .calls()
@@ -1398,16 +1404,24 @@ async fn execution_eval_injected_tool_instruction_cannot_escape_envelope_service
         1,
         "output must not materialize after rejection"
     );
-    assert!(matches!(
-        tasks.tasks[0]
-            .outcome
-            .as_ref()
-            .map(|outcome| &outcome.result),
-        Some(moa_artifacts::execution_plan::ExecutionTaskResult::Failed {
-            class: moa_artifacts::execution_plan::ExecutionFailureClass::Terminal,
-            ..
-        })
-    ));
+    let expected_failure = format!(
+        "agent emitted undeclared capability `{}`",
+        moa_hands::mcp_tool_reference(FIXTURE_MCP_SERVER_NAME, FORBIDDEN_TOOL)
+    );
+    match tasks.tasks[0]
+        .outcome
+        .as_ref()
+        .map(|outcome| &outcome.result)
+    {
+        Some(moa_artifacts::execution_plan::ExecutionTaskResult::Failed { class, message }) => {
+            assert_eq!(
+                class,
+                &moa_artifacts::execution_plan::ExecutionFailureClass::Terminal
+            );
+            assert_eq!(message, &expected_failure);
+        }
+        result => bail!("undeclared capability did not persist its typed failure: {result:?}"),
+    }
     assert_execution_eval_case(
         &fixture,
         test.client(),
@@ -1418,9 +1432,6 @@ async fn execution_eval_injected_tool_instruction_cannot_escape_envelope_service
             ExecutionInvariantSpec::MustNotComplete,
             ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Failed],
-            },
-            ExecutionInvariantSpec::TerminalGapContains {
-                text: "agent emitted an undeclared capability".to_string(),
             },
             ExecutionInvariantSpec::BudgetWithinApproved,
             ExecutionInvariantSpec::ProgressMatchesTasks,
@@ -1584,20 +1595,36 @@ async fn execution_eval_amendment_cannot_broaden_authorization_service_e2e() -> 
     let ExecutionMutationResponse::Applied { run: fenced } = cancelled else {
         bail!("cancellation did not install a terminal fence: {cancelled:?}");
     };
-    assert_eq!(fenced.status, ExecutionRunStatus::WaitingReplan);
+    assert_eq!(fenced.status, ExecutionRunStatus::Cancelled);
+    assert_eq!(
+        fenced.terminal_reason,
+        Some(ExecutionTerminalReason::Cancelled)
+    );
+    let cancellation_evidence = ExecutionTerminalEvidence {
+        cause: ExecutionTerminalCause::Cancellation,
+        satisfied_requirement_count: 1,
+        requirement_count: 2,
+    };
+    assert_eq!(
+        fenced.terminal_evidence.as_ref(),
+        Some(&cancellation_evidence)
+    );
+    assert!(fenced.completed_at.is_some());
     let fenced_record = repository
         .load_run(scope, started.run.run_uid)
         .await?
         .context("cancelled execution disappeared after terminal fencing")?;
-    let pending = fenced_record
-        .pending_terminal
-        .as_ref()
-        .context("applied cancellation omitted its pending terminal intent")?;
-    assert_eq!(pending.status, ExecutionRunStatus::Cancelled);
+    assert_eq!(fenced_record.status, ExecutionRunStatus::Cancelled);
+    assert!(fenced_record.pending_terminal.is_none());
     assert_eq!(
-        pending.terminal_evidence.cause,
-        ExecutionTerminalCause::Cancellation
+        fenced_record.terminal_reason,
+        Some(ExecutionTerminalReason::Cancelled)
     );
+    assert_eq!(
+        fenced_record.terminal_evidence.as_ref(),
+        Some(&cancellation_evidence)
+    );
+    assert!(fenced_record.completed_at.is_some());
     let terminal = await_execution_terminal(test.client(), &started.run).await?;
     assert_eq!(terminal.run.status, ExecutionRunStatus::Cancelled);
     assert_execution_eval_case(
@@ -2040,12 +2067,6 @@ fn useful_replan_contract(
         },
         ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                    delay_seconds: 86_400,
-                },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: empty_input_schema(),
             output_schema: output_schema.clone(),
             nodes: vec![
@@ -2298,12 +2319,6 @@ fn map_then_output_plan(spec: MapThenOutputPlan<'_>) -> ExecutionPlanDefinition 
     } = spec;
     ExecutionPlanDefinition {
         cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-        input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-            expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                delay_seconds: 86_400,
-            },
-            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-        },
         input_schema: empty_input_schema(),
         output_schema: output_schema.clone(),
         nodes: vec![
@@ -2378,12 +2393,6 @@ fn missing_deliverable_contract() -> (ExecutionGoalContract, ExecutionPlanDefini
         // and the deliverable is the sole reason the run must not report completion.
         ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                    delay_seconds: 86_400,
-                },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: empty_input_schema(),
             output_schema: output_schema.clone(),
             nodes: vec![
@@ -2476,12 +2485,6 @@ fn declared_contradiction_contract() -> (ExecutionGoalContract, ExecutionPlanDef
         },
         ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                    delay_seconds: 86_400,
-                },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: empty_input_schema(),
             output_schema: report_schema.clone(),
             nodes: vec![
@@ -2585,12 +2588,6 @@ fn injected_content_contract(
         },
         ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                    delay_seconds: 86_400,
-                },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: empty_input_schema(),
             output_schema: output_schema.clone(),
             nodes: vec![

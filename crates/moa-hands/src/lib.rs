@@ -18,7 +18,7 @@ pub use core::{
     ProviderCredentialSource, ProviderEndpoint, ProviderHttpAttempt, ProviderSandboxAttempt,
     SandboxProviderInventory, SessionHandReleasePageOutcome, TenantSandboxPolicyStore,
     ToolCallScope, ToolCatalogDrift, ToolCatalogPin, ToolCatalogSnapshot, ToolExecution,
-    ToolRegistry, ToolRouter, deployment_sandbox_policy, governed_tool_contract_revision,
-    local_development_sandbox_policy, mcp_tool_reference, route_sandbox_policy,
-    spawn_mcp_catalog_refresh, truncate_tool_span_text,
+    ToolRegistry, ToolRouter, WorkerHandReleaseFence, WorkerHandReleaseRequest,
+    deployment_sandbox_policy, governed_tool_contract_revision, local_development_sandbox_policy,
+    mcp_tool_reference, route_sandbox_policy, spawn_mcp_catalog_refresh, truncate_tool_span_text,
 };

@@ -4,8 +4,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use moa_artifacts::execution_plan::{
-    ExecutionCancelPolicy, ExecutionGoalContract, ExecutionPlanDefinition, RetryPolicy,
+    ExecutionBudgetLimit, ExecutionCancelPolicy, ExecutionGoalContract, ExecutionNode,
+    ExecutionOperation, ExecutionPlanDefinition, RetryPolicy,
 };
+use moa_config::ExecutionConfig;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::{
     events::Event,
@@ -22,7 +24,9 @@ use moa_core::{
     types::identifiers::SessionId,
     types::identifiers::TenantId,
     types::identifiers::ToolCallId,
+    types::identifiers::UserId,
     types::session::SessionStatus,
+    types::tools::IdempotencyClass,
     types::tools::SecuredToolOutput,
     types::tools::ToolCallRequest,
 };
@@ -32,8 +36,20 @@ use moa_execution::{
         ExecutionCapabilityCatalog, ExecutionEstimate, ExecutionHash,
     },
     compiler::{CanonicalExecutionPlan, ExecutionValidationReport},
-    state::LogicalTaskKind,
-    wire::ExecutionActionReviewResolution,
+    repository::{
+        ExecutionRepository, ExecutionScope, NewExecutionRun,
+        audit::{NewExecutionPlanningContext, PlanningContextWriteOutcome},
+        ready::{ReadyMaterializationOutcome, ReadyMaterializationRequest},
+        run::RunAdmissionOutcome,
+        task::{
+            NewTaskAttemptCheckpoint, TaskAttemptCheckpointKind, TaskAttemptFence,
+            TaskAttemptReleaseClaimOutcome, TaskAttemptReviewParkOutcome, TaskAttemptStartOutcome,
+        },
+    },
+    state::{ExecutionRunStatus, ExecutionTaskId, LogicalTask, LogicalTaskKind},
+    wire::{
+        ExecutionActionReviewResolution, ExecutionPlanningContextSnapshot, planning_context_hash,
+    },
 };
 use moa_orchestrator::objects::tenant::TenantConfig;
 use moa_orchestrator::services::action_policy::{PrepareActionReviewRequest, PreparedActionReview};
@@ -129,7 +145,7 @@ fn action_review_workspace_env() -> Vec<(String, String)> {
                 "provider_account_id": ACCOUNT_ID,
                 "provider_account_generation": 1,
                 "max_workspaces": 8,
-                "max_active_hands": 4,
+                "max_active_hands": 8,
                 "max_checkpoints": 16,
                 "max_logical_bytes": 268_435_456_u64
             }])
@@ -859,16 +875,22 @@ async fn claimed_execution_review_exact_replay_resumes_and_conflict_rejects(
             },
         )
         .await?;
+    let expected_output = format!("claimed-review-replay-{}", Uuid::now_v7());
+    let command = format!("printf {expected_output}");
+    let review_id = Uuid::now_v7();
     let origin = insert_execution_review_task(
         &pool,
         session.tenant_id,
         session_id,
         originating_user_sequence_num,
+        review_id,
+        ToolInvocation {
+            id: None,
+            name: "bash".to_string(),
+            input: json!({"cmd": command.clone()}),
+        },
     )
     .await?;
-    let expected_output = format!("claimed-review-replay-{}", Uuid::now_v7());
-    let command = format!("printf {expected_output}");
-    let review_id = Uuid::now_v7();
     let claimed_tool_call_id = Uuid::now_v7();
     let tool_call_id = ToolCallId::new();
     let contract_revision = activated_contract_revision(&test, "bash").await?;
@@ -1028,10 +1050,12 @@ async fn insert_execution_review_task(
     tenant_id: TenantId,
     session_id: SessionId,
     originating_user_sequence_num: u64,
+    review_uid: Uuid,
+    invocation: ToolInvocation,
 ) -> Result<ExecutionTaskOrigin> {
-    let run_uid = Uuid::new_v4();
-    let task_uid = Uuid::new_v4();
-    let planning_context_uid = Uuid::new_v4();
+    let repository = ExecutionRepository::new(pool.clone());
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let config = ExecutionConfig::default();
     let plan_hash = ExecutionHash::from_bytes([0; 32]);
     let catalog = ExecutionCapabilityCatalog::build(Vec::new())
         .context("build empty execution review capability catalog")?;
@@ -1046,15 +1070,24 @@ async fn insert_execution_review_task(
     let plan = CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::At {
-                    at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
-                },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
-            nodes: Vec::new(),
+            nodes: vec![ExecutionNode {
+                id: "review".to_string(),
+                requirement_ids: Vec::new(),
+                depends_on: Vec::new(),
+                when: None,
+                input: json!({}),
+                output_schema: json!({ "type": "object" }),
+                operation: ExecutionOperation::Output { value: json!({}) },
+                compensation: None,
+                retry: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff_ms: 0,
+                    max_backoff_ms: 0,
+                },
+                budget: None,
+            }],
         },
         plan_hash,
         catalog_hash: catalog.catalog_hash,
@@ -1081,101 +1114,189 @@ async fn insert_execution_review_task(
             repair_attempts: 0,
         },
     };
-    let goal = serde_json::to_value(goal).context("serialize execution review goal fixture")?;
-    let plan = serde_json::to_value(plan).context("serialize execution review plan fixture")?;
-    let catalog =
-        serde_json::to_value(catalog).context("serialize execution review catalog fixture")?;
-    let authorization = serde_json::to_value(authorization)
-        .context("serialize execution review authorization fixture")?;
-    let source_provenance = serde_json::to_value(source_provenance)
-        .context("serialize execution review source provenance fixture")?;
-    let task_kind = serde_json::to_value(LogicalTaskKind::Output { value: json!({}) })
-        .context("serialize execution review task-kind fixture")?;
-    let retry_policy = serde_json::to_value(RetryPolicy {
-        max_attempts: 1,
-        initial_backoff_ms: 0,
-        max_backoff_ms: 0,
-    })
-    .context("serialize execution review retry-policy fixture")?;
-    let hash = plan_hash.to_string();
-    let originating_user_sequence_num = i64::try_from(originating_user_sequence_num)
-        .context("execution review origin sequence exceeds PostgreSQL BIGINT")?;
-    sqlx::query(
-        r#"
-        INSERT INTO moa.execution_planning_context (
-            planning_context_uid, tenant_id, session_id,
-            originating_user_sequence_num, originating_user_event_hash,
-            owner_user_id, planning_context_hash, snapshot
-        ) VALUES ($1, $2, $3, $4, $5, 'test-owner', $5, '{}'::JSONB)
-        "#,
-    )
-    .bind(planning_context_uid)
-    .bind(tenant_id.0)
-    .bind(session_id.0)
-    .bind(originating_user_sequence_num)
-    .bind(&hash)
-    .execute(pool)
-    .await
-    .context("insert execution review planning-context fixture")?;
-    sqlx::query(
-        r#"
-        INSERT INTO moa.execution_run (
-            run_uid, tenant_id, session_id, originating_user_sequence_num,
-            planning_context_uid, planning_context_hash, owner_user_id, goal_contract,
-            initial_plan, active_plan, initial_plan_hash, active_plan_hash,
-            capability_catalog, authorization_envelope, pinned_instruction_skills,
-            source_provenance, source_kind,
-            input, status, queued_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'test-owner',
-                  $7, $8, $8, $6, $6,
-                  $9, $10, '[]'::JSONB,
-                  $11, 'generated_plan',
-                  '{}'::JSONB, 'queued', NOW())
-        "#,
-    )
-    .bind(run_uid)
-    .bind(tenant_id.0)
-    .bind(session_id.0)
-    .bind(originating_user_sequence_num)
-    .bind(planning_context_uid)
-    .bind(&hash)
-    .bind(goal)
-    .bind(plan)
-    .bind(catalog)
-    .bind(authorization)
-    .bind(source_provenance)
-    .execute(pool)
-    .await
-    .context("insert execution review run fixture")?;
-    sqlx::query("UPDATE moa.execution_run SET status = 'running' WHERE run_uid = $1")
-        .bind(run_uid)
-        .execute(pool)
-        .await
-        .context("start execution review run fixture")?;
-    sqlx::query(
-        r#"
-        INSERT INTO moa.execution_task (
-            task_id, run_uid, tenant_id, node_id, item_key, plan_revision,
-            status, input, task_kind, retry_policy,
-            estimate_cost_microusd, estimate_tokens, estimate_tasks,
-            estimate_tool_calls, estimate_retrieved_bytes
-        ) VALUES ($1, $2, $3, 'review', 'replay', 1, 'running', '{}'::JSONB,
-                  $4, $5, 0, 0, 1, 0, 0)
-        "#,
-    )
-    .bind(task_uid)
-    .bind(run_uid)
-    .bind(tenant_id.0)
-    .bind(task_kind)
-    .bind(retry_policy)
-    .execute(pool)
-    .await
-    .context("insert execution review task fixture")?;
+    let budget = ExecutionBudgetLimit {
+        max_cost_microusd: Some(0),
+        max_tokens: Some(0),
+        max_tasks: Some(1),
+        max_tool_calls: Some(1),
+        max_retrieved_bytes: Some(0),
+        deadline_at: None,
+    };
+    let owner_user_id = UserId::new("test-owner");
+    let admitted_identity = Identity {
+        identity_type: IdentityType::Service,
+        id: tenant_id.0,
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    };
+    let planning_snapshot = ExecutionPlanningContextSnapshot {
+        schema_version: 1,
+        tenant_id,
+        contact_id: None,
+        session_id,
+        originating_user_sequence_num,
+        originating_user_event_hash: ExecutionHash::from_bytes([1; 32]).to_string(),
+        owner_user_id: owner_user_id.clone(),
+        catalog: catalog.clone(),
+        authorization: authorization.clone(),
+        pinned_instruction_skills: Vec::new(),
+        execution_templates: Vec::new(),
+        budget: budget.clone(),
+    };
+    let planning_hash = planning_context_hash(&planning_snapshot)?;
+    let planning_context = repository
+        .create_planning_context(
+            scope,
+            NewExecutionPlanningContext {
+                snapshot: planning_snapshot,
+                planning_context_hash: planning_hash,
+            },
+        )
+        .await?;
+    let planning_context = match planning_context {
+        PlanningContextWriteOutcome::Created(record)
+        | PlanningContextWriteOutcome::Replayed(record) => record,
+        PlanningContextWriteOutcome::Conflict => {
+            anyhow::bail!("execution review planning context conflicted")
+        }
+    };
+    let run = repository
+        .create_run(
+            scope,
+            &config,
+            NewExecutionRun {
+                tenant_id,
+                contact_id: None,
+                session_id,
+                originating_user_sequence_num,
+                planning_context_uid: planning_context.planning_context_uid,
+                planning_context_hash: planning_hash,
+                owner_user_id,
+                admitted_identity,
+                goal,
+                plan,
+                catalog,
+                authorization,
+                pinned_instruction_skills: Vec::new(),
+                source_provenance,
+                input: json!({}),
+                status: ExecutionRunStatus::Queued,
+                approved_budget: budget,
+                idempotency_key: Some(format!("execution-review-claim-{review_uid}")),
+            },
+        )
+        .await?;
+    let RunAdmissionOutcome::Admitted(run) = run else {
+        anyhow::bail!("execution review run fixture was not freshly admitted: {run:?}")
+    };
+    let task_id = ExecutionTaskId::derive(run.run_uid, "review", "replay")?;
+    let materialized = repository
+        .materialize_ready_page(
+            scope,
+            &config,
+            ReadyMaterializationRequest {
+                run_uid: run.run_uid,
+                plan_revision: 1,
+                node_id: "review".to_string(),
+                expected_cursor: 0,
+                reduce_cursor: None,
+                source_exhausted: true,
+                terminal_output: None,
+                condition_skipped: false,
+                tasks: vec![LogicalTask {
+                    task_id,
+                    node_id: "review".to_string(),
+                    item_key: "replay".to_string(),
+                    requirement_ids: Vec::new(),
+                    plan_revision: 1,
+                    generation: 1,
+                    input: json!({}),
+                    kind: LogicalTaskKind::Output { value: json!({}) },
+                    compensation: None,
+                    retry: RetryPolicy {
+                        max_attempts: 1,
+                        initial_backoff_ms: 0,
+                        max_backoff_ms: 0,
+                    },
+                    reservation: ExecutionEstimate {
+                        cost_microusd: 0,
+                        tokens: 0,
+                        tasks: 1,
+                        tool_calls: 1,
+                        retrieved_bytes: 0,
+                    },
+                }],
+            },
+        )
+        .await?;
+    if !matches!(materialized, ReadyMaterializationOutcome::Applied { .. }) {
+        anyhow::bail!("execution review task fixture was not materialized ready: {materialized:?}")
+    }
+    let admission = repository
+        .admit_ready_attempts(&config, 8, moa_test_support::fixtures::pg_now())
+        .await?
+        .admitted
+        .into_iter()
+        .find(|admission| admission.run_uid == run.run_uid && admission.task_id == task_id)
+        .context("execution review task fixture was not admitted")?;
+    let fence = TaskAttemptFence {
+        tenant_id: admission.tenant_id,
+        run_uid: admission.run_uid,
+        task_id: admission.task_id,
+        controller_generation: admission.controller_generation,
+        attempt_generation: admission.attempt_generation,
+        dispatch_uid: admission.dispatch_uid,
+        capacity_reservation_uid: admission.capacity_reservation_uid,
+        watchdog_trigger_uid: admission.watchdog_trigger_uid,
+        attempt_deadline_at: admission.attempt_deadline_at,
+    };
+    let TaskAttemptStartOutcome::Started(started) = repository.start_task_attempt(fence).await?
+    else {
+        anyhow::bail!("execution review task fixture did not start")
+    };
+    let parked_at = moa_test_support::fixtures::pg_now();
+    let TaskAttemptReleaseClaimOutcome::Applied(_) = repository
+        .begin_task_attempt_release(fence, started.task.generation, "action_review", parked_at)
+        .await?
+    else {
+        anyhow::bail!("execution review task fixture did not enter release")
+    };
+    let checkpoint = NewTaskAttemptCheckpoint {
+        fence,
+        task_generation: started.task.generation,
+        kind: TaskAttemptCheckpointKind::CapabilityReview,
+        schema_version: 1,
+        payload: json!({
+            "schema_version": 1,
+            "state": {
+                "kind": "capability_review",
+                "pending_review": {
+                    "review_uid": review_uid,
+                    "expires_at": parked_at + chrono::Duration::days(1),
+                    "invocation": invocation,
+                    "effect_idempotency": IdempotencyClass::NonIdempotent,
+                },
+                "usage": {},
+            },
+            "review_resolution": null,
+            "external_job_resolution": null,
+            "workspace_release_receipt_id": null,
+        }),
+        workspace_release_receipt: None,
+        created_at: parked_at,
+    };
+    let TaskAttemptReviewParkOutcome::Applied { task, .. } = repository
+        .park_task_attempt_on_review(checkpoint, review_uid)
+        .await?
+    else {
+        anyhow::bail!("execution review task fixture did not park on review")
+    };
     Ok(ExecutionTaskOrigin {
-        run_uid,
-        task_uid,
-        generation: 1,
-        attempt_generation: 1,
+        run_uid: run.run_uid,
+        task_uid: task.task_id.as_uuid(),
+        generation: task.generation,
+        attempt_generation: task.attempt_generation,
     })
 }
 

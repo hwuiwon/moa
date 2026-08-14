@@ -527,9 +527,6 @@ definition:
         completion_checks: []
       plan:
         cancel_policy: retain_effects
-        input_wait_policy:
-          expiry: { kind: after, delay_seconds: 3600 }
-          on_expiry: { kind: fail_task }
         input_schema: { type: object }
         output_schema: { type: object }
         nodes:
@@ -619,9 +616,6 @@ definition:
         completion_checks: []
       plan:
         cancel_policy: retain_effects
-        input_wait_policy:
-          expiry: { kind: after, delay_seconds: 3600 }
-          on_expiry: { kind: fail_task }
         input_schema: { type: object }
         output_schema: { type: object }
         nodes:
@@ -696,9 +690,6 @@ definition:
         completion_checks: []
       plan:
         cancel_policy: retain_effects
-        input_wait_policy:
-          expiry: { kind: after, delay_seconds: 3600 }
-          on_expiry: { kind: fail_task }
         input_schema: { type: object }
         output_schema: { type: object }
         nodes:

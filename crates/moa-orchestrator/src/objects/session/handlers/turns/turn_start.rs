@@ -103,6 +103,15 @@ pub(in crate::objects::session::handlers) async fn start_turn_inner(
             .into());
         }
         MessageRouting::Reply(target) => {
+            reacquire_coordinator_reply_admission(
+                ctx,
+                &state,
+                &mut pending_state,
+                turn_admission,
+                session_id,
+                &target,
+            )
+            .await?;
             forward_user_input_reply(
                 ctx,
                 &mut state,

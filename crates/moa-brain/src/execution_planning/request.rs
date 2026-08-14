@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Stable execution-planner prompt identifier.
-pub const EXECUTION_PLANNER_PROMPT_VERSION: &str = "execution-planner-v8";
+pub const EXECUTION_PLANNER_PROMPT_VERSION: &str = "execution-planner-v10";
 /// Fixed maximum collected planner output tokens.
 pub const EXECUTION_PLANNER_MAX_OUTPUT_TOKENS: usize = 32_768;
 const EXECUTION_PLANNER_PROMPT: &str = include_str!("../prompts/execution_planner.md");
@@ -170,7 +170,7 @@ fn build_initial_request(
             compiler_report_json,
         } => {
             user_payload.push_str(&format!(
-                "\nRepair the candidate exactly once. Preserve immutable_goal byte-for-byte after canonicalization. Do not discover new authority or capabilities.\n<original_candidate>{original_candidate_json}</original_candidate>\n<immutable_goal>{immutable_goal_json}</immutable_goal>\n<compiler_report>{compiler_report_json}</compiler_report>"
+                "\nRepair the candidate exactly once. Preserve immutable_goal byte-for-byte after canonicalization. Do not discover new authority or capabilities. Return only the replacement JSON object.\n<original_candidate>{original_candidate_json}</original_candidate>\n<immutable_goal>{immutable_goal_json}</immutable_goal>\n<compiler_report>{compiler_report_json}</compiler_report>"
             ));
         }
     }
@@ -295,10 +295,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn execution_planner_prompt_v8_pins_long_horizon_and_compiler_invariants() {
+    fn execution_planner_prompt_v10_pins_long_horizon_and_compiler_invariants() {
         // Pins: the current emitted prompt version and its compiler-facing guidance
         // change together so live planner provenance identifies this exact contract.
-        assert_eq!(EXECUTION_PLANNER_PROMPT_VERSION, "execution-planner-v8");
+        assert_eq!(EXECUTION_PLANNER_PROMPT_VERSION, "execution-planner-v10");
         assert_eq!(
             EXECUTION_PLANNER_PROMPT,
             concat!(
@@ -309,12 +309,13 @@ mod tests {
                 "- Choose exactly one explicit `plan.cancel_policy`: `retain_effects` or `compensate_committed`.\n",
                 "- Treat the frozen `budget.deadline_at` as the absolute Durable-run deadline. Never emit a wait, retry window, or active task whose bound reaches or exceeds it.\n",
                 "- Use `WaitUntil` for a calendar-time delay. Its `wake` is a tagged temporal target, either `{\"kind\":\"at\",\"at\":\"<RFC3339 UTC>\"}` for an exact instant or `{\"kind\":\"after\",\"delay_seconds\":<positive integer>}` for a delay measured from the moment the node starts waiting. Emit exactly those fields for the chosen shape and nothing else. The resolved wake time must land before the run deadline. Its declared `result` is the structured value made available to downstream nodes after the timer fires.\n",
-                "- Give every `Review` and `WaitSignal` an explicit `wait_policy` of `{\"expiry\": <temporal target>, \"on_expiry\": <expiry action>}`, using the same two temporal-target shapes. An expiry action is either `{\"kind\":\"fail_task\"}` or `{\"kind\":\"continue_with\",\"output\":<value matching that node's output_schema>}`. Represent human and external waits only with these storage-backed wait operations; never keep an `Agent` or `Capability` active while waiting for a person, callback, schedule, or retry time.\n",
-                "- Always set `plan.input_wait_policy`. It is required, and it governs every task that pauses for runtime input rather than one named node, so its `on_expiry` accepts only `{\"kind\":\"fail_task\"}` — never `continue_with`.\n",
+                "- Give every `Review` and `WaitSignal` an explicit `wait_policy` of `{\"expiry\": <temporal target>, \"on_expiry\": <expiry action>}`, using the same two temporal-target shapes. An expiry action is either `{\"kind\":\"fail_task\"}` or `{\"kind\":\"continue_with\",\"output\":<value matching that node's output_schema>}`. Represent planned approval and external callback waits with these storage-backed wait operations; never keep an `Agent` or `Capability` active while waiting for a person, callback, schedule, or retry time.\n",
+                "- A runtime `NeedsInput` outcome parks the task durably and indefinitely until authorized human input arrives or the run is explicitly cancelled, without holding active compute, a worker, model call, sandbox, process, or network connection.\n",
                 "- Decompose long work into bounded active tasks separated by durable nodes. Never plan a continuously running multi-hour or multi-day model call, tool call, shell process, network connection, or sandbox; use a registered asynchronous capability when the catalog explicitly provides one.\n",
                 "- Set every node's `compensation` explicitly. Use `null` unless the node is a direct side-effecting `Capability` whose exact catalog entry advertises the same compensator and bounded input mapping, and that compensator has `requires_sandbox=false`. Never add compensation to reads, agents, maps, reduces, reviews, signals, or outputs, never use a sandbox-backed compensator, and never invent rollback authority.\n",
                 "- An amendment must preserve compensation for work that is running or committed and must not weaken the run's cancellation policy.\n",
                 "- Every goal-entry ID, completion-check ID, execution-node ID, and every ID referenced from those structures must match `[a-z][a-z0-9_-]{0,63}`.\n",
+                "- Every `plan.nodes[].requirement_ids` and `goal.completion_checks[].requirement_ids` entry must reference an ID from `goal.requirements`. Every `goal.completion_checks[].constraint_ids` entry must reference an ID from `goal.constraints`. Never cross those ID domains, and never put a constraint ID on a plan node. Every goal requirement must be served by at least one node.\n",
                 "- Link every requirement and every constraint to at least one completion check via `requirement_ids` and `constraint_ids`.\n",
                 "- Put every goal requirement ID in at least one completion check's `requirement_ids`. If the plan has only one completion check, it must list every requirement ID. For a simple `Agent`-to-`Output` plan, prefer one `OutputSchema` check listing all requirement IDs.\n",
                 "- Use only whole-value binding objects of exactly `{\"$ref\":\"<path>\"}` with no sibling keys or string interpolation. A reference path may select the complete `$.input` or `$.nodes.<id>.output` value, or append dot-separated object fields such as `$.input.query` and `$.nodes.lookup.output.items`; node references may read only declared dependencies. Never use bracket/index syntax.\n",

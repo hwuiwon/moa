@@ -891,12 +891,6 @@ fn output_candidate(
         goal: single_requirement_goal(objective),
         plan: ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                    delay_seconds: 86_400,
-                },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: empty_object_schema(),
             output_schema: schema.clone(),
             nodes: vec![ExecutionNode {
@@ -926,12 +920,6 @@ fn replan_candidate(objective: &str) -> GeneratedExecutionCandidate {
         goal: replan_goal(objective),
         plan: ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                    delay_seconds: 86_400,
-                },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: empty_object_schema(),
             output_schema: schema.clone(),
             nodes: vec![

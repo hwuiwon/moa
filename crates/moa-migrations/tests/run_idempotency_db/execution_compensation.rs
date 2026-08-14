@@ -56,9 +56,18 @@ async fn execution_compensation_schema_and_transitions_are_strict_db() {
         )
         .fetch_one(&target)
         .await?;
-        let version_neutral_shapes: (bool, bool, bool) = sqlx::query_as(
-            "SELECT moa.execution_plan_definition_is_valid(initial_plan -> 'definition'), \
-                    moa.execution_plan_definition_is_current(initial_plan -> 'definition'), \
+        let plan_shape_checks: (bool, bool, bool) = sqlx::query_as(
+            "SELECT moa.execution_plan_definition_is_current(initial_plan -> 'definition'), \
+                    NOT moa.execution_plan_definition_is_current( \
+                        (initial_plan -> 'definition') || jsonb_build_object( \
+                            'input_wait_policy', jsonb_build_object( \
+                                'expiry', jsonb_build_object( \
+                                    'kind', 'after', 'delay_seconds', 1 \
+                                ), \
+                                'on_expiry', jsonb_build_object('kind', 'fail_task') \
+                            ) \
+                        ) \
+                    ), \
                     NOT capability_catalog ? 'schema_version' \
              FROM moa.execution_run WHERE run_uid = $1",
         )
@@ -98,7 +107,7 @@ async fn execution_compensation_schema_and_transitions_are_strict_db() {
             second,
             compensation_schema,
             action_review_owner_schema,
-            version_neutral_shapes,
+            plan_shape_checks,
             compensation_reason,
         ))
     }
@@ -109,7 +118,7 @@ async fn execution_compensation_schema_and_transitions_are_strict_db() {
         second,
         compensation_schema,
         action_review_owner_schema,
-        version_neutral_shapes,
+        plan_shape_checks,
         compensation_reason,
     ) = database
         .finish(outcome)
@@ -122,7 +131,7 @@ async fn execution_compensation_schema_and_transitions_are_strict_db() {
     );
     assert!(compensation_schema);
     assert!(action_review_owner_schema);
-    assert_eq!(version_neutral_shapes, (false, true, true));
+    assert_eq!(plan_shape_checks, (true, true, true));
     assert_eq!(compensation_reason.as_deref(), Some("compensation_failed"));
 }
 
@@ -142,10 +151,6 @@ async fn seed_execution_run(target: &PgPool) -> TestResult<SeededExecutionRun> {
             "cancel_policy": "retain_effects",
             "input_schema": {},
             "output_schema": {},
-            "input_wait_policy": {
-                "expiry": {"kind": "after", "delay_seconds": 1},
-                "on_expiry": {"kind": "fail_task"}
-            },
             "nodes": [{
                 "id": "output",
                 "requirement_ids": [],

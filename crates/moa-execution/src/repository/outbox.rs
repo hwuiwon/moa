@@ -746,6 +746,7 @@ impl ExecutionRepository {
                     'pausing', 'paused', 'compensating'
                 )
                   AND budget_deadline_at IS NOT NULL
+                  AND budget_deadline_suspended_at IS NULL
                   AND budget_deadline_at <= now()
                 LIMIT $1
             ) AS overdue

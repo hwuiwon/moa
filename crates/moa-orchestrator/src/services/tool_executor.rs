@@ -69,7 +69,8 @@ use moa_execution::wire::{
 use moa_hands::{
     DeferredWorkspaceToolOutput, ExecutionHandReleaseRequest, JournaledWorkspaceCommit,
     PendingConnectorToolOutput, SessionHandReleasePageOutcome, ToolCallScope, ToolCatalogPin,
-    ToolCatalogSnapshot, ToolExecution, ToolRouter,
+    ToolCatalogSnapshot, ToolExecution, ToolRouter, WorkerHandReleaseFence,
+    WorkerHandReleaseRequest,
 };
 use moa_security::{
     OutputClassification, ToolInputCanaryScreening, classify_tool_output,
@@ -540,6 +541,16 @@ pub trait ToolExecutor {
         request: Json<ReleaseWorkerHandsRequest>,
     ) -> Result<(), HandlerError>;
 
+    /// Captures the exact worker hand generation allowed to enter a human-input wait.
+    async fn capture_worker_hand_release_fence(
+        request: Json<CaptureWorkerHandReleaseFenceRequest>,
+    ) -> Result<Json<Option<WorkerHandReleaseFence>>, HandlerError>;
+
+    /// Checkpoints and releases one exact worker hand before a human-input wait.
+    async fn checkpoint_and_release_worker_hand(
+        request: Json<CheckpointAndReleaseWorkerHandRequest>,
+    ) -> Result<(), HandlerError>;
+
     /// Releases the generation-independent hand scope owned by one execution task.
     async fn release_execution_task_hands(
         request: Json<ReleaseExecutionTaskHandsRequest>,
@@ -648,6 +659,31 @@ pub struct ReleaseWorkerHandsRequest {
     pub session_id: SessionId,
     /// Worker scope whose sandbox should be released.
     pub worker_id: String,
+}
+
+/// Request to capture the exact live worker hand before registering an input wait.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureWorkerHandReleaseFenceRequest {
+    /// Admitted session metadata owning the worker sandbox.
+    pub session: SessionMeta,
+    /// Worker scope about to enter the durable wait.
+    pub worker_id: String,
+}
+
+/// Request to park the exact captured worker hand after input registration is durable.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointAndReleaseWorkerHandRequest {
+    /// Admitted session metadata owning the worker sandbox.
+    pub session: SessionMeta,
+    /// Worker scope entering the durable wait.
+    pub worker_id: String,
+    /// Exact turn, generation, and request identity that owns the wait.
+    pub input_target: moa_core::types::worker::state::WorkerInputTarget,
+    /// Exact workspace and hand generation captured before registration, or an
+    /// absence proof that forbids releasing a hand created later.
+    pub expected: Option<WorkerHandReleaseFence>,
 }
 
 /// Request to release one terminal or cancelled execution task's scoped hands.
@@ -2449,6 +2485,52 @@ impl ToolExecutor for ToolExecutorImpl {
             return Err(TerminalError::new("worker hand cleanup incomplete").into());
         }
         Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal worker-turn pre-park read. The admitted SessionMeta and worker
+    // id come from the already-authorized worker dispatch and expose no data publicly.
+    async fn capture_worker_hand_release_fence(
+        &self,
+        ctx: Context<'_>,
+        request: Json<CaptureWorkerHandReleaseFenceRequest>,
+    ) -> Result<Json<Option<WorkerHandReleaseFence>>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("ToolExecutor", "capture_worker_hand_release_fence");
+        let request = request.into_inner();
+        self.router
+            .capture_worker_hand_release_fence(&request.session, &request.worker_id)
+            .await
+            .map(Json::from)
+            .map_err(moa_error_to_handler_error)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal worker-turn park after its exact pending-input registration is
+    // durable. The captured workspace/instance/lease fence prevents a replay from
+    // touching compute provisioned by a later resume.
+    async fn checkpoint_and_release_worker_hand(
+        &self,
+        ctx: Context<'_>,
+        request: Json<CheckpointAndReleaseWorkerHandRequest>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("ToolExecutor", "checkpoint_and_release_worker_hand");
+        let request = request.into_inner();
+        self.router
+            .checkpoint_and_release_worker_hand(WorkerHandReleaseRequest {
+                session: &request.session,
+                worker_id: &request.worker_id,
+                input_target: &request.input_target,
+                expected: request.expected.as_ref(),
+                scope: ToolCallScope::unbounded().with_budget(
+                    moa_core::types::resource::ResourceBudget::until(
+                        chrono::Utc::now() + chrono::Duration::minutes(5),
+                    ),
+                ),
+            })
+            .await
+            .map_err(moa_error_to_handler_error)
     }
 
     #[tracing::instrument(skip(self, ctx, request))]

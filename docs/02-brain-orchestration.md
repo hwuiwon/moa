@@ -337,8 +337,10 @@ so the single-writer object never blocks its queue on a Postgres write, while
 the caller still awaits durability.
 
 **Owner outcomes are exact.** A coordinator suspend registers a
-generation-fenced coordinator-input reply target on the Session and idles until
-that reply arrives; a coordinator halt records the canonical actor+turn
+generation-fenced coordinator-input reply target on the Session, releases its
+fleet/tenant turn-admission lease, and idles indefinitely until that reply arrives.
+The exact authenticated reply reacquires admission before resolving the awakeable;
+a coordinator halt records the canonical actor+turn
 `TurnFailed`. A worker suspend emits one `NeedsInput` signal with
 `input_audience: User` and awaits its awakeable on the existing worker-input
 machinery; a worker halt emits one `Failed` signal and terminates that worker
@@ -437,13 +439,16 @@ without an additional wake.
 
 `needs_input` is a child→parent round-trip on the same message path: the child's
 `request_input` tool registers a Restate awakeable, emits a `NeedsInput` signal
-carrying `input_request_id`/`input_audience`, and blocks on the awakeable against a
-long timeout (`worker_input_timeout_ms`). The coordinator answers with the
+carrying `input_request_id`/`input_audience`, checkpoints and releases any worker
+sandbox compute, and blocks indefinitely on the durable awakeable. The coordinator
+answers with the
 `provide_worker_input` tool → `WorkerMessage::ProvideInput`, which resolves
 the awakeable through `post_message`. Coordinator-audience questions are answered
 autonomously. User-audience questions are exposed as `worker_input_request` SSE
 frames; the next plain user reply is forwarded by the session to the worker as
-`WorkerMessage::ProvideInput` instead of starting a separate root turn.
+`WorkerMessage::ProvideInput` instead of starting a separate root turn. Restate owns
+the suspended wait without an active handler or provider call; the worker's next sandbox
+dispatch restores the exact portable checkpoint onto fresh compute.
 
 ### Self-cleanup and the liveness watchdog
 

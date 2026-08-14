@@ -1,7 +1,8 @@
 //! Bounded persisted completion projection and terminal-evidence contracts.
 
 use moa_artifacts::execution_plan::{
-    CompletionCheck, CompletionCheckKind, ExecutionNode, ExecutionOperation,
+    CompletionCheck, CompletionCheckKind, CoverageRequirement, ExecutionNode, ExecutionOperation,
+    MapTask,
 };
 use moa_execution::{
     capability::node_output_hash,
@@ -15,7 +16,10 @@ use moa_execution::{
         },
         terminal::{PendingTerminalAdvanceOutcome, PendingTerminalAdvanceStage},
     },
-    state::{ExecutionLimitStop, ExecutionTerminalEvidence},
+    state::{
+        ExecutionLimitStop, ExecutionTerminalCause, ExecutionTerminalEvidence,
+        ExecutionTerminalReason,
+    },
 };
 
 use super::support::*;
@@ -46,6 +50,105 @@ fn output_node_with_dependencies(id: &str, depends_on: &[&str]) -> ExecutionNode
     }
 }
 
+fn map_node_with_max_items(id: &str, max_items: u64) -> ExecutionNode {
+    let mut node = output_node_with_dependencies(id, &[]);
+    node.operation = ExecutionOperation::Map {
+        items: json!([]),
+        item_key: "/id".to_string(),
+        max_items,
+        item_output_schema: json!({ "type": "object" }),
+        task: MapTask::Agent {
+            instructions: "process one bounded item".to_string(),
+            skill_refs: Vec::new(),
+            capability_refs: Vec::new(),
+            max_turns: 1,
+        },
+    };
+    node
+}
+
+#[tokio::test]
+async fn completion_rejects_resolved_coverage_above_map_max_items_db() -> TestResult {
+    // Pins: a dynamic coverage universe cannot allocate or hash more expected keys than the
+    // referenced map was allowed to materialize, even when persisted state reaches completion.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let repository = ExecutionRepository::new(pool.clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let mut candidate = new_run(
+        tenant_id,
+        None,
+        "coverage-max-items",
+        ExecutionRunStatus::Queued,
+        budget(1),
+    );
+    candidate.input = json!({
+        "expected": [
+            { "id": "company-a" },
+            { "id": "company-b" }
+        ]
+    });
+    candidate.plan.definition.nodes = vec![map_node_with_max_items("companies", 1)];
+    candidate.goal.coverage = vec![CoverageRequirement {
+        id: "all_companies".to_string(),
+        description: "Cover every requested company".to_string(),
+        map_node_id: "companies".to_string(),
+        expected_items: json!({ "$ref": "$.input.expected" }),
+        require_all: true,
+    }];
+    let run = create_run(&repository, scope, candidate).await?;
+
+    sqlx::query(
+        "UPDATE moa.execution_node_state SET node_status='completed', \
+             materialization_complete=TRUE,aggregate_complete=TRUE,aggregate_output='{}'::JSONB, \
+             updated_at=NOW() WHERE run_uid=$1 AND node_id='companies'",
+    )
+    .bind(run.run_uid)
+    .execute(&pool)
+    .await?;
+    set_run_status_path(&pool, run.run_uid, &["running"]).await?;
+    let current = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("coverage run remains visible");
+    let RunControllerClaimOutcome::Claimed(current) = repository
+        .claim_controller_wake(
+            scope,
+            run.run_uid,
+            current.controller_generation,
+            current.wake_epoch,
+        )
+        .await?
+    else {
+        panic!("coverage completion wake must be claimable");
+    };
+
+    let error = repository
+        .advance_completion_projection(
+            scope,
+            &ExecutionConfig::default(),
+            CompletionAdvanceRequest {
+                run_uid: run.run_uid,
+                controller_generation: current.controller_generation,
+                wake_epoch: current.wake_epoch,
+                page_size: 1,
+                now: Utc::now(),
+            },
+        )
+        .await
+        .expect_err("coverage above map max_items must fail before evidence is built");
+    let message = match error {
+        moa_execution::Error::InvalidRepositoryData { message } => message,
+        other => panic!("unexpected coverage bound error: {other:?}"),
+    };
+    assert_eq!(
+        message,
+        "coverage all_companies expected item count 2 exceeds map companies max_items 1"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn failed_and_unknown_outcome_tasks_cancel_transitive_unmaterialized_dependents_db()
 -> TestResult {
@@ -58,18 +161,19 @@ async fn failed_and_unknown_outcome_tasks_cancel_transitive_unmaterialized_depen
     let scope = ExecutionScope::Tenant { tenant_id };
     let config = ExecutionConfig::default();
 
-    for (case, outcome, expected_task_status) in [
+    for (case, outcome, expected_task_status, expected_failure_class) in [
         (
-            "failed",
+            "invalid-output",
             ExecutionTaskOutcome {
                 schema_version: 1,
                 usage: usage(1),
                 result: ExecutionTaskResult::Failed {
-                    class: ExecutionFailureClass::Terminal,
-                    message: "source failed".to_string(),
+                    class: ExecutionFailureClass::InvalidOutput,
+                    message: "source output did not match its schema".to_string(),
                 },
             },
             ExecutionTaskStatus::Failed,
+            ExecutionFailureClass::InvalidOutput,
         ),
         (
             "unknown-outcome",
@@ -81,6 +185,7 @@ async fn failed_and_unknown_outcome_tasks_cancel_transitive_unmaterialized_depen
                 },
             },
             ExecutionTaskStatus::UnknownOutcome,
+            ExecutionFailureClass::Terminal,
         ),
     ] {
         let mut candidate = new_run(
@@ -98,11 +203,6 @@ async fn failed_and_unknown_outcome_tasks_cancel_transitive_unmaterialized_depen
         candidate.plan.estimate.tasks = 3;
         let run = create_run(&repository, scope, candidate).await?;
         let source = logical_task(run.run_uid, "source", case, estimate(1));
-        assert!(
-            repository
-                .initialize_scheduler_state(scope, run.run_uid)
-                .await?
-        );
         assert!(matches!(
             repository
                 .materialize_ready_page(
@@ -229,6 +329,22 @@ async fn failed_and_unknown_outcome_tasks_cancel_transitive_unmaterialized_depen
                     assert_eq!(
                         pending_terminal.status,
                         ExecutionRunStatus::Failed,
+                        "{case}"
+                    );
+                    assert_eq!(
+                        pending_terminal.reason,
+                        ExecutionTerminalReason::TaskFailure,
+                        "{case}"
+                    );
+                    assert_eq!(
+                        pending_terminal.terminal_evidence,
+                        ExecutionTerminalEvidence {
+                            cause: ExecutionTerminalCause::TaskFailure {
+                                class: expected_failure_class.clone(),
+                            },
+                            satisfied_requirement_count: 0,
+                            requirement_count: 0,
+                        },
                         "{case}"
                     );
                     break;
@@ -464,7 +580,10 @@ async fn replan_stop_completion_pages_rebind_exact_wake_without_duplicate_verifi
         ExecutionRunStatus::Queued,
         budget(20),
     );
-    candidate.plan.definition.nodes = vec![output_node()];
+    candidate.plan.definition.nodes = vec![
+        output_node(),
+        output_node_with_dependencies("unmaterialized_descendant", &["output"]),
+    ];
     candidate.goal.completion_checks = vec![CompletionCheck {
         id: "semantic".to_string(),
         description: "Verifier must not be materialized after ReplanStop".to_string(),
@@ -561,25 +680,44 @@ async fn replan_stop_completion_pages_rebind_exact_wake_without_duplicate_verifi
     .execute(&pool)
     .await?;
     let amendment_hash: ExecutionHash = "a".repeat(64).parse()?;
+    let stop_request = NewExecutionReplanStopIntent {
+        run_uid: run.run_uid,
+        session_id: run.session_id,
+        base_plan_revision: run.plan_revision,
+        origin_task_id: origin,
+        task_generation: 1,
+        amendment_hash,
+        stop_reason: ReplanStopReason::RepeatedFailure,
+        detail: Some("same failure exhausted replan policy".to_string()),
+    };
     let ReplanStopIntentWriteOutcome::Applied(queued) = repository
-        .request_replan_stop(
-            scope,
-            &ExecutionConfig::default(),
-            NewExecutionReplanStopIntent {
-                run_uid: run.run_uid,
-                session_id: run.session_id,
-                base_plan_revision: run.plan_revision,
-                origin_task_id: origin,
-                task_generation: 1,
-                amendment_hash,
-                stop_reason: ReplanStopReason::RepeatedFailure,
-                detail: Some("same failure exhausted replan policy".to_string()),
-            },
-        )
-        .await?
+        .request_replan_stop(scope, &ExecutionConfig::default(), stop_request.clone())
+        .await
+        .expect("fresh ReplanStop request must remain repository-valid")
     else {
         panic!("fresh ReplanStop intent must persist with one activation");
     };
+    let descendant: (String, bool, bool, i64, i64) = sqlx::query_as(
+        "SELECT node_status,materialization_complete,aggregate_complete, \
+                remaining_dependency_count,total_task_count \
+         FROM moa.execution_node_state WHERE run_uid=$1 AND node_id='unmaterialized_descendant'",
+    )
+    .bind(run.run_uid)
+    .fetch_one(&pool)
+    .await
+    .expect("unmaterialized descendant node state must remain present");
+    assert_eq!(
+        descendant,
+        ("cancelled".to_string(), true, true, 0, 0),
+        "ReplanStop must close every unmaterialized descendant before its controller wake"
+    );
+    let ReplanStopIntentWriteOutcome::Replayed(replayed) = repository
+        .request_replan_stop(scope, &ExecutionConfig::default(), stop_request)
+        .await?
+    else {
+        panic!("exact ReplanStop intent replay must remain idempotent");
+    };
+    assert_eq!(replayed.wake_epoch, queued.wake_epoch);
     let mut wake_epoch = queued.wake_epoch;
     let mut source_progress_at = None;
     let mut page_count = 0_u32;
@@ -684,9 +822,9 @@ async fn replan_stop_completion_pages_rebind_exact_wake_without_duplicate_verifi
             }
             other => panic!("unexpected ReplanStop completion outcome: {other:?}"),
         }
-        assert!(page_count <= 4, "ReplanStop cursor failed to make progress");
+        assert!(page_count <= 5, "ReplanStop cursor failed to make progress");
     }
-    assert_eq!(page_count, 4, "three task pages plus one node page");
+    assert_eq!(page_count, 5, "three task pages plus two node pages");
     let verifier_count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM moa.execution_task WHERE run_uid=$1 AND node_id LIKE '@check/%'",
     )

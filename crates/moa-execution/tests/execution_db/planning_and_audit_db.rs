@@ -1,6 +1,8 @@
 //! Planning-context, normalized-audit, confirmation, and amendment persistence contracts.
 
 use super::support::*;
+use moa_artifacts::execution_plan::{ExecutionNode, ExecutionOperation};
+use moa_execution::capability::node_output_hash;
 use moa_execution::repository::planning_budget::{
     AmendmentPlanningCallReconcileOutcome, AmendmentPlanningCallReconcileRequest,
     AmendmentPlanningCallReservation, AmendmentPlanningCallReservationOutcome,
@@ -487,6 +489,34 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
     assert_eq!(planner_evidence.usage.input_tokens_cache_read, 5);
     assert_eq!(planner_evidence.usage.output_tokens, 8);
     assert_eq!(planner_evidence.cost_microusd, 29);
+    let reconstructed = moa_test_support::execution_audits::load_execution_planning_audits(
+        test_db.database_url(),
+        session_id,
+    )
+    .await?;
+    assert_eq!(
+        reconstructed.len(),
+        2,
+        "route and planner audit must both reconstruct"
+    );
+    let ExecutionPlanningAuditPayload::PlannerCall {
+        usage,
+        cost_microusd,
+        ..
+    } = &reconstructed[1].payload
+    else {
+        panic!("second reconstructed audit must be the planner call");
+    };
+    assert_eq!(
+        *usage,
+        ExecutionRouteUsage {
+            input_tokens_uncached: 21,
+            input_tokens_cache_write: 3,
+            input_tokens_cache_read: 5,
+            output_tokens: 8,
+        }
+    );
+    assert_eq!(*cost_microusd, 29);
     let mut planner_retry = planner.clone();
     let ExecutionPlanningAuditPayload::PlannerCall {
         duration_micros,
@@ -871,23 +901,63 @@ async fn confirmation_is_plan_hash_bound_and_exact_replay_only_db() -> TestResul
 
 #[tokio::test]
 async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> TestResult {
-    // Pins: accepted replans preserve confirmation identity, append history, and supersede one waiting task.
+    // Pins: accepted replans atomically supersede their wait and replace only mutable node state;
+    // completed dependencies survive while replacement nodes become immediately actionable.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let repository = ExecutionRepository::new(test_db.store().pool().clone());
     let tenant_id = TenantId::new();
     let scope = ExecutionScope::Tenant { tenant_id };
-    let created = create_run(
-        &repository,
-        scope,
-        new_run(
-            tenant_id,
-            None,
-            "amendment",
-            ExecutionRunStatus::AwaitingConfirmation,
-            budget(10),
-        ),
-    )
-    .await?;
+    let retry = RetryPolicy {
+        max_attempts: 1,
+        initial_backoff_ms: 0,
+        max_backoff_ms: 0,
+    };
+    let node = |id: &str, depends_on: Vec<String>| ExecutionNode {
+        id: id.to_string(),
+        requirement_ids: vec!["req".to_string()],
+        depends_on,
+        when: None,
+        input: json!({}),
+        output_schema: json!({"type": "object"}),
+        operation: ExecutionOperation::Output { value: json!({}) },
+        compensation: None,
+        retry: retry.clone(),
+        budget: None,
+    };
+    let preserved = node("preserved", Vec::new());
+    let review_wait_policy = ExecutionWaitPolicy {
+        expiry: ExecutionTemporalTarget::After { delay_seconds: 600 },
+        on_expiry: ExecutionWaitExpiryAction::FailTask,
+    };
+    let review = ExecutionNode {
+        id: "preserved_review".to_string(),
+        requirement_ids: vec!["req".to_string()],
+        depends_on: Vec::new(),
+        when: None,
+        input: json!({}),
+        output_schema: json!({"type": "object"}),
+        operation: ExecutionOperation::Review {
+            prompt: "approve preserved work".to_string(),
+            wait_policy: review_wait_policy.clone(),
+        },
+        compensation: None,
+        retry: retry.clone(),
+        budget: None,
+    };
+    let replan = node("replan", vec!["preserved".to_string()]);
+    let old_terminal = node("old_terminal", vec!["replan".to_string()]);
+    let replacement = node("replacement", vec!["preserved".to_string()]);
+    let new_terminal = node("new_terminal", vec!["replacement".to_string()]);
+    let mut candidate = new_run(
+        tenant_id,
+        None,
+        "amendment",
+        ExecutionRunStatus::AwaitingConfirmation,
+        budget(10),
+    );
+    candidate.plan.definition.nodes = vec![preserved.clone(), review.clone(), replan, old_terminal];
+    candidate.plan.estimate.tasks = 4;
+    let created = create_run(&repository, scope, candidate).await?;
     let ConfirmationOutcome::Confirmed(run) = repository
         .confirm_run(
             scope,
@@ -899,9 +969,19 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
     else {
         panic!("amendment fixture must begin from a confirmed plan");
     };
+    let mut review_task = logical_task(run.run_uid, "preserved_review", "", estimate(1));
+    review_task.kind = LogicalTaskKind::Review {
+        prompt: "approve preserved work".to_string(),
+        wait_policy: review_wait_policy,
+    };
     let task = logical_task(run.run_uid, "replan", "", estimate(1));
     repository
-        .materialize_tasks(scope, run.run_uid, 1, vec![task.clone()])
+        .materialize_tasks(
+            scope,
+            run.run_uid,
+            1,
+            vec![review_task.clone(), task.clone()],
+        )
         .await?;
     reserve_and_start(&repository, scope, run.run_uid, task.task_id).await?;
     assert!(matches!(
@@ -910,6 +990,70 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
             .await?,
         TaskOutcomeWrite::Applied { .. }
     ));
+    set_task_status_path(
+        test_db.store().pool(),
+        review_task.task_id,
+        task_setup_path("waiting_review"),
+    )
+    .await?;
+    let review_waiting_since = moa_test_support::fixtures::pg_now() - Duration::minutes(1);
+    let review_expiry_at = review_waiting_since + Duration::minutes(10);
+    sqlx::query(
+        "UPDATE moa.execution_task SET attempt_state='waiting',waiting_since=$2,updated_at=NOW() \
+         WHERE task_id=$1",
+    )
+    .bind(review_task.task_id.as_uuid())
+    .bind(review_waiting_since)
+    .execute(test_db.store().pool())
+    .await?;
+    let preserved_output = json!({"result": "kept"});
+    sqlx::query(
+        "UPDATE moa.execution_node_state SET node_status='completed', \
+             materialization_complete=TRUE,aggregate_complete=TRUE,aggregate_output=$3, \
+             aggregate_output_hash=$4 WHERE run_uid=$1 AND node_id=$2",
+    )
+    .bind(run.run_uid)
+    .bind("preserved")
+    .bind(&preserved_output)
+    .bind(node_output_hash(&preserved_output)?.to_string())
+    .execute(test_db.store().pool())
+    .await?;
+    sqlx::query(
+        "UPDATE moa.execution_node_state SET node_status='waiting', \
+             materialization_complete=TRUE,total_task_count=1,waiting_task_count=1 \
+         WHERE run_uid=$1 AND node_id='replan'",
+    )
+    .bind(run.run_uid)
+    .execute(test_db.store().pool())
+    .await?;
+    sqlx::query(
+        "UPDATE moa.execution_node_state SET node_status='waiting', \
+             materialization_complete=TRUE,total_task_count=1,waiting_task_count=1 \
+         WHERE run_uid=$1 AND node_id='preserved_review'",
+    )
+    .bind(run.run_uid)
+    .execute(test_db.store().pool())
+    .await?;
+    let preserved_review_reason = moa_execution::state::WaitingReason::Review {
+        task_id: review_task.task_id,
+        prompt: "approve preserved work".to_string(),
+        wait_policy: ExecutionWaitPolicy {
+            expiry: ExecutionTemporalTarget::At {
+                at: review_expiry_at,
+            },
+            on_expiry: ExecutionWaitExpiryAction::FailTask,
+        },
+    };
+    sqlx::query(
+        "UPDATE moa.execution_run SET waiting_task_count=2,waiting_review_task_count=1, \
+             waiting_replan_task_count=1,waiting_since=$2,waiting_reasons=$3, \
+             waiting_reasons_truncated=TRUE WHERE run_uid=$1",
+    )
+    .bind(run.run_uid)
+    .bind(review_waiting_since)
+    .bind(serde_json::to_value([preserved_review_reason.clone()])?)
+    .execute(test_db.store().pool())
+    .await?;
 
     let amendment = PlanAmendment {
         base_plan_revision: 1,
@@ -917,10 +1061,13 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
         evidence: json!({ "source": "unavailable" }),
         operations: Vec::new(),
     };
+    let mut replacement_plan = canonical_plan(2);
+    replacement_plan.definition.nodes = vec![preserved, review, replacement, new_terminal];
+    replacement_plan.estimate.tasks = 3;
     let validated = ValidatedAmendment {
         amendment_hash: amendment_hash(&amendment)?,
         amendment,
-        active_plan: canonical_plan(2),
+        active_plan: replacement_plan.clone(),
         requirement_mapping: [("replacement".to_string(), vec!["req".to_string()])]
             .into_iter()
             .collect(),
@@ -939,6 +1086,40 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
             .await?,
         AmendmentWrite::Conflict
     );
+    sqlx::query(
+        "UPDATE moa.execution_run SET waiting_task_count=3,waiting_replan_task_count=2 \
+         WHERE run_uid=$1",
+    )
+    .bind(run.run_uid)
+    .execute(test_db.store().pool())
+    .await?;
+    assert_eq!(
+        repository
+            .append_amendment(
+                scope,
+                &ExecutionConfig::default(),
+                run.run_uid,
+                1,
+                validated.clone(),
+            )
+            .await?,
+        AmendmentWrite::Conflict,
+        "one planner amendment must supersede exactly one WaitingReplan task"
+    );
+    assert_eq!(
+        listed_task(&repository, scope, run.run_uid, task.task_id)
+            .await?
+            .status,
+        ExecutionTaskStatus::WaitingReplan,
+        "the exact-count conflict must roll back task supersession"
+    );
+    sqlx::query(
+        "UPDATE moa.execution_run SET waiting_task_count=2,waiting_replan_task_count=1 \
+         WHERE run_uid=$1",
+    )
+    .bind(run.run_uid)
+    .execute(test_db.store().pool())
+    .await?;
     let AmendmentWrite::Applied(amended) = repository
         .append_amendment(
             scope,
@@ -951,7 +1132,20 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
     else {
         panic!("expected applied amendment");
     };
+    let assert_preserved_review_wait = |projection: &ExecutionRunRecord| {
+        assert_eq!(projection.status, ExecutionRunStatus::WaitingReview);
+        assert_eq!(projection.waiting_task_count, 1);
+        assert_eq!(projection.waiting_review_task_count, 1);
+        assert_eq!(projection.waiting_replan_task_count, 0);
+        assert_eq!(
+            projection.waiting_reasons,
+            vec![preserved_review_reason.clone()]
+        );
+        assert!(!projection.waiting_reasons_truncated);
+        assert_eq!(projection.waiting_since, Some(review_waiting_since));
+    };
     assert_eq!(amended.task_ids_to_release, vec![task.task_id]);
+    assert_preserved_review_wait(&amended.run);
     let applied_wake_epoch = amended.run.wake_epoch;
     let amendment_dispatch: (i64, String) = sqlx::query_as(
         "SELECT wake_epoch, payload->>'reason' FROM moa.execution_dispatch_outbox \
@@ -979,6 +1173,7 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
     };
     assert_eq!(replayed.run.wake_epoch, applied_wake_epoch);
     assert_eq!(replayed.task_ids_to_release, vec![task.task_id]);
+    assert_preserved_review_wait(&replayed.run);
     let AmendmentReplayOutcome::Replayed(recovered) = repository
         .recover_amendment_handoff(scope, run.run_uid, run.session_id, 1, &amendment_digest)
         .await?
@@ -989,6 +1184,7 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
     };
     assert_eq!(recovered.run.wake_epoch, applied_wake_epoch);
     assert_eq!(recovered.task_ids_to_release, vec![task.task_id]);
+    assert_preserved_review_wait(&recovered.run);
     assert_eq!(
         repository
             .recover_amendment_handoff(
@@ -1003,9 +1199,9 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
     );
     let amended = amended.run;
     assert_eq!(amended.plan_revision, 2);
-    assert_eq!(amended.status, ExecutionRunStatus::Running);
+    assert_preserved_review_wait(&amended);
     assert_eq!(amended.initial_plan_hash, run.initial_plan_hash);
-    assert_eq!(amended.active_plan_hash, canonical_plan(2).plan_hash);
+    assert_eq!(amended.active_plan_hash, replacement_plan.plan_hash);
     assert_eq!(amended.confirmed_plan_hash, Some(run.active_plan_hash));
     assert_ne!(amended.confirmed_plan_hash, Some(amended.active_plan_hash));
     assert_eq!(amended.plan_history.len(), 1);
@@ -1030,6 +1226,34 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
     );
     assert_eq!(amended.reserved.tasks, 0);
     assert_eq!(amended.consumed.tasks, 1);
+    let node_states: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT node_id,node_status,dependency_count,remaining_dependency_count \
+         FROM moa.execution_node_state WHERE run_uid=$1 ORDER BY node_order",
+    )
+    .bind(run.run_uid)
+    .fetch_all(test_db.store().pool())
+    .await?;
+    assert_eq!(
+        node_states,
+        vec![
+            ("preserved".to_string(), "completed".to_string(), 0, 0),
+            ("preserved_review".to_string(), "waiting".to_string(), 0, 0,),
+            ("replacement".to_string(), "pending".to_string(), 1, 0),
+            ("new_terminal".to_string(), "pending".to_string(), 1, 1),
+        ]
+    );
+    let activation = repository
+        .load_activation_projection(scope, run.run_uid, 10)
+        .await?
+        .expect("amended run remains schedulable");
+    assert_eq!(
+        activation
+            .nodes
+            .iter()
+            .map(|node| node.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["replacement"]
+    );
     assert_eq!(
         repository
             .confirm_run(
@@ -1044,10 +1268,16 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
     let page = repository
         .list_tasks(scope, run.run_uid, ExecutionTaskPageRequest::default())
         .await?;
-    assert_eq!(page.tasks[0].status, ExecutionTaskStatus::Cancelled);
-    assert_eq!(page.tasks[0].actual_tasks, 1);
+    let persisted_task = page
+        .tasks
+        .iter()
+        .find(|persisted| persisted.task_id == task.task_id)
+        .expect("superseded replan task must remain in the run task projection")
+        .clone();
+    assert_eq!(persisted_task.status, ExecutionTaskStatus::Cancelled);
+    assert_eq!(persisted_task.actual_tasks, 1);
     assert_eq!(
-        page.tasks[0].current_outcome,
+        persisted_task.current_outcome,
         Some(ExecutionTaskOutcome {
             schema_version: 1,
             usage: usage(1),
@@ -1060,7 +1290,6 @@ async fn amendment_append_is_revision_fenced_and_preserves_initial_plan_db() -> 
         .load_run(scope, run.run_uid)
         .await?
         .expect("amended run remains visible");
-    let persisted_task = page.tasks[0].clone();
     assert!(!persisted_task.outcome_audit.is_empty());
     for replacement in [json!([]), json!([{ "replacement": true }])] {
         assert_db_error_contains(

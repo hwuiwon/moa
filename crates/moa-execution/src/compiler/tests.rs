@@ -6,8 +6,8 @@ use chrono::Utc;
 use moa_artifacts::execution_plan::{
     CompletionCheck, CompletionCheckKind, ExecutionBudgetLimit, ExecutionCancelPolicy,
     ExecutionGoalContract, ExecutionNode, ExecutionOperation, ExecutionPlanDefinition,
-    ExecutionRequirement, ExecutionTemporalTarget, ExecutionWaitExpiryAction, ExecutionWaitPolicy,
-    PlanAmendment, PlanAmendmentOperation, RetryPolicy,
+    ExecutionRequirement, ExecutionTemporalTarget, PlanAmendment, PlanAmendmentOperation,
+    RetryPolicy,
 };
 use moa_config::ExecutionConfig;
 use serde_json::json;
@@ -412,10 +412,6 @@ fn output_only_compile_request() -> CompileExecutionRequest {
         },
         plan: ExecutionPlanDefinition {
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: ExecutionWaitPolicy {
-                expiry: ExecutionTemporalTarget::After { delay_seconds: 60 },
-                on_expiry: ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
             nodes: vec![ExecutionNode {

@@ -607,6 +607,13 @@ const SENDERS: &[SenderManifestEntry] = &[
         "dispatch"
     ),
     sender!(
+        "crates/moa-orchestrator/src/services/execution/handlers.rs",
+        "cancel",
+        TRACE_HELPER,
+        "LLMGatewayClient",
+        "cancel_owner"
+    ),
+    sender!(
         "crates/moa-orchestrator/src/services/execution_amendment_planner.rs",
         "complete",
         TRACE_HELPER,
@@ -1525,6 +1532,20 @@ const SENDERS: &[SenderManifestEntry] = &[
         TRACE_HELPER,
         "SessionClient",
         "record_child_signal"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/worker_turn_execution.rs",
+        "request_input_from_parent",
+        TRACE_HELPER,
+        "ToolExecutorClient",
+        "capture_worker_hand_release_fence"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/worker_turn_execution.rs",
+        "request_input_from_parent",
+        TRACE_HELPER,
+        "ToolExecutorClient",
+        "checkpoint_and_release_worker_hand"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/worker_turn_execution.rs",

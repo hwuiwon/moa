@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use moa_core::{
     error::{MoaError, Result},
     types::{
+        contact::ContactId,
         identifiers::{
             HandProvisioningOperationId, ProviderAccountId, SandboxWorkspaceId, TenantId,
             WorkspaceCheckpointId,
@@ -22,6 +23,8 @@ use crate::core::leases::{HandLease, LeaseHandle};
 pub struct TaskHandReleaseIntent<'a> {
     /// Deterministic receipt identity.
     pub receipt_id: Uuid,
+    /// Contact whose RLS scope owns the execution, when contact-scoped.
+    pub contact_id: Option<ContactId>,
     /// Owning execution run.
     pub run_id: moa_core::types::identifiers::ExecutionRunScopeId,
     /// Stable task identity within the run.
@@ -46,6 +49,8 @@ pub struct AbsentTaskHandReleaseIntent {
     pub receipt_id: Uuid,
     /// Tenant owning the execution.
     pub tenant_id: TenantId,
+    /// Contact whose RLS scope owns the execution, when contact-scoped.
+    pub contact_id: Option<ContactId>,
     /// Owning execution run.
     pub run_id: moa_core::types::identifiers::ExecutionRunScopeId,
     /// Stable task identity.
@@ -64,6 +69,8 @@ pub struct CompensationHandReleaseIntent<'a> {
     pub receipt_id: Uuid,
     /// Tenant owning the execution.
     pub tenant_id: TenantId,
+    /// Contact whose RLS scope owns the execution, when contact-scoped.
+    pub contact_id: Option<ContactId>,
     /// Parent session whose hand scope is inspected.
     pub session_id: moa_core::types::identifiers::SessionId,
     /// Owning execution run.
@@ -80,6 +87,24 @@ pub struct CompensationHandReleaseIntent<'a> {
     pub lease: Option<&'a HandLease>,
     /// Absolute recovery deadline for this release operation.
     pub deadline_at: DateTime<Utc>,
+    /// Short database claim expiry used for storage-only finalization retries.
+    pub recovery_claim_expires_at: DateTime<Utc>,
+}
+
+/// Exact pending compensation release whose expired storage claim is renewed.
+pub struct CompensationHandReleaseClaimIntent {
+    /// Tenant owning the execution.
+    pub tenant_id: TenantId,
+    /// Contact whose RLS scope owns the execution, when contact-scoped.
+    pub contact_id: Option<ContactId>,
+    /// Owning execution run.
+    pub run_id: moa_core::types::identifiers::ExecutionRunScopeId,
+    /// Stable compensation identity.
+    pub compensation_id: moa_core::types::identifiers::ExecutionCompensationScopeId,
+    /// Exact logical compensation generation.
+    pub logical_generation: u64,
+    /// Exact bounded attempt generation.
+    pub attempt_generation: u64,
     /// Short database claim expiry used for storage-only finalization retries.
     pub recovery_claim_expires_at: DateTime<Utc>,
 }

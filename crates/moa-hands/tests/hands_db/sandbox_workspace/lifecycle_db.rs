@@ -6,6 +6,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use moa_core::error::MoaError;
 use moa_core::types::{
     action_policy::CallOrigin,
+    contact::ContactId,
     hands::{
         BuiltinPolicyRevision, CpuLimit, DiskLimit, EgressPolicy, HandHandle, LifetimeLimit,
         MemoryLimit, SandboxPolicySnapshot, SandboxProfile, SandboxTier,
@@ -33,8 +34,9 @@ use moa_hands::core::{
         checkpoint::model::{CreateCheckpointRequest, PublishCheckpointCommitRequest},
         model::{
             AbsentTaskHandReleaseIntent, ActivateHydratedWorkspaceRequest,
-            CompensationHandReleaseIntent, CreateWorkspaceRequest, SandboxWorkspace,
-            TaskHandReleaseIntent, WorkspaceTransition, WorkspaceWriterClaim,
+            CompensationHandReleaseClaimIntent, CompensationHandReleaseIntent,
+            CreateWorkspaceRequest, SandboxWorkspace, TaskHandReleaseIntent, WorkspaceTransition,
+            WorkspaceWriterClaim,
         },
         operations::{
             AbsenceObservation, PostgresWorkspaceOperationRepository, WorkspaceOperationIntent,
@@ -67,6 +69,7 @@ async fn seed_cancelling_compensation(
     pool: &sqlx::PgPool,
     tenant_id: TenantId,
     session_id: SessionId,
+    contact_id: Option<ContactId>,
 ) -> (
     ExecutionRunScopeId,
     ExecutionTaskScopeId,
@@ -83,10 +86,6 @@ async fn seed_cancelling_compensation(
             "cancel_policy": "retain_effects",
             "input_schema": {},
             "output_schema": {},
-            "input_wait_policy": {
-                "expiry": {"kind": "after", "delay_seconds": 1},
-                "on_expiry": {"kind": "fail_task"}
-            },
             "nodes": [{
                 "id": "output", "requirement_ids": [], "depends_on": [], "when": null,
                 "input": {}, "output_schema": {},
@@ -105,13 +104,15 @@ async fn seed_cancelling_compensation(
     sqlx::query(
         "INSERT INTO moa.execution_planning_context (\
              planning_context_uid, tenant_id, session_id, originating_user_sequence_num,\
-             originating_user_event_hash, owner_user_id, planning_context_hash, snapshot\
-         ) VALUES ($1, $2, $3, 0, $4, 'hands-release-test', $4, '{}'::JSONB)",
+             originating_user_event_hash, owner_user_id, planning_context_hash, snapshot,\
+             contact_id\
+         ) VALUES ($1, $2, $3, 0, $4, 'hands-release-test', $4, '{}'::JSONB, $5)",
     )
     .bind(planning_context_uid)
     .bind(tenant_id)
     .bind(session_id)
     .bind(&context_hash)
+    .bind(contact_id)
     .execute(pool)
     .await
     .expect("seed execution planning context");
@@ -121,9 +122,9 @@ async fn seed_cancelling_compensation(
              planning_context_uid, planning_context_hash, owner_user_id, goal_contract,\
              initial_plan, active_plan, initial_plan_hash, active_plan_hash,\
              capability_catalog, authorization_envelope, source_provenance, source_kind,\
-             input, admitted_identity, status\
+             input, admitted_identity, status, contact_id\
          ) VALUES ($1, $2, $3, 0, $4, $5, 'hands-release-test', $6, $7, $7, $8, $8,\
-                   $9, $10, $11, 'generated_plan', '{}'::JSONB, $12, 'queued')",
+                   $9, $10, $11, 'generated_plan', '{}'::JSONB, $12, 'queued', $13)",
     )
     .bind(run_id)
     .bind(tenant_id)
@@ -148,6 +149,7 @@ async fn seed_cancelling_compensation(
         "identity_type": "operator", "id": run_id, "tenant_id": tenant_id,
         "api_key_id": null, "acting_on_behalf_of": null
     }))
+    .bind(contact_id)
     .execute(pool)
     .await
     .expect("seed execution run");
@@ -155,15 +157,16 @@ async fn seed_cancelling_compensation(
         "INSERT INTO moa.execution_task (\
              task_id, run_uid, tenant_id, node_id, item_key, plan_revision, status, input,\
              task_kind, retry_policy, estimate_cost_microusd, estimate_tokens, estimate_tasks,\
-             estimate_tool_calls, estimate_retrieved_bytes\
+             estimate_tool_calls, estimate_retrieved_bytes, contact_id\
          ) VALUES ($1, $2, $3, 'forward', 'forward', 1, 'completed', '{}',\
                    '{\"kind\":\"output\",\"value\":null}',\
                    '{\"max_attempts\":2,\"initial_backoff_ms\":1,\"max_backoff_ms\":1}',\
-                   0, 0, 1, 0, 0)",
+                   0, 0, 1, 0, 0, $4)",
     )
     .bind(task_id)
     .bind(run_id)
     .bind(tenant_id)
+    .bind(contact_id)
     .execute(pool)
     .await
     .expect("seed forward task");
@@ -171,9 +174,9 @@ async fn seed_cancelling_compensation(
         "INSERT INTO moa.execution_compensation (\
              compensation_id, run_uid, forward_task_id, tenant_id, registered_sequence,\
              forward_generation, compensator, mapped_input, status, started_at,\
-             attempt_state, attempt_started_at, attempt_deadline_at, release_intent\
+             attempt_state, attempt_started_at, attempt_deadline_at, release_intent, contact_id\
          ) VALUES ($1, $2, $3, $4, 1, 1, $5, '{}', 'running', now(),\
-                   'cancelling', now(), now() + interval '10 minutes', 'pause')",
+                   'cancelling', now(), now() + interval '10 minutes', 'pause', $6)",
     )
     .bind(compensation_id)
     .bind(run_id)
@@ -183,6 +186,7 @@ async fn seed_cancelling_compensation(
         "compensator": {"name": "test.undo", "version": "contract"},
         "input_mapping": {"bindings": []}
     }))
+    .bind(contact_id)
     .execute(pool)
     .await
     .expect("seed cancelling compensation");
@@ -194,6 +198,7 @@ async fn seed_cancelling_task(
     tenant_id: TenantId,
     run_id: ExecutionRunScopeId,
     node_id: &str,
+    contact_id: Option<ContactId>,
 ) -> ExecutionTaskScopeId {
     let task_id = ExecutionTaskScopeId::new();
     sqlx::query(
@@ -201,17 +206,18 @@ async fn seed_cancelling_task(
              task_id, run_uid, tenant_id, node_id, item_key, plan_revision, status, input,\
              task_kind, retry_policy, estimate_cost_microusd, estimate_tokens, estimate_tasks,\
              estimate_tool_calls, estimate_retrieved_bytes, reserved_tasks, reserved_at,\
-             started_at, attempt_state, attempt_started_at, attempt_deadline_at\
+             started_at, attempt_state, attempt_started_at, attempt_deadline_at, contact_id\
          ) VALUES ($1, $2, $3, $4, $4, 1, 'running', '{}',\
                    '{\"kind\":\"output\",\"value\":null}',\
                    '{\"max_attempts\":2,\"initial_backoff_ms\":1,\"max_backoff_ms\":1}',\
                    0, 0, 1, 0, 0, 1, now(), now(), 'cancelling', now(),\
-                   now() + interval '10 minutes')",
+                   now() + interval '10 minutes', $5)",
     )
     .bind(task_id)
     .bind(run_id)
     .bind(tenant_id)
     .bind(node_id)
+    .bind(contact_id)
     .execute(pool)
     .await
     .expect("seed cancelling execution task");
@@ -361,25 +367,34 @@ fn create_request(
 }
 
 #[tokio::test]
-#[ignore = "requires a fresh V60 compose Postgres via MOA_DATABASE_URL"]
+#[ignore = "requires Postgres for an isolated current-schema test database"]
 async fn cancelling_task_without_owned_compute_gets_exact_absence_receipt_db() {
     // Pins: a sandbox-capable task denied before provisioning still obtains a
     // durable exact-attempt absence receipt, while a live lease cannot be hidden
     // behind that no-workspace path.
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&database_url())
+    let test_db = moa_test_support::postgres::bootstrap_test_db()
         .await
-        .expect("test Postgres should be reachable");
+        .expect("bootstrap isolated current-schema Postgres");
+    let pool = test_db.store().pool().clone();
     let tenant_id = TenantId::new();
     let session_id = SessionId::new();
+    let contact_id = ContactId::new();
     seed_session(&pool, session_id, tenant_id).await;
-    let (run_id, _, _) = seed_cancelling_compensation(&pool, tenant_id, session_id).await;
-    let task_id = seed_cancelling_task(&pool, tenant_id, run_id, "never-provisioned").await;
+    let (run_id, _, _) =
+        seed_cancelling_compensation(&pool, tenant_id, session_id, Some(contact_id)).await;
+    let task_id = seed_cancelling_task(
+        &pool,
+        tenant_id,
+        run_id,
+        "never-provisioned",
+        Some(contact_id),
+    )
+    .await;
     let repository = PostgresWorkspaceRepository::new(pool.clone());
     let intent = AbsentTaskHandReleaseIntent {
         receipt_id: uuid::Uuid::now_v7(),
         tenant_id,
+        contact_id: Some(contact_id),
         run_id,
         task_id,
         logical_generation: 1,
@@ -409,13 +424,21 @@ async fn cancelling_task_without_owned_compute_gets_exact_absence_receipt_db() {
     );
     assert_eq!(
         repository
-            .get_task_execution_hand_release_receipt(tenant_id, run_id, task_id, 1, 1)
+            .get_task_execution_hand_release_receipt(
+                tenant_id,
+                Some(contact_id),
+                run_id,
+                task_id,
+                1,
+                1,
+            )
             .await
             .expect("replay exact absence receipt"),
         Some(receipt)
     );
 
-    let live_task_id = seed_cancelling_task(&pool, tenant_id, run_id, "live-owner").await;
+    let live_task_id =
+        seed_cancelling_task(&pool, tenant_id, run_id, "live-owner", Some(contact_id)).await;
     let live_scope = format!("execution:{run_id}:{live_task_id}");
     sqlx::query(
         "INSERT INTO moa.hand_leases (\
@@ -435,6 +458,7 @@ async fn cancelling_task_without_owned_compute_gets_exact_absence_receipt_db() {
             .record_absent_task_execution_hand_release_receipt(AbsentTaskHandReleaseIntent {
                 receipt_id: uuid::Uuid::now_v7(),
                 tenant_id,
+                contact_id: Some(contact_id),
                 run_id,
                 task_id: live_task_id,
                 logical_generation: 1,
@@ -460,12 +484,21 @@ async fn checkpointed_task_destroy_records_exact_release_receipt_db() {
     let pool = test_db.store().pool().clone();
     let tenant_id = TenantId::new();
     let session_id = SessionId::new();
+    let contact_id = ContactId::new();
     let account_id = ProviderAccountId::new();
     let workspace_id = SandboxWorkspaceId::new();
     seed_session(&pool, session_id, tenant_id).await;
     seed_account(&pool, account_id).await;
-    let (run_id, _, _) = seed_cancelling_compensation(&pool, tenant_id, session_id).await;
-    let task_id = seed_cancelling_task(&pool, tenant_id, run_id, "checkpointed-release").await;
+    let (run_id, _, _) =
+        seed_cancelling_compensation(&pool, tenant_id, session_id, Some(contact_id)).await;
+    let task_id = seed_cancelling_task(
+        &pool,
+        tenant_id,
+        run_id,
+        "checkpointed-release",
+        Some(contact_id),
+    )
+    .await;
     let worker_id = format!("execution:{run_id}:{task_id}");
     let workspace_scope = SandboxWorkspaceScope::ExecutionTask { run_id, task_id };
     let workspaces = PostgresWorkspaceRepository::new(pool.clone());
@@ -523,6 +556,7 @@ async fn checkpointed_task_destroy_records_exact_release_receipt_db() {
     let (persisted_receipt_id, claim_token, requested_at) = workspaces
         .begin_task_execution_hand_release(TaskHandReleaseIntent {
             receipt_id,
+            contact_id: Some(contact_id),
             run_id,
             task_id,
             logical_generation: 1,
@@ -660,13 +694,20 @@ async fn checkpointed_task_destroy_records_exact_release_receipt_db() {
         released_at: Utc::now(),
     };
     let finalized = workspaces
-        .record_task_execution_hand_release_receipt(&receipt, claim_token)
+        .record_task_execution_hand_release_receipt(&receipt, claim_token, Some(contact_id))
         .await
         .expect("available checkpoint must finalize the task release receipt");
     assert_eq!(finalized, receipt);
     assert_eq!(
         workspaces
-            .get_task_execution_hand_release_receipt(tenant_id, run_id, task_id, 1, 1)
+            .get_task_execution_hand_release_receipt(
+                tenant_id,
+                Some(contact_id),
+                run_id,
+                task_id,
+                1,
+                1,
+            )
             .await
             .expect("replay finalized task release receipt"),
         Some(receipt)
@@ -674,21 +715,106 @@ async fn checkpointed_task_destroy_records_exact_release_receipt_db() {
 }
 
 #[tokio::test]
-#[ignore = "requires a fresh V60 compose Postgres via MOA_DATABASE_URL"]
+#[ignore = "requires Postgres for an isolated current-schema test database"]
+async fn contact_scoped_compensation_without_compute_gets_exact_release_receipt_db() {
+    // Pins: a contact-scoped compensation that never provisioned compute still crosses the
+    // exact cancelling-owner CAS and persists its replayable verified-absence receipt.
+    let test_db = moa_test_support::postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated current-schema Postgres");
+    let pool = test_db.store().pool().clone();
+    let tenant_id = TenantId::new();
+    let contact_id = ContactId::new();
+    let session_id = SessionId::new();
+    seed_session(&pool, session_id, tenant_id).await;
+    let (run_id, _task_id, compensation_id) =
+        seed_cancelling_compensation(&pool, tenant_id, session_id, Some(contact_id)).await;
+    let hand_scope = format!("execution_compensation:{run_id}:{compensation_id}");
+    let repository = PostgresWorkspaceRepository::new(pool.clone());
+    let receipt_id = uuid::Uuid::now_v7();
+    let deadline_at = Utc::now() + ChronoDuration::minutes(1);
+    let (persisted_receipt_id, claim_token, requested_at) = repository
+        .begin_compensation_execution_hand_release(CompensationHandReleaseIntent {
+            receipt_id,
+            tenant_id,
+            contact_id: Some(contact_id),
+            session_id,
+            run_id,
+            compensation_id,
+            logical_generation: 1,
+            attempt_generation: 1,
+            hand_scope: &hand_scope,
+            lease: None,
+            deadline_at,
+            recovery_claim_expires_at: deadline_at,
+        })
+        .await
+        .expect("contact-scoped compensation should persist its absence intent");
+    assert_eq!(persisted_receipt_id, receipt_id);
+
+    let receipt = ExecutionHandReleaseReceipt {
+        receipt_id,
+        tenant_id,
+        run_id,
+        owner: ExecutionHandReleaseOwner::Compensation {
+            compensation_id,
+            logical_generation: 1,
+        },
+        attempt_generation: 1,
+        workspace_id: None,
+        writer_epoch: None,
+        instance_generation: None,
+        hand_provisioning_operation_id: None,
+        hand_lease_generation: None,
+        checkpoint_id: None,
+        checkpoint_generation: None,
+        checkpoint_manifest_digest: None,
+        checkpoint_logical_bytes: None,
+        requested_at,
+        released_at: Utc::now(),
+    };
+    let finalized = repository
+        .record_compensation_execution_hand_release_receipt(
+            &receipt,
+            session_id,
+            &hand_scope,
+            claim_token,
+            Some(contact_id),
+        )
+        .await
+        .expect("contact-scoped compensation should finalize verified absence");
+    assert_eq!(finalized, receipt);
+    assert_eq!(
+        repository
+            .get_compensation_execution_hand_release_receipt(
+                tenant_id,
+                run_id,
+                compensation_id,
+                1,
+                1,
+            )
+            .await
+            .expect("replay contact-scoped compensation receipt"),
+        Some(receipt)
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres for an isolated current-schema test database"]
 async fn compensation_release_recovers_persisted_destroyed_identity_after_deadline_db() {
     // Pins: a crash after provider teardown but before receipt finalization reuses
     // the pending receipt's exact lease identity after the provider-I/O deadline;
     // deleting that exact destroyed row remains fail-closed.
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&database_url())
+    let test_db = moa_test_support::postgres::bootstrap_test_db()
         .await
-        .expect("test Postgres should be reachable");
+        .expect("bootstrap isolated current-schema Postgres");
+    let pool = test_db.store().pool().clone();
     let tenant_id = TenantId::new();
+    let contact_id = ContactId::new();
     let session_id = SessionId::new();
     seed_session(&pool, session_id, tenant_id).await;
     let (run_id, _task_id, compensation_id) =
-        seed_cancelling_compensation(&pool, tenant_id, session_id).await;
+        seed_cancelling_compensation(&pool, tenant_id, session_id, Some(contact_id)).await;
     let hand_scope = format!("execution_compensation:{run_id}:{compensation_id}");
     let provisioning_operation_id = HandProvisioningOperationId::new();
     let generation = 7_i64;
@@ -724,6 +850,7 @@ async fn compensation_release_recovers_persisted_destroyed_identity_after_deadli
         .begin_compensation_execution_hand_release(CompensationHandReleaseIntent {
             receipt_id,
             tenant_id,
+            contact_id: Some(contact_id),
             session_id,
             run_id,
             compensation_id,
@@ -748,10 +875,10 @@ async fn compensation_release_recovers_persisted_destroyed_identity_after_deadli
             .expect("finalize exact lease destroy")
     );
     sqlx::query(
-        "UPDATE moa.sandbox_execution_hand_release_receipts\
-         SET requested_at = now() - interval '10 minutes',\
-             deadline_at = now() - interval '5 minutes',\
-             claim_expires_at = now() - interval '6 minutes'\
+        "UPDATE moa.sandbox_execution_hand_release_receipts \
+         SET requested_at = now() - interval '10 minutes', \
+             deadline_at = now() - interval '5 minutes', \
+             claim_expires_at = now() - interval '6 minutes' \
          WHERE receipt_id = $1",
     )
     .bind(receipt_id)
@@ -759,14 +886,15 @@ async fn compensation_release_recovers_persisted_destroyed_identity_after_deadli
     .await
     .expect("advance pending release beyond its provider deadline");
     let claim = repository
-        .claim_pending_compensation_execution_hand_release(
+        .claim_pending_compensation_execution_hand_release(CompensationHandReleaseClaimIntent {
             tenant_id,
+            contact_id: Some(contact_id),
             run_id,
             compensation_id,
-            1,
-            1,
-            Utc::now() + ChronoDuration::minutes(5),
-        )
+            logical_generation: 1,
+            attempt_generation: 1,
+            recovery_claim_expires_at: Utc::now() + ChronoDuration::minutes(5),
+        })
         .await
         .expect("renew storage-only recovery claim")
         .expect("expired pending release is reclaimable");
@@ -791,7 +919,7 @@ async fn compensation_release_recovers_persisted_destroyed_identity_after_deadli
     assert!(destroyed.handle.is_none());
 
     sqlx::query(
-        "DELETE FROM moa.hand_leases WHERE tenant_id = $1 AND session_id = $2\
+        "DELETE FROM moa.hand_leases WHERE tenant_id = $1 AND session_id = $2 \
          AND worker_id = $3 AND provisioning_operation_id = $4 AND generation = $5",
     )
     .bind(tenant_id)
@@ -830,6 +958,7 @@ async fn compensation_release_recovers_persisted_destroyed_identity_after_deadli
                 session_id,
                 &hand_scope,
                 claim.claim_token,
+                Some(contact_id),
             )
             .await
             .is_err(),
@@ -855,11 +984,11 @@ async fn compensation_release_recovers_persisted_destroyed_identity_after_deadli
             session_id,
             &hand_scope,
             claim.claim_token,
+            Some(contact_id),
         )
         .await
         .expect("finalize recovered exact receipt");
     assert_eq!(finalized, release_receipt);
-    pool.close().await;
 }
 
 #[tokio::test]

@@ -628,10 +628,6 @@ pub struct EnvOverlay {
     pub session_limits_worker_resume_max_per_window: Option<u32>,
     /// `MOA_SESSION_LIMITS_WORKER_RESUME_WINDOW_MS`.
     pub session_limits_worker_resume_window_ms: Option<u64>,
-    /// `MOA_SESSION_LIMITS_WORKER_INPUT_TIMEOUT_MS`.
-    pub session_limits_worker_input_timeout_ms: Option<u64>,
-    /// `MOA_SESSION_LIMITS_COORDINATOR_INPUT_TIMEOUT_MS`.
-    pub session_limits_coordinator_input_timeout_ms: Option<u64>,
     /// `MOA_SESSION_LIMITS_WORKER_HEARTBEAT_INTERVAL_MS`.
     pub session_limits_worker_heartbeat_interval_ms: Option<u64>,
     /// `MOA_SESSION_LIMITS_WORKER_HEARTBEAT_STALE_MS`.

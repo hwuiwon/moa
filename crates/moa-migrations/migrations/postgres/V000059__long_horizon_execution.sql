@@ -183,9 +183,8 @@ AS $$
        AND moa.execution_wait_expiry_action_is_valid(candidate -> 'on_expiry')
 $$;
 
--- The old four-key definition remains valid only so retained terminal audit
--- rows can continue to satisfy their original check constraint. Every new run
--- and serving skill template is required to use the current five-key shape.
+-- The current plan contract has exactly four top-level keys. Runtime input has
+-- no plan-level expiry policy; input waits remain durable until input arrives.
 CREATE OR REPLACE FUNCTION moa.execution_plan_definition_is_current(candidate JSONB)
 RETURNS BOOLEAN
 LANGUAGE plpgsql
@@ -198,14 +197,12 @@ BEGIN
     IF NOT moa.execution_json_object_has_exact_keys(
            candidate,
            ARRAY[
-               'cancel_policy', 'input_schema', 'output_schema', 'input_wait_policy',
-               'nodes'
+               'cancel_policy', 'input_schema', 'output_schema', 'nodes'
            ]
        )
        OR candidate ->> 'cancel_policy' NOT IN (
            'retain_effects', 'compensate_committed'
        )
-       OR NOT moa.execution_wait_policy_is_valid(candidate -> 'input_wait_policy')
        OR jsonb_typeof(candidate -> 'nodes') <> 'array' THEN
         RETURN FALSE;
     END IF;
@@ -254,26 +251,16 @@ AS $$
        AND candidate ->> 'plan_hash' ~ '^[0-9a-f]{64}$'
 $$;
 
--- V55 bound both run snapshots to the old four-key plan validator. Replace
--- those constraints at the cutover boundary so every nonterminal/current run
--- uses the five-key long-horizon contract. Pre-cutover terminal rows remain
--- immutable audit evidence and are the only permitted legacy shape.
+-- Bind every stored run snapshot to the current plan contract. This is a hard
+-- break: terminal rows do not retain an alternate legacy shape.
 ALTER TABLE moa.execution_run
     DROP CONSTRAINT execution_run_initial_plan_check,
     DROP CONSTRAINT execution_run_active_plan_check,
     ADD CONSTRAINT execution_run_initial_plan_check CHECK (
-        status IN (
-            'completed', 'partial', 'blocked', 'unsupported',
-            'failed', 'cancelled'
-        )
-        OR moa.execution_plan_snapshot_is_current(initial_plan)
+        moa.execution_plan_snapshot_is_current(initial_plan)
     ),
     ADD CONSTRAINT execution_run_active_plan_check CHECK (
-        status IN (
-            'completed', 'partial', 'blocked', 'unsupported',
-            'failed', 'cancelled'
-        )
-        OR moa.execution_plan_snapshot_is_current(active_plan)
+        moa.execution_plan_snapshot_is_current(active_plan)
     );
 
 CREATE OR REPLACE FUNCTION moa.skill_execution_template_is_valid(candidate JSONB)
@@ -305,6 +292,7 @@ ALTER TABLE moa.execution_run
         CHECK (activation_state IN ('idle', 'queued', 'advancing', 'paused', 'terminal')),
     ADD COLUMN next_wake_at TIMESTAMPTZ,
     ADD COLUMN waiting_since TIMESTAMPTZ,
+    ADD COLUMN budget_deadline_suspended_at TIMESTAMPTZ,
     ADD COLUMN last_progress_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     ADD COLUMN pause_requested_at TIMESTAMPTZ,
     ADD COLUMN paused_at TIMESTAMPTZ,
@@ -356,6 +344,10 @@ ALTER TABLE moa.execution_run
     ADD CONSTRAINT execution_run_pause_timestamp_order_check CHECK (
         paused_at IS NULL
         OR (pause_requested_at IS NOT NULL AND paused_at >= pause_requested_at)
+    ),
+    ADD CONSTRAINT execution_run_budget_deadline_state_check CHECK (
+        budget_deadline_suspended_at IS NULL
+        OR budget_deadline_at IS NOT NULL
     );
 
 ALTER TABLE moa.execution_run
@@ -553,7 +545,9 @@ CREATE INDEX execution_run_nonterminal_idx
 -- leading on the deadline keeps the guard an index-only scan.
 CREATE INDEX execution_run_overdue_deadline_idx
     ON moa.execution_run (budget_deadline_at, run_uid)
-    WHERE budget_deadline_at IS NOT NULL AND status IN (
+    WHERE budget_deadline_at IS NOT NULL
+      AND budget_deadline_suspended_at IS NULL
+      AND status IN (
         'awaiting_confirmation', 'queued', 'running', 'waiting_input',
         'waiting_review', 'waiting_signal', 'waiting_timer', 'waiting_external',
         'waiting_replan', 'pause_requested', 'pausing', 'paused', 'compensating'

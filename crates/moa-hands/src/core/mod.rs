@@ -49,7 +49,8 @@ use crate::adapters::local::LocalHandProvider;
 
 pub use dispatch::{
     AuthorizedToolCall, DeferredWorkspaceToolOutput, ExecutionHandReleaseRequest,
-    JournaledWorkspaceCommit, PendingConnectorToolOutput,
+    JournaledWorkspaceCommit, PendingConnectorToolOutput, WorkerHandReleaseFence,
+    WorkerHandReleaseRequest,
 };
 use leases::{HAND_LEASE_SESSION_PAGE_SIZE, HandLeaseStore};
 pub use maintenance_provider_inventory::SandboxProviderInventory;

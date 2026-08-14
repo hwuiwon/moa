@@ -226,12 +226,6 @@ async fn seed_execution_analytics_fixture(
     let plan = serde_json::to_value(CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::At {
-                    at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
-                },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
             nodes: Vec::new(),
@@ -263,12 +257,16 @@ async fn seed_execution_analytics_fixture(
 
     sqlx::query(
         "INSERT INTO moa.execution_run \
-             (run_uid, tenant_id, session_id, originating_user_sequence_num, planning_context_uid, \
-              planning_context_hash, owner_user_id, goal_contract, initial_plan, active_plan, \
+              (run_uid, tenant_id, session_id, originating_user_sequence_num, planning_context_uid, \
+              planning_context_hash, owner_user_id, admitted_identity, goal_contract, initial_plan, active_plan, \
               initial_plan_hash, active_plan_hash, capability_catalog, authorization_envelope, \
               source_provenance, source_kind, skill_template_ref, \
               skill_template_revision_uid, input, status, progress_total_tasks) \
          VALUES ($1, $2, $3, 1, $4, $5, 'user-1', \
+                 jsonb_build_object( \
+                    'identity_type', 'service', 'id', $2::TEXT, \
+                    'tenant_id', $2::TEXT, 'api_key_id', NULL, \
+                    'acting_on_behalf_of', NULL), \
                  '{\"requirements\":[{\"id\":\"r1\"},{\"id\":\"r2\"}], \
                    \"completion_checks\":[{\"id\":\"c1\"},{\"id\":\"c2\"}]}'::JSONB, \
                  $8, $8, $6, $6, '{}'::JSONB, '{}'::JSONB, \

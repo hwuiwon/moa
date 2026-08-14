@@ -746,13 +746,6 @@ fn validate_temporal_contract(
         );
     }
 
-    validate_input_wait_policy(
-        &plan.input_wait_policy,
-        "plan.input_wait_policy",
-        now,
-        deadline_at,
-        report,
-    );
     for (index, node) in plan.nodes.iter().enumerate() {
         let path = format!("plan.nodes[{index}].operation");
         match &node.operation {
@@ -817,34 +810,6 @@ fn validate_wait_policy(
         deadline_at,
         report,
     );
-}
-
-/// Validates the plan-level expiry policy for runtime `NeedsInput` outcomes.
-///
-/// Unlike a `Review` or `WaitSignal` policy, this one policy settles whichever
-/// logical task returned `NeedsInput`, so no single declared output can be checked
-/// against a specific node's `output_schema` at compile time. `ContinueWith` is
-/// therefore rejected outright rather than deferred to the materialization
-/// transaction, where the schema check is a non-retryable failure.
-fn validate_input_wait_policy(
-    policy: &moa_artifacts::execution_plan::ExecutionWaitPolicy,
-    path: &str,
-    now: DateTime<Utc>,
-    deadline_at: DateTime<Utc>,
-    report: &mut ExecutionValidationReport,
-) {
-    validate_wait_policy(policy, path, now, deadline_at, report);
-    if matches!(
-        policy.on_expiry,
-        ExecutionWaitExpiryAction::ContinueWith { .. }
-    ) {
-        report.error(
-            "unsupported_input_wait_expiry",
-            format!("{path}.on_expiry"),
-            "input wait expiry must fail the waiting task; continue_with cannot be validated \
-             against the output schema of the node that requested input",
-        );
-    }
 }
 
 fn validate_temporal_target(

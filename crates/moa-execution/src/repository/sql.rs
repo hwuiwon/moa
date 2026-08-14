@@ -778,12 +778,33 @@ pub(super) const SUPERSEDE_REPLAN_TASK_SQL: &str = r#"
 "#;
 
 pub(super) const APPEND_AMENDMENT_SQL: &str = r#"
+    WITH remaining_wait AS (
+        SELECT MIN(waiting_since) AS waiting_since
+        FROM moa.execution_task
+        WHERE run_uid=$1 AND task_id<>$14
+          AND status IN ('waiting_input','waiting_review','waiting_signal',
+                         'waiting_timer','waiting_external','waiting_replan')
+    ), remaining_reasons AS (
+        SELECT COALESCE(jsonb_agg(reason ORDER BY ordinal), '[]'::JSONB) AS reasons
+        FROM moa.execution_run AS source,
+             jsonb_array_elements(source.waiting_reasons)
+                 WITH ORDINALITY AS item(reason, ordinal)
+        WHERE source.run_uid=$1 AND COALESCE(reason->>'task_id','')<>$14::TEXT
+    )
     UPDATE moa.execution_run
     SET active_plan = $4,
         active_plan_hash = $5,
         plan_revision = $3,
         plan_history = plan_history || jsonb_build_array($6::JSONB),
-        status = 'running',
+        status = CASE
+            WHEN waiting_input_task_count > 0 THEN 'waiting_input'
+            WHEN waiting_review_task_count > 0 THEN 'waiting_review'
+            WHEN waiting_signal_task_count > 0 THEN 'waiting_signal'
+            WHEN waiting_timer_task_count > 0 THEN 'waiting_timer'
+            WHEN waiting_external_task_count > 0 THEN 'waiting_external'
+            WHEN waiting_replan_task_count - 1 > 0 THEN 'waiting_replan'
+            ELSE 'running'
+        END,
         reserved_cost_microusd = $7,
         reserved_tokens = $8,
         reserved_tasks = $9,
@@ -792,8 +813,16 @@ pub(super) const APPEND_AMENDMENT_SQL: &str = r#"
         consumed_tasks = $12,
         budget_overrun = $13,
         progress_cancelled_tasks = progress_cancelled_tasks + 1,
+        waiting_task_count = waiting_task_count - 1,
+        waiting_replan_task_count = waiting_replan_task_count - 1,
+        waiting_reasons = remaining_reasons.reasons,
+        waiting_reasons_truncated = jsonb_array_length(remaining_reasons.reasons)
+            < waiting_task_count - 1,
+        waiting_since = remaining_wait.waiting_since,
         updated_at = NOW()
+    FROM remaining_wait, remaining_reasons
     WHERE run_uid = $1 AND plan_revision = $2 AND status = 'waiting_replan'
+      AND waiting_task_count > 0 AND waiting_replan_task_count = 1
     RETURNING *
 "#;
 

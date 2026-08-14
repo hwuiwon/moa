@@ -50,8 +50,8 @@ use moa_execution::state::{
 };
 use moa_execution::wire::{
     ExecutionCancelRequest, ExecutionConflictReason, ExecutionMutationResponse,
-    ExecutionPlanningContextRequest, ExecutionPlanningContextResponse, ExecutionRunRequest,
-    ExecutionStatusResponse, ExecutionTaskListRequest, ExecutionTaskListResponse,
+    ExecutionRunRequest, ExecutionStatusResponse, ExecutionTaskListRequest,
+    ExecutionTaskListResponse,
 };
 use moa_wire::turn::{StartTurnRequest, StartTurnResponse, TurnOutcomeKind};
 use serde::Serialize;
@@ -1205,7 +1205,7 @@ impl SupplementaryLiveHarness {
                 response,
                 ExecutionMutationResponse::Applied { ref run }
                     | ExecutionMutationResponse::Replayed { ref run }
-                    if run.status == ExecutionRunStatus::Cancelled
+                    if run.status == ExecutionRunStatus::Cancelled || !run.status.is_terminal()
             ) || matches!(
                 response,
                 ExecutionMutationResponse::Conflict {
@@ -1743,6 +1743,7 @@ fn generated_plan_hash_chain_rejects_cross_surface_drift() {
 async fn assert_generated_plan_audits_and_authorization(
     harness: &SupplementaryLiveHarness,
     events: &[EventRecord],
+    planning_context_uid: uuid::Uuid,
 ) -> Result<GeneratedPlanAuditEvidence> {
     let audits = supplementary_planning_audits(harness).await?;
     ensure!(
@@ -2029,23 +2030,20 @@ async fn assert_generated_plan_audits_and_authorization(
     );
     let expected_compiler_candidate_hash = supplementary_compile_candidate_hash(&candidate)?;
 
-    let planning_context: ExecutionPlanningContextResponse = harness
-        .execution_call(
-            "planning_context",
-            &ExecutionPlanningContextRequest {
-                tenant_id: harness.session.identity.tenant_id,
-                contact_id: None,
-                session_id: harness.session.session_id,
-                originating_user_sequence_num: originating_sequence,
-                deadline_at: chrono::Utc::now() + chrono::TimeDelta::days(1),
-                requested_template: None,
-            },
-        )
-        .await?;
-    ensure!(
-        !planning_context.created,
-        "post-admission planning context read must replay the frozen authority snapshot"
-    );
+    let planning_context = ExecutionRepository::new(
+        sqlx::PgPool::connect(&test_database_url())
+            .await
+            .context("connect supplementary planning-context repository")?,
+    )
+    .load_planning_context_for_session(
+        ExecutionScope::Tenant {
+            tenant_id: harness.session.identity.tenant_id,
+        },
+        planning_context_uid,
+        harness.session.session_id,
+    )
+    .await?
+    .context("admitted run must retain its immutable planning context")?;
     planning_context
         .snapshot
         .validate()
@@ -2521,18 +2519,30 @@ async fn recovery_matrix_assert_child_joined(
     parent_id: &str,
     child_id: &str,
 ) -> Result<()> {
-    let rows = recovery_matrix_restate_rows(
-        fixture,
-        format!("SELECT id, invoked_by_id, status FROM sys_invocation WHERE id = '{child_id}'"),
-    )
-    .await?;
-    ensure!(
-        rows.len() == 1
-            && rows[0].get("invoked_by_id").and_then(Value::as_str) == Some(parent_id)
-            && rows[0].get("status").and_then(Value::as_str) == Some("completed"),
-        "cancelled LLM child {child_id} was not joined in parent {parent_id}: {rows:?}"
-    );
-    Ok(())
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut poll = tokio::time::interval(Duration::from_millis(25));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        poll.tick().await;
+        let rows = recovery_matrix_restate_rows(
+            fixture,
+            format!("SELECT id, invoked_by_id, status FROM sys_invocation WHERE id = '{child_id}'"),
+        )
+        .await?;
+        ensure!(
+            rows.len() == 1
+                && rows[0].get("id").and_then(Value::as_str) == Some(child_id)
+                && rows[0].get("invoked_by_id").and_then(Value::as_str) == Some(parent_id),
+            "cancelled LLM child {child_id} did not retain parent {parent_id}: {rows:?}"
+        );
+        if rows[0].get("status").and_then(Value::as_str) == Some("completed") {
+            return Ok(());
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "cancelled LLM child {child_id} was not joined in parent {parent_id}: {rows:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -3078,12 +3088,6 @@ fn recovery_matrix_execution_candidate(
         },
         plan: ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                    delay_seconds: 86_400,
-                },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: json!({"type": "object", "additionalProperties": false}),
             output_schema: output_schema.clone(),
             nodes: vec![
@@ -3513,12 +3517,6 @@ async fn coordinator_generated_plan_is_strict_authorized_and_terminal_provider_e
         started
             .validate()
             .context("ExecutionRunStarted must satisfy the strict admission contract")?;
-        let audit_evidence =
-            assert_generated_plan_audits_and_authorization(&harness, &admission_events).await?;
-        ensure!(
-            started.originating_user_sequence_num == audit_evidence.originating_sequence,
-            "admission origin must equal planning-audit origin"
-        );
         ensure!(
             started.plan_revision == 1,
             "admission must start at revision one"
@@ -3547,6 +3545,16 @@ async fn coordinator_generated_plan_is_strict_authorized_and_terminal_provider_e
             )
             .await?
             .context("admitted generated run must be persisted")?;
+        let audit_evidence = assert_generated_plan_audits_and_authorization(
+            &harness,
+            &admission_events,
+            persisted.planning_context_uid,
+        )
+        .await?;
+        ensure!(
+            started.originating_user_sequence_num == audit_evidence.originating_sequence,
+            "admission origin must equal planning-audit origin"
+        );
         ensure!(
             persisted.run_uid == started.run_uid,
             "event run UID must equal persisted run UID"

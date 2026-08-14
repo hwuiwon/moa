@@ -70,10 +70,10 @@ async fn reconciliation_repairs_only_one_bounded_indexed_window_db() -> TestResu
     let pool = test_db.store().pool().clone();
     let repository = ExecutionRepository::new(pool.clone());
     let tenant_id = TenantId::new();
-    let schedule_uid = insert_schedule(&pool, tenant_id).await?;
     let scope = ExecutionScope::ControlPlane;
 
-    for occurrence_sequence in 1..=3 {
+    for _ in 1..=3 {
+        let schedule_uid = insert_schedule(&pool, tenant_id).await?;
         let write = repository
             .create_trigger(
                 scope,
@@ -81,7 +81,7 @@ async fn reconciliation_repairs_only_one_bounded_indexed_window_db() -> TestResu
                 schedule_trigger(
                     tenant_id,
                     schedule_uid,
-                    occurrence_sequence,
+                    1,
                     Utc::now() - Duration::minutes(1),
                 ),
             )
@@ -94,21 +94,21 @@ async fn reconciliation_repairs_only_one_bounded_indexed_window_db() -> TestResu
 
     assert_eq!(
         repository
-            .reconcile_due_trigger_dispatches(scope, 2)
+            .reconcile_due_trigger_dispatches(scope, 6)
             .await?
             .len(),
         2
     );
     assert_eq!(
         repository
-            .reconcile_due_trigger_dispatches(scope, 2)
+            .reconcile_due_trigger_dispatches(scope, 6)
             .await?
             .len(),
         1
     );
     assert!(
         repository
-            .reconcile_due_trigger_dispatches(scope, 2)
+            .reconcile_due_trigger_dispatches(scope, 6)
             .await?
             .is_empty()
     );
@@ -116,9 +116,10 @@ async fn reconciliation_repairs_only_one_bounded_indexed_window_db() -> TestResu
 }
 
 #[tokio::test]
-async fn claimed_dispatches_ack_retry_and_dead_letter_under_exact_owner_fences_db() -> TestResult {
-    // Pins: a dispatcher ACKs only after accepted delivery, abandoned owners
-    // cannot settle another claim, and bounded failures eventually dead-letter.
+async fn claimed_dispatches_ack_and_retry_correctness_work_under_exact_owner_fences_db()
+-> TestResult {
+    // Pins: a dispatcher ACKs only after accepted delivery, abandoned owners cannot
+    // settle another claim, and correctness-critical trigger delivery keeps retrying.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let pool = test_db.store().pool().clone();
     let repository = ExecutionRepository::new(pool.clone());
@@ -181,23 +182,23 @@ async fn claimed_dispatches_ack_retry_and_dead_letter_under_exact_owner_fences_d
             .await?,
         ExecutionDispatchFailureOutcome::RetryScheduled { .. }
     ));
-    let dead_letter = ExecutionDispatchRetryPolicy {
+    let exhausted_retry = ExecutionDispatchRetryPolicy {
         max_attempts: 1,
         base_delay: StdDuration::from_secs(1),
         maximum_delay: StdDuration::from_secs(1),
     };
-    assert_eq!(
+    assert!(matches!(
         repository
             .record_dispatch_failure(
                 scope,
                 claimed[2].dispatch_uid,
                 "dispatcher-a",
                 "injected permanent acceptance failure",
-                dead_letter,
+                exhausted_retry,
             )
             .await?,
-        ExecutionDispatchFailureOutcome::DeadLettered
-    );
+        ExecutionDispatchFailureOutcome::RetryScheduled { .. }
+    ));
     Ok(())
 }
 

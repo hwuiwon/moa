@@ -241,14 +241,6 @@ fn temporal_targets_round_trip_and_reject_zero_relative_delay() {
         );
     }
 
-    let mut zero_input_wait = valid_plan();
-    zero_input_wait.input_wait_policy.expiry = ExecutionTemporalTarget::After { delay_seconds: 0 };
-    assert_error(
-        &validate_execution_plan_definition(&zero_input_wait),
-        "execution_plan.input_wait_policy.expiry",
-        "temporal delay_seconds must be at least one",
-    );
-
     let mut zero_timer = valid_plan();
     zero_timer.nodes[0].operation = ExecutionOperation::WaitUntil {
         wake: ExecutionTemporalTarget::After { delay_seconds: 0 },
@@ -265,19 +257,7 @@ fn temporal_targets_round_trip_and_reject_zero_relative_delay() {
 fn reusable_plan_templates_reject_absolute_temporal_targets_at_every_wait_surface() {
     // Pins: reusable skill templates stay valid over time by expressing waits relative to when
     // each wait state is entered; exact UTC targets remain valid only for one-off plans.
-    let mut standalone = valid_plan();
-    standalone.input_wait_policy.expiry = absolute_target();
-    assert!(
-        validate_execution_plan_definition(&standalone).is_ok(),
-        "one-off plans may declare an exact UTC input-wait expiry"
-    );
-
     let mut cases = Vec::new();
-    cases.push((
-        standalone,
-        "definition.spec.execution_plan.plan.input_wait_policy.expiry",
-    ));
-
     let mut review = valid_plan();
     review.nodes[0].operation = ExecutionOperation::Review {
         prompt: "Approve?".to_string(),
@@ -428,42 +408,20 @@ fn skill_schema_and_rust_types_require_the_same_wait_contract() {
     stale_plan
         .as_object_mut()
         .expect("plan is an object")
-        .remove("input_wait_policy");
+        .insert(
+            "input_wait_policy".to_string(),
+            json!({
+                "expiry": { "kind": "after", "delay_seconds": 3600 },
+                "on_expiry": { "kind": "fail_task" }
+            }),
+        );
     assert!(
         serde_json::from_value::<ExecutionPlanDefinition>(stale_plan.clone()).is_err(),
-        "Rust type must reject a plan without input_wait_policy"
+        "Rust type must reject the removed input_wait_policy field"
     );
     assert!(
         !plan_validator.is_valid(&stale_plan),
-        "skill schema must reject a plan without input_wait_policy"
-    );
-
-    // The plan-level policy settles whichever task returned NeedsInput, so a declared
-    // continue_with output has no node output_schema to be checked against. The
-    // canonical validator refuses it, and the schema must refuse it at the same
-    // place — while still accepting continue_with on a node-owned wait, which does
-    // have an owning schema.
-    let mut continued_input_wait = plan_json;
-    continued_input_wait["input_wait_policy"]["on_expiry"] =
-        json!({ "kind": "continue_with", "output": { "approved": true } });
-    assert!(
-        !plan_validator.is_valid(&continued_input_wait),
-        "skill schema must reject continue_with on the plan-level input wait policy"
-    );
-    let mut definition =
-        serde_json::from_value::<ExecutionPlanDefinition>(continued_input_wait.clone())
-            .expect("plan-level continue_with is still a well-formed value");
-    assert!(
-        validate_execution_plan_definition(&definition)
-            .errors
-            .iter()
-            .any(|error| error.path == "execution_plan.input_wait_policy.on_expiry"),
-        "canonical validation must reject continue_with on the input wait policy"
-    );
-    definition.input_wait_policy.on_expiry = ExecutionWaitExpiryAction::FailTask;
-    assert!(
-        plan_validator.is_valid(&serde_json::to_value(&definition).expect("serialize plan")),
-        "schema must still accept a failing input wait expiry"
+        "skill schema must reject the removed input_wait_policy field"
     );
 }
 
@@ -549,10 +507,6 @@ fn skill_reference_paths_cover_agent_map_and_reducer_agents_only() {
                         },
                         "plan": {
                             "cancel_policy": "retain_effects",
-                            "input_wait_policy": {
-                                "expiry": { "kind": "after", "delay_seconds": 3600 },
-                                "on_expiry": { "kind": "fail_task" }
-                            },
                             "input_schema": { "type": "object" },
                             "output_schema": { "type": "object" },
                             "nodes": [
@@ -673,13 +627,7 @@ fn execution_plan_round_trips_without_a_nested_version() {
     let encoded = serde_json::to_value(&plan).expect("serialize plan");
     assert!(encoded.get("schema_version").is_none());
     assert_eq!(encoded["cancel_policy"], json!("retain_effects"));
-    assert_eq!(
-        encoded["input_wait_policy"],
-        json!({
-            "expiry": { "kind": "after", "delay_seconds": 3600 },
-            "on_expiry": { "kind": "fail_task" }
-        })
-    );
+    assert!(encoded.get("input_wait_policy").is_none());
     assert_eq!(
         serde_json::from_value::<ExecutionPlanDefinition>(encoded).expect("deserialize exact plan"),
         plan
@@ -1466,7 +1414,6 @@ fn task_outcome_variants_round_trip_without_extra_envelope_fields() {
 fn valid_plan() -> ExecutionPlanDefinition {
     ExecutionPlanDefinition {
         cancel_policy: ExecutionCancelPolicy::RetainEffects,
-        input_wait_policy: wait_policy(ExecutionWaitExpiryAction::FailTask),
         input_schema: json!({ "type": "object" }),
         output_schema: json!({ "type": "object" }),
         nodes: vec![

@@ -151,8 +151,8 @@ deliverables can produce `partial`, `blocked`, or `unsupported`, never a false
 `completed`. Final synthesis receives the contract, check results, aggregate
 outputs, citations, and explicit gaps.
 
-An `ExecutionPlanDefinition` carries an explicit `cancel_policy`,
-`input_schema`, `output_schema`, required `input_wait_policy`, and `nodes`. Each node carries
+An `ExecutionPlanDefinition` carries an explicit `cancel_policy`, `input_schema`,
+`output_schema`, and `nodes`. Each node carries
 `id`, `depends_on`, optional `when`, `input`, `output_schema`, one `operation`,
 an explicit optional compensation contract, retry policy, optional budget, and
 the goal requirement IDs it serves. The dependency graph is acyclic, and
@@ -179,6 +179,12 @@ one-off compiled plans. `After { delay_seconds }` is nonzero and resolves from
 the instant the task actually enters its wait, not from planning or run
 admission. Reusable skill templates accept only `After`; this preserves their
 meaning whenever earlier dependencies take a different amount of time.
+
+A runtime `NeedsInput` outcome from an executable task is different from an
+authored `Review` or `WaitSignal` node: it parks durably until the requested
+human input arrives or the run is explicitly cancelled. It has no expiry
+policy, and while parked it holds no worker, model call, sandbox, process, or
+network connection.
 
 Dependencies provide parallelism and joins; there are no implicit start,
 parallel, join, worker, tool, action, skill-action, or memory node kinds. Dynamic

@@ -1,5 +1,7 @@
 //! Wait entry that cannot finish before the run deadline projects a typed task failure.
 
+use std::time::Duration as StdDuration;
+
 use moa_artifacts::execution_plan::{ExecutionNode, ExecutionOperation};
 use moa_execution::repository::ready::{ReadyMaterializationOutcome, ReadyMaterializationRequest};
 use moa_execution::repository::task::{
@@ -8,9 +10,95 @@ use moa_execution::repository::task::{
 use moa_execution::repository::terminal::{
     PendingTerminalAdvanceOutcome, PendingTerminalAdvanceStage,
 };
+use moa_execution::repository::trigger::{
+    ExecutionRunDeadlineTriggerOutcome, ExecutionTriggerNoOp,
+};
 use moa_execution::state::ExecutionTerminalEvidence;
 
 use super::support::*;
+
+#[tokio::test]
+async fn storage_wait_materialization_locks_trigger_capacity_before_run_db() -> TestResult {
+    // Pins: a storage-only task waits for ScheduledTriggers capacity before taking its run row,
+    // so concurrent trigger settlement cannot deadlock with wait materialization.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let repository = ExecutionRepository::new(pool.clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let config = ExecutionConfig::default();
+    let mut candidate = new_run(
+        tenant_id,
+        None,
+        "storage-wait-lock-order",
+        ExecutionRunStatus::Queued,
+        budget(10),
+    );
+    candidate.plan.definition.nodes = vec![output_node("wait", &[])];
+    let run = create_run(&repository, scope, candidate).await?;
+    let run_uid = run.run_uid;
+    repository
+        .initialize_scheduler_state(scope, run_uid)
+        .await?;
+    let mut task = logical_task(run_uid, "wait", "", estimate(1));
+    task.kind = LogicalTaskKind::WaitUntil {
+        wake: ExecutionTemporalTarget::After { delay_seconds: 60 },
+        result: json!({"elapsed": true}),
+    };
+
+    let mut capacity_holder = pool.begin().await?;
+    let locked: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT capacity_bucket_uid FROM moa.execution_capacity_bucket \
+         WHERE resource_dimension='scheduled_triggers' \
+           AND ((scope_kind='fleet' AND tenant_id IS NULL) \
+             OR (scope_kind='tenant' AND tenant_id=$1)) \
+         ORDER BY CASE scope_kind WHEN 'fleet' THEN 0 ELSE 1 END FOR UPDATE",
+    )
+    .bind(tenant_id.0)
+    .fetch_all(&mut *capacity_holder)
+    .await?;
+    assert_eq!(locked.len(), 2);
+
+    let materialization_repository = repository.clone();
+    let materialization_config = config.clone();
+    let mut materialization = tokio::spawn(async move {
+        materialization_repository
+            .materialize_ready_page(
+                scope,
+                &materialization_config,
+                ReadyMaterializationRequest {
+                    run_uid,
+                    plan_revision: 1,
+                    node_id: "wait".to_string(),
+                    expected_cursor: 0,
+                    reduce_cursor: None,
+                    source_exhausted: true,
+                    terminal_output: None,
+                    condition_skipped: false,
+                    tasks: vec![task],
+                },
+            )
+            .await
+    });
+    assert!(
+        tokio::time::timeout(StdDuration::from_millis(100), &mut materialization)
+            .await
+            .is_err(),
+        "wait materialization must block on ScheduledTriggers capacity"
+    );
+    sqlx::query("SELECT run_uid FROM moa.execution_run WHERE run_uid=$1 FOR UPDATE NOWAIT")
+        .bind(run_uid)
+        .fetch_one(&mut *capacity_holder)
+        .await?;
+    capacity_holder.commit().await?;
+
+    let outcome = tokio::time::timeout(StdDuration::from_secs(5), materialization).await???;
+    assert!(matches!(
+        outcome,
+        ReadyMaterializationOutcome::Applied { ref triggers, .. } if triggers.len() == 1
+    ));
+    Ok(())
+}
 
 fn output_node(id: &str, depends_on: &[&str]) -> ExecutionNode {
     ExecutionNode {
@@ -278,10 +366,11 @@ async fn storage_wait_past_run_deadline_fails_its_node_instead_of_erroring_db() 
 }
 
 #[tokio::test]
-async fn input_wait_past_run_deadline_fails_its_task_instead_of_erroring_db() -> TestResult {
-    // Pins: settling a NeedsInput attempt whose plan-level input-wait expiry resolves at or after
-    // the run deadline terminates the task with a typed DeadlineExceeded failure naming its node
-    // rather than aborting settlement; an expiry that still fits parks the ordinary input wait.
+async fn input_wait_suspends_run_deadline_without_trigger_or_active_capacity_and_resumes_exactly_db()
+-> TestResult {
+    // Pins: a fully human-input-parked run has no input-expiry trigger or active-task capacity,
+    // an already-dispatched deadline cannot terminalize it, and exact input shifts then rearms
+    // the run deadline without weakening per-attempt watchdogs.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let pool = test_db.store().pool().clone();
     let repository = ExecutionRepository::new(pool.clone());
@@ -289,30 +378,271 @@ async fn input_wait_past_run_deadline_fails_its_task_instead_of_erroring_db() ->
     let scope = ExecutionScope::Tenant { tenant_id };
     let config = ExecutionConfig::default();
 
-    for (key, expiry_seconds, expected_status) in [
-        (
-            "input-wait-past-deadline",
-            86_400_u64,
-            ExecutionTaskStatus::Failed,
-        ),
-        (
-            "input-wait-inside-deadline",
-            60,
-            ExecutionTaskStatus::WaitingInput,
-        ),
-    ] {
-        let mut candidate = new_run(tenant_id, None, key, ExecutionRunStatus::Queued, budget(10));
-        candidate.plan.definition.nodes = vec![output_node("ask", &[])];
-        candidate.plan.definition.input_wait_policy = ExecutionWaitPolicy {
-            expiry: ExecutionTemporalTarget::After {
-                delay_seconds: expiry_seconds,
-            },
-            on_expiry: ExecutionWaitExpiryAction::FailTask,
-        };
-        let run = create_run(&repository, scope, candidate).await?;
+    let mut candidate = new_run(
+        tenant_id,
+        None,
+        "input-wait-indefinite",
+        ExecutionRunStatus::Queued,
+        budget(10),
+    );
+    candidate.plan.definition.nodes = vec![output_node("ask", &[])];
+    let run = create_run(&repository, scope, candidate).await?;
+    let original_deadline = run.approved_budget.deadline_at.expect("fixture deadline");
+    let deadline_trigger_uid: Uuid = sqlx::query_scalar(
+        "SELECT trigger_uid FROM moa.execution_trigger \
+         WHERE run_uid=$1 AND trigger_kind='run_deadline' AND state='pending'",
+    )
+    .bind(run.run_uid)
+    .fetch_one(&pool)
+    .await?;
+    repository
+        .initialize_scheduler_state(scope, run.run_uid)
+        .await?;
+    assert!(matches!(
         repository
-            .initialize_scheduler_state(scope, run.run_uid)
-            .await?;
+            .materialize_ready_page(
+                scope,
+                &config,
+                ReadyMaterializationRequest {
+                    run_uid: run.run_uid,
+                    plan_revision: 1,
+                    node_id: "ask".to_string(),
+                    expected_cursor: 0,
+                    reduce_cursor: None,
+                    source_exhausted: true,
+                    terminal_output: None,
+                    condition_skipped: false,
+                    tasks: vec![logical_task(run.run_uid, "ask", "", estimate(1))],
+                },
+            )
+            .await?,
+        ReadyMaterializationOutcome::Applied { .. }
+    ));
+    let admission = repository
+        .admit_ready_attempts(&config, 1, Utc::now())
+        .await?;
+    let admitted = admission
+        .admitted
+        .into_iter()
+        .find(|item| item.run_uid == run.run_uid)
+        .expect("the only ready task must be admitted");
+    let fence = TaskAttemptFence {
+        tenant_id: admitted.tenant_id,
+        run_uid: admitted.run_uid,
+        task_id: admitted.task_id,
+        controller_generation: admitted.controller_generation,
+        attempt_generation: admitted.attempt_generation,
+        dispatch_uid: admitted.dispatch_uid,
+        capacity_reservation_uid: admitted.capacity_reservation_uid,
+        watchdog_trigger_uid: admitted.watchdog_trigger_uid,
+        attempt_deadline_at: admitted.attempt_deadline_at,
+    };
+    assert!(matches!(
+        repository.start_task_attempt(fence).await?,
+        TaskAttemptStartOutcome::Started(_)
+    ));
+    let TaskAttemptSettlementOutcome::Applied { task, .. } = repository
+        .settle_task_attempt(&config, fence, needs_input(1), None, Utc::now())
+        .await?
+    else {
+        panic!("NeedsInput settlement must apply");
+    };
+    assert_eq!(task.status, ExecutionTaskStatus::WaitingInput);
+    let parked = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("parked run remains visible");
+    assert_eq!(parked.approved_budget.deadline_at, Some(original_deadline));
+    let suspended_at = parked
+        .budget_deadline_suspended_at
+        .expect("human input wait suspends wall-clock deadline accounting");
+    assert_eq!(parked.active_task_count, 0);
+    assert_eq!(parked.waiting_task_count, 1);
+    assert_eq!(parked.waiting_input_task_count, 1);
+    let active_task_receipts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM moa.execution_capacity_reservation \
+         WHERE run_uid=$1 AND resource_dimension='active_tasks' \
+           AND state IN ('reserved','reconciling')",
+    )
+    .bind(run.run_uid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(active_task_receipts, 0);
+    let input_expiry_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM moa.execution_trigger \
+         WHERE run_uid=$1 AND task_id=$2 AND trigger_kind='wait_expiry'",
+    )
+    .bind(run.run_uid)
+    .bind(task.task_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(input_expiry_rows, 0);
+
+    assert_eq!(
+        repository
+            .prepare_run_deadline_trigger(scope, deadline_trigger_uid)
+            .await?,
+        ExecutionRunDeadlineTriggerOutcome::NoOp(ExecutionTriggerNoOp::Inactive)
+    );
+    assert!(matches!(
+        repository
+            .fence_deadline_and_enqueue_settlement(
+                &config,
+                scope,
+                run.run_uid,
+                parked.controller_generation,
+                parked.wake_epoch,
+                original_deadline + Duration::hours(1),
+                1,
+            )
+            .await?,
+        PendingTerminalAdvanceOutcome::Conflict
+    ));
+
+    let TransitionOutcome::Applied(resumed) = repository
+        .resume_task_with_input(
+            scope,
+            &config,
+            run.run_uid,
+            task.task_id,
+            task.generation,
+            json!({"answer": "continue"}),
+        )
+        .await?
+    else {
+        panic!("exact input must resume the parked generation");
+    };
+    assert_eq!(resumed.status, ExecutionTaskStatus::Ready);
+    let resumed_run = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("resumed run remains visible");
+    assert!(resumed_run.budget_deadline_suspended_at.is_none());
+    let shifted_deadline = resumed_run
+        .approved_budget
+        .deadline_at
+        .expect("resume restores the deadline");
+    assert!(shifted_deadline > original_deadline);
+    assert_eq!(
+        shifted_deadline - original_deadline,
+        resumed
+            .ready_at
+            .expect("resumed task has an exact ready time")
+            - suspended_at
+    );
+    let current_deadlines: Vec<chrono::DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT due_at FROM moa.execution_trigger \
+         WHERE run_uid=$1 AND trigger_kind='run_deadline' AND state='pending'",
+    )
+    .bind(run.run_uid)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(current_deadlines, vec![shifted_deadline]);
+
+    let readmission = repository
+        .admit_ready_attempts(&config, 1, Utc::now())
+        .await?
+        .admitted
+        .into_iter()
+        .find(|item| item.run_uid == run.run_uid)
+        .expect("resumed task is admitted under its new attempt generation");
+    let second_fence = TaskAttemptFence {
+        tenant_id: readmission.tenant_id,
+        run_uid: readmission.run_uid,
+        task_id: readmission.task_id,
+        controller_generation: readmission.controller_generation,
+        attempt_generation: readmission.attempt_generation,
+        dispatch_uid: readmission.dispatch_uid,
+        capacity_reservation_uid: readmission.capacity_reservation_uid,
+        watchdog_trigger_uid: readmission.watchdog_trigger_uid,
+        attempt_deadline_at: readmission.attempt_deadline_at,
+    };
+    assert!(matches!(
+        repository.start_task_attempt(second_fence).await?,
+        TaskAttemptStartOutcome::Started(_)
+    ));
+    let second_settlement = repository
+        .settle_task_attempt(&config, second_fence, needs_input(2), None, Utc::now())
+        .await?;
+    assert!(
+        matches!(
+            second_settlement,
+            TaskAttemptSettlementOutcome::Applied { .. }
+        ),
+        "second NeedsInput settlement must apply, got {second_settlement:?}"
+    );
+    let suspended_again = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("second input wait remains visible");
+    assert!(suspended_again.budget_deadline_suspended_at.is_some());
+    let terminal_evidence =
+        moa_execution::completion::cancellation_terminal_evidence_from_completed_nodes(
+            &suspended_again.goal,
+            &suspended_again.active_plan,
+            &std::collections::BTreeSet::<String>::new(),
+        )?;
+    let PendingTerminalAdvanceOutcome::Applied(cancelled) = repository
+        .fence_completion_terminal_and_enqueue_settlement(
+            &config,
+            scope,
+            run.run_uid,
+            suspended_again.controller_generation,
+            suspended_again.wake_epoch,
+            PendingExecutionTerminal {
+                status: ExecutionRunStatus::Cancelled,
+                reason: ExecutionTerminalReason::Cancelled,
+                terminal_evidence,
+                completion_check_results: Vec::new(),
+                terminal_gaps: Vec::new(),
+                output: None,
+                cancellation_reason: Some("operator cancelled during input wait".to_string()),
+            },
+            Utc::now(),
+            8,
+        )
+        .await?
+    else {
+        panic!("explicit cancellation must drain a deadline-suspended input wait");
+    };
+    assert_eq!(cancelled.run.status, ExecutionRunStatus::Cancelled);
+    assert!(cancelled.run.budget_deadline_suspended_at.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn last_active_completion_suspends_deadline_when_sibling_waits_for_input_db() -> TestResult {
+    // Pins: deadline suspension is fenced by the locked run counters, not by the task whose
+    // settlement happens to make the run fully input-parked. A sibling may already be waiting.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let repository = ExecutionRepository::new(pool.clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let config = ExecutionConfig::default();
+    let mut candidate = new_run(
+        tenant_id,
+        None,
+        "input-wait-last-active",
+        ExecutionRunStatus::Queued,
+        budget(10),
+    );
+    candidate.plan.definition.nodes = vec![
+        output_node("ask-a", &[]),
+        output_node("ask-b", &[]),
+        output_node("finish", &[]),
+    ];
+    let run = create_run(&repository, scope, candidate).await?;
+    repository
+        .initialize_scheduler_state(scope, run.run_uid)
+        .await?;
+
+    let tasks = [
+        logical_task(run.run_uid, "ask-a", "", estimate(1)),
+        logical_task(run.run_uid, "ask-b", "", estimate(1)),
+        logical_task(run.run_uid, "finish", "", estimate(1)),
+    ];
+    for task in &tasks {
         assert!(matches!(
             repository
                 .materialize_ready_page(
@@ -321,63 +651,142 @@ async fn input_wait_past_run_deadline_fails_its_task_instead_of_erroring_db() ->
                     ReadyMaterializationRequest {
                         run_uid: run.run_uid,
                         plan_revision: 1,
-                        node_id: "ask".to_string(),
+                        node_id: task.node_id.clone(),
                         expected_cursor: 0,
                         reduce_cursor: None,
                         source_exhausted: true,
                         terminal_output: None,
                         condition_skipped: false,
-                        tasks: vec![logical_task(run.run_uid, "ask", "", estimate(1))],
+                        tasks: vec![task.clone()],
                     },
                 )
                 .await?,
-            ReadyMaterializationOutcome::Applied { .. }
+            ReadyMaterializationOutcome::Applied { next_cursor: 1, .. }
         ));
-        let admission = repository
-            .admit_ready_attempts(&config, 1, Utc::now())
-            .await?;
-        let admitted = admission
-            .admitted
-            .into_iter()
-            .find(|item| item.run_uid == run.run_uid)
-            .expect("the only ready task must be admitted");
-        let fence = TaskAttemptFence {
-            tenant_id: admitted.tenant_id,
-            run_uid: admitted.run_uid,
-            task_id: admitted.task_id,
-            controller_generation: admitted.controller_generation,
-            attempt_generation: admitted.attempt_generation,
-            dispatch_uid: admitted.dispatch_uid,
-            capacity_reservation_uid: admitted.capacity_reservation_uid,
-            watchdog_trigger_uid: admitted.watchdog_trigger_uid,
-            attempt_deadline_at: admitted.attempt_deadline_at,
-        };
+    }
+    let admitted = repository
+        .admit_ready_attempts(&config, 3, Utc::now())
+        .await?
+        .admitted;
+    assert_eq!(admitted.len(), 3);
+    let fences = admitted
+        .iter()
+        .map(|item| TaskAttemptFence {
+            tenant_id: item.tenant_id,
+            run_uid: item.run_uid,
+            task_id: item.task_id,
+            controller_generation: item.controller_generation,
+            attempt_generation: item.attempt_generation,
+            dispatch_uid: item.dispatch_uid,
+            capacity_reservation_uid: item.capacity_reservation_uid,
+            watchdog_trigger_uid: item.watchdog_trigger_uid,
+            attempt_deadline_at: item.attempt_deadline_at,
+        })
+        .collect::<Vec<_>>();
+    for fence in &fences {
         assert!(matches!(
-            repository.start_task_attempt(fence).await?,
+            repository.start_task_attempt(*fence).await?,
             TaskAttemptStartOutcome::Started(_)
         ));
-        let TaskAttemptSettlementOutcome::Applied { task, .. } = repository
-            .settle_task_attempt(&config, fence, needs_input(1), None, Utc::now())
-            .await?
-        else {
-            panic!("{key} settlement must apply");
-        };
-        assert_eq!(task.status, expected_status, "{key}");
-        if expected_status == ExecutionTaskStatus::Failed {
-            let (class, message) =
-                failure_class(&task).expect("the failed input wait must carry a typed outcome");
-            assert_eq!(class, ExecutionFailureClass::DeadlineExceeded);
-            assert!(
-                message.contains("`ask`"),
-                "the failure must name its node, got `{message}`"
-            );
-            let settled_run = repository
-                .load_run(scope, run.run_uid)
-                .await?
-                .expect("run must remain visible");
-            assert_eq!(settled_run.waiting_input_task_count, 0);
-            assert_eq!(settled_run.progress_failed_tasks, 1);
-        }
     }
+
+    assert!(matches!(
+        repository
+            .settle_task_attempt(&config, fences[0], needs_input(1), None, Utc::now())
+            .await?,
+        TaskAttemptSettlementOutcome::Applied { .. }
+    ));
+    let partly_active = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("partly active run remains visible");
+    assert_eq!(partly_active.active_task_count, 2);
+    assert_eq!(partly_active.waiting_input_task_count, 1);
+    assert!(partly_active.budget_deadline_suspended_at.is_none());
+
+    assert!(matches!(
+        repository
+            .settle_task_attempt(&config, fences[1], needs_input(1), None, Utc::now())
+            .await?,
+        TaskAttemptSettlementOutcome::Applied { .. }
+    ));
+    assert!(matches!(
+        repository
+            .settle_task_attempt(&config, fences[2], completed(1), None, Utc::now())
+            .await?,
+        TaskAttemptSettlementOutcome::Applied { .. }
+    ));
+    let fully_parked = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("fully parked run remains visible");
+    assert_eq!(fully_parked.active_task_count, 0);
+    assert_eq!(fully_parked.waiting_task_count, 2);
+    assert_eq!(fully_parked.waiting_input_task_count, 2);
+    assert!(fully_parked.budget_deadline_suspended_at.is_some());
+    let active_task_receipts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM moa.execution_capacity_reservation \
+         WHERE run_uid=$1 AND resource_dimension='active_tasks' \
+           AND state IN ('reserved','reconciling')",
+    )
+    .bind(run.run_uid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(active_task_receipts, 0);
+    let input_expiry_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM moa.execution_trigger \
+         WHERE run_uid=$1 AND trigger_kind='wait_expiry'",
+    )
+    .bind(run.run_uid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(input_expiry_rows, 0);
+
+    sqlx::query("UPDATE moa.execution_run SET activation_state='idle' WHERE run_uid=$1")
+        .bind(run.run_uid)
+        .execute(&pool)
+        .await?;
+    let idle_parked = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("fully parked run remains visible after idle checkpoint fixture");
+    assert_eq!(idle_parked.activation_state, ExecutionActivationState::Idle);
+
+    let terminal_evidence =
+        moa_execution::completion::cancellation_terminal_evidence_from_completed_nodes(
+            &idle_parked.goal,
+            &idle_parked.active_plan,
+            &std::collections::BTreeSet::from(["finish".to_string()]),
+        )?;
+    let PendingTerminalAdvanceOutcome::Applied(cancelled_page) = repository
+        .fence_completion_terminal_and_enqueue_settlement(
+            &config,
+            scope,
+            run.run_uid,
+            idle_parked.controller_generation,
+            idle_parked.wake_epoch,
+            PendingExecutionTerminal {
+                status: ExecutionRunStatus::Cancelled,
+                reason: ExecutionTerminalReason::Cancelled,
+                terminal_evidence,
+                completion_check_results: Vec::new(),
+                terminal_gaps: Vec::new(),
+                output: None,
+                cancellation_reason: Some("operator cancelled fully parked run".to_string()),
+            },
+            Utc::now(),
+            1,
+        )
+        .await?
+    else {
+        panic!("idle external cancellation must checkpoint its bounded terminal page");
+    };
+    assert!(cancelled_page.work_remaining);
+    assert_eq!(
+        cancelled_page.run.activation_state,
+        ExecutionActivationState::Queued
+    );
+    assert!(cancelled_page.continuation.is_some());
+    assert!(cancelled_page.run.budget_deadline_suspended_at.is_some());
     Ok(())
 }

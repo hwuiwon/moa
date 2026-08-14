@@ -1,5 +1,7 @@
 //! Fleet-owned weighted-fair task admission contracts.
 
+use std::time::Duration as StdDuration;
+
 use chrono::DateTime;
 use moa_artifacts::execution_plan::{ExecutionNode, ExecutionOperation};
 use moa_config::ExecutionConfig;
@@ -527,5 +529,99 @@ async fn no_work_admission_does_not_rewrite_unchanged_capacity_bucket_db() -> Te
         ),
         "a real configured-limit change must remain durable and versioned"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn ready_admission_waits_for_scheduled_capacity_before_locking_run_db() -> TestResult {
+    // Pins: task admission waits for ScheduledTriggers capacity before locking the ready run, so
+    // a pre-released task settlement that already owns ScheduledTriggers can acquire that run
+    // without forming a ScheduledTriggers-to-run versus run-to-ScheduledTriggers deadlock.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let repository = ExecutionRepository::new(pool.clone());
+    let tenant_id = TenantId::new();
+    let run_uid = ready_run(&repository, tenant_id, "admission-scheduled-before-run", 1).await?;
+    let config = ExecutionConfig::default();
+
+    let mut scheduled_holder = ScopedConn::begin_control_plane(&pool).await?;
+    scheduled_holder.assume_app_role().await?;
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(scheduled_holder.as_mut())
+        .await?;
+    let locked_buckets: Vec<(String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT scope_kind,tenant_id FROM moa.execution_capacity_bucket \
+         WHERE resource_dimension='scheduled_triggers' \
+           AND (scope_kind='fleet' OR (scope_kind='tenant' AND tenant_id=$1)) \
+         ORDER BY CASE scope_kind WHEN 'fleet' THEN 0 ELSE 1 END FOR UPDATE",
+    )
+    .bind(tenant_id.0)
+    .fetch_all(scheduled_holder.as_mut())
+    .await?;
+    assert_eq!(
+        locked_buckets,
+        vec![
+            ("fleet".to_string(), None),
+            ("tenant".to_string(), Some(tenant_id.0)),
+        ],
+        "the fixture must hold both watchdog-capacity rows"
+    );
+
+    let admission_repository = repository.clone();
+    let mut admission = tokio::spawn(async move {
+        admission_repository
+            .admit_ready_attempts(&config, 1, Utc::now())
+            .await
+    });
+    let blocked_pid = tokio::time::timeout(StdDuration::from_secs(5), async {
+        loop {
+            let blocked_pid: Option<i32> = sqlx::query_scalar(
+                "SELECT min(activity.pid) FROM pg_stat_activity AS activity \
+                 WHERE activity.datname=current_database() \
+                   AND $1 = ANY(pg_blocking_pids(activity.pid))",
+            )
+            .bind(holder_pid)
+            .fetch_one(&pool)
+            .await?;
+            if let Some(blocked_pid) = blocked_pid {
+                return Ok::<i32, sqlx::Error>(blocked_pid);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("admission must reach the held ScheduledTriggers lock")?;
+    assert_ne!(blocked_pid, holder_pid);
+    assert!(
+        tokio::time::timeout(StdDuration::from_millis(100), &mut admission)
+            .await
+            .is_err(),
+        "admission must remain blocked while ScheduledTriggers capacity is held"
+    );
+
+    let locked_run_uid = match sqlx::query_scalar::<_, Uuid>(
+        "SELECT run_uid FROM moa.execution_run WHERE run_uid=$1 FOR UPDATE NOWAIT",
+    )
+    .bind(run_uid)
+    .fetch_one(scheduled_holder.as_mut())
+    .await
+    {
+        Ok(locked_run_uid) => locked_run_uid,
+        Err(error) => {
+            scheduled_holder.rollback().await?;
+            let _ = tokio::time::timeout(StdDuration::from_secs(5), &mut admission).await;
+            panic!(
+                "admission locked the run before ScheduledTriggers capacity; NOWAIT failed: {error}"
+            );
+        }
+    };
+    assert_eq!(locked_run_uid, run_uid);
+    scheduled_holder.commit().await?;
+
+    let admitted = tokio::time::timeout(StdDuration::from_secs(5), admission)
+        .await
+        .expect("admission must complete after ScheduledTriggers capacity is released")??;
+    assert_eq!(admitted.admitted.len(), 1);
+    assert_eq!(admitted.admitted[0].run_uid, run_uid);
     Ok(())
 }

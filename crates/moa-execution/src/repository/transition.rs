@@ -420,7 +420,7 @@ impl ExecutionRepository {
             .ok_or_else(|| Error::InvalidRepositoryData {
                 message: "current wait trigger task has no wait-entry timestamp".to_string(),
             })?;
-        let settlement = settlement_for_delivered_trigger(&run, &task, trigger.kind)?;
+        let settlement = settlement_for_delivered_trigger(&task, trigger.kind)?;
         let outcome = settle_wait_locked_in_conn(
             &mut conn,
             &run,
@@ -489,7 +489,7 @@ async fn settle_wait_locked_in_conn(
             TransitionRejection::GenerationMismatch,
         ));
     }
-    let outcome = wait_settlement_outcome(run, task, &settlement)?;
+    let outcome = wait_settlement_outcome(task, &settlement)?;
     if run.status.is_terminal() {
         return Ok(TransitionOutcome::Rejected(
             TransitionRejection::InvalidRunStatus,
@@ -512,13 +512,8 @@ async fn settle_wait_locked_in_conn(
             TransitionRejection::DeadlineElapsed,
         ));
     }
-    let due_at = wait_settlement_due_at(
-        run,
-        task,
-        &settlement,
-        expected_waiting_since,
-        run_deadline_at,
-    )?;
+    let due_at =
+        wait_settlement_due_at(task, &settlement, expected_waiting_since, run_deadline_at)?;
     if settled_at < due_at {
         return Ok(TransitionOutcome::Rejected(
             TransitionRejection::InvalidTaskStatus,
@@ -690,7 +685,6 @@ pub(super) async fn refresh_run_after_wait_settlement_in_conn(
 }
 
 fn settlement_for_delivered_trigger(
-    run: &ExecutionRunRecord,
     task: &ExecutionTaskRecord,
     kind: ExecutionTriggerKind,
 ) -> Result<WaitSettlement> {
@@ -706,12 +700,6 @@ fn settlement_for_delivered_trigger(
         },
         ExecutionTriggerKind::WaitExpiry => {
             let action = match (&task.status, &task.kind) {
-                (ExecutionTaskStatus::WaitingInput, _) => run
-                    .active_plan
-                    .definition
-                    .input_wait_policy
-                    .on_expiry
-                    .clone(),
                 (
                     ExecutionTaskStatus::WaitingReview,
                     LogicalTaskKind::Review { wait_policy, .. },
@@ -772,7 +760,6 @@ fn wait_settlement_is_exact_replay(
 }
 
 fn wait_settlement_outcome(
-    run: &ExecutionRunRecord,
     task: &ExecutionTaskRecord,
     settlement: &WaitSettlement,
 ) -> Result<ExecutionTaskOutcome> {
@@ -790,9 +777,6 @@ fn wait_settlement_outcome(
         },
         WaitSettlement::WaitExpired { action, .. } => {
             let persisted_action = match (&task.status, &task.kind) {
-                (ExecutionTaskStatus::WaitingInput, _) => {
-                    &run.active_plan.definition.input_wait_policy.on_expiry
-                }
                 (
                     ExecutionTaskStatus::WaitingReview,
                     LogicalTaskKind::Review { wait_policy, .. },
@@ -829,7 +813,6 @@ fn wait_settlement_outcome(
 }
 
 fn wait_settlement_due_at(
-    run: &ExecutionRunRecord,
     task: &ExecutionTaskRecord,
     settlement: &WaitSettlement,
     waiting_since: DateTime<Utc>,
@@ -845,9 +828,6 @@ fn wait_settlement_due_at(
             }
         },
         WaitSettlement::WaitExpired { .. } => match (&task.status, &task.kind) {
-            (ExecutionTaskStatus::WaitingInput, _) => {
-                &run.active_plan.definition.input_wait_policy.expiry
-            }
             (ExecutionTaskStatus::WaitingReview, LogicalTaskKind::Review { wait_policy, .. })
             | (
                 ExecutionTaskStatus::WaitingSignal,

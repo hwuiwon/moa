@@ -13,7 +13,9 @@ use moa_core::{
     types::completion::ToolInvocation,
     types::hands::HandHandle,
     types::hands::HandStatus,
-    types::identifiers::{ExecutionRunScopeId, ToolCallId},
+    types::identifiers::{
+        ExecutionRunScopeId, HandProvisioningOperationId, SandboxWorkspaceId, ToolCallId,
+    },
     types::resource::DeadlineGuard,
     types::sandbox_workspace::{ExecutionHandReleaseOwner, SandboxWorkspaceScope, WorkspaceEffect},
     types::security::ToolCapabilityId,
@@ -21,6 +23,7 @@ use moa_core::{
     types::tools::SecuredToolOutput,
     types::tools::ToolDefinition,
     types::tools::ToolOutput,
+    types::worker::state::WorkerInputTarget,
 };
 use moa_observability::current_turn_root_span;
 use moa_security::{OutputClassification, classify_tool_output};
@@ -125,6 +128,39 @@ pub struct ExecutionHandReleaseRequest<'a> {
     pub attempt_generation: u64,
     /// Fresh bounded budget for checkpoint publication and verified destroy.
     pub scope: ToolCallScope<'a>,
+}
+
+/// One idempotent request to park a worker's sandbox for a human-input wait.
+#[derive(Clone, Copy)]
+pub struct WorkerHandReleaseRequest<'a> {
+    /// Session whose tenant owns the worker workspace and hand lease.
+    pub session: &'a SessionMeta,
+    /// Exact worker scope entering the durable wait.
+    pub worker_id: &'a str,
+    /// Turn, admission generation, and input request that own this wait.
+    pub input_target: &'a WorkerInputTarget,
+    /// Exact compute attachment captured before the input wait was registered.
+    pub expected: Option<&'a WorkerHandReleaseFence>,
+    /// Fresh bounded budget for checkpoint publication and verified destroy.
+    pub scope: ToolCallScope<'a>,
+}
+
+/// Exact durable workspace and lease generation a worker is allowed to park.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerHandReleaseFence {
+    /// Workspace attached to the worker when the wait began.
+    pub workspace_id: SandboxWorkspaceId,
+    /// Single-writer epoch that owned the working copy.
+    pub writer_epoch: u64,
+    /// Compute instance generation that owned the working copy.
+    pub instance_generation: u64,
+    /// Provider route pinned on the workspace.
+    pub provider: String,
+    /// Provisioning operation that created the exact compute instance.
+    pub provisioning_operation_id: HandProvisioningOperationId,
+    /// Durable hand-lease generation attached to the workspace.
+    pub hand_lease_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

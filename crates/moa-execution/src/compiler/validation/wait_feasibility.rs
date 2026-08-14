@@ -40,9 +40,8 @@ use crate::{
 /// Two further contingent waits are deliberately excluded, because counting them would
 /// reject plans that are feasible on every execution that does not hit them:
 ///
-/// - `plan.input_wait_policy.expiry`, which settles whichever task returned `NeedsInput`.
-///   It applies to no node in particular and to every node in principle, so charging it
-///   per node would inflate the path by the node count on plans that never ask for input.
+/// - Runtime `NeedsInput`, which is an indefinite human wait and applies to no node in
+///   particular. It pauses the active run deadline while the run is fully parked.
 /// - `RetryPolicy` backoff, which is millisecond-scale, contingent on failure, and
 ///   already multiplied into the resource estimate rather than the schedule.
 ///

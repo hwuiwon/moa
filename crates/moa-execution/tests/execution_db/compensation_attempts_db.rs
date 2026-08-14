@@ -40,6 +40,65 @@ use super::support::*;
 use std::time::Duration as StdDuration;
 
 #[tokio::test]
+async fn compensation_admission_locks_watchdog_capacity_before_run_db() -> TestResult {
+    // Pins: compensation admission reserves both active-task and watchdog capacity before it
+    // locks the run. A settlement that already owns ScheduledTriggers can therefore retain the
+    // run lock without forming a run-to-capacity cycle with compensation admission.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let repository = ExecutionRepository::new(pool.clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let (run, _) = compensating_run(&repository, scope, tenant_id, &["lock-order"]).await?;
+    let run_uid = run.run_uid;
+    let config = ExecutionConfig::default();
+
+    let mut capacity_holder = pool.begin().await?;
+    let locked: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT capacity_bucket_uid FROM moa.execution_capacity_bucket \
+         WHERE resource_dimension='scheduled_triggers' \
+           AND ((scope_kind='fleet' AND tenant_id IS NULL) \
+             OR (scope_kind='tenant' AND tenant_id=$1)) \
+         ORDER BY CASE scope_kind WHEN 'fleet' THEN 0 ELSE 1 END FOR UPDATE",
+    )
+    .bind(tenant_id.0)
+    .fetch_all(&mut *capacity_holder)
+    .await?;
+    assert_eq!(locked.len(), 2);
+
+    let admission_repository = repository.clone();
+    let admission_config = config.clone();
+    let mut admission = tokio::spawn(async move {
+        admission_repository
+            .admit_next_compensation_attempt(
+                scope,
+                &admission_config,
+                run_uid,
+                moa_test_support::fixtures::pg_now(),
+            )
+            .await
+    });
+    assert!(
+        tokio::time::timeout(StdDuration::from_millis(100), &mut admission)
+            .await
+            .is_err(),
+        "admission must wait for ScheduledTriggers capacity"
+    );
+    sqlx::query("SELECT run_uid FROM moa.execution_run WHERE run_uid=$1 FOR UPDATE NOWAIT")
+        .bind(run_uid)
+        .fetch_one(&mut *capacity_holder)
+        .await?;
+    capacity_holder.commit().await?;
+
+    assert!(matches!(
+        tokio::time::timeout(StdDuration::from_secs(5), admission).await???,
+        CompensationAttemptAdmissionOutcome::Admitted(_)
+            | CompensationAttemptAdmissionOutcome::Replayed(_)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn nonterminal_guard_uses_partial_index_for_more_than_2500_tasks_db() -> TestResult {
     // Pins: compensation admission's forward-work guard remains an indexed existence probe even
     // when a run retains thousands of terminal task rows and only one nonterminal task remains.

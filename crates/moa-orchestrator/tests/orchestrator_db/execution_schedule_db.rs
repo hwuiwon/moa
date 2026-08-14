@@ -3,8 +3,7 @@
 use chrono::{Duration, Utc};
 use moa_artifacts::execution_plan::{
     ExecutionBudgetLimit, ExecutionCancelPolicy, ExecutionGoalContract, ExecutionNode,
-    ExecutionOperation, ExecutionPlanDefinition, ExecutionTemporalTarget,
-    ExecutionWaitExpiryAction, ExecutionWaitPolicy, RetryPolicy,
+    ExecutionOperation, ExecutionPlanDefinition, RetryPolicy,
 };
 use moa_config::ExecutionConfig;
 use moa_core::{
@@ -347,7 +346,7 @@ async fn schedule_update_binds_every_mutable_field_to_its_named_column_db() -> T
             .bind(original_trigger.trigger.trigger_uid)
             .fetch_one(test_db.store().pool())
             .await?;
-    assert_eq!(original_state, "cancelled");
+    assert_eq!(original_state, "superseded");
     Ok(())
 }
 
@@ -437,17 +436,16 @@ async fn concurrent_schedule_update_and_occurrence_fire_share_capacity_first_loc
 
 #[tokio::test]
 async fn schedule_occurrence_respects_joint_active_and_parked_resident_ceiling_db() -> TestResult {
-    // Pins: schedule-owned admission cannot bypass the joint resident-run ceiling merely because
-    // ActiveRuns compute capacity remains available; saturation consumes the occurrence once and
-    // leaves no run, activation, or ActiveRuns receipt to replay.
+    // Pins: schedule-owned admission cannot bypass the joint resident-run ceiling; saturation
+    // consumes the occurrence once and leaves no run, activation, or capacity receipt to replay.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let pool = test_db.store().pool().clone();
     let repository = ExecutionRepository::new(pool.clone());
     let tenant_id = TenantId::new();
     let scope = ExecutionScope::Tenant { tenant_id };
     let config = moa_config::ExecutionConfig {
-        max_tenant_active_runs: 10,
-        max_fleet_active_runs: 10,
+        max_tenant_active_runs: 1,
+        max_fleet_active_runs: 1,
         max_tenant_parked_runs: 1,
         max_fleet_parked_runs: 1,
         ..moa_config::ExecutionConfig::default()
@@ -469,12 +467,16 @@ async fn schedule_occurrence_respects_joint_active_and_parked_resident_ceiling_d
     else {
         panic!("first resident schedule must arm its occurrence");
     };
-    let first_run = execution_schedule_run_blueprint(&first_schedule)?.instantiate(
-        &first_schedule,
-        due,
-        1,
-        config.maximum_horizon_seconds,
-    )?;
+    let first_blueprint = execution_schedule_run_blueprint(&first_schedule)?;
+    let first_run =
+        first_blueprint.instantiate(&first_schedule, due, 1, config.maximum_horizon_seconds)?;
+    insert_schedule_planning_context(
+        &pool,
+        tenant_id,
+        first_schedule.run_as_identity.id,
+        &first_blueprint,
+    )
+    .await?;
     let ExecutionScheduleRunAdmissionOutcome::Admitted {
         run: admitted_run, ..
     } = repository
@@ -508,12 +510,16 @@ async fn schedule_occurrence_respects_joint_active_and_parked_resident_ceiling_d
     else {
         panic!("second schedule must arm before its resident admission check");
     };
-    let second_run = execution_schedule_run_blueprint(&second_schedule)?.instantiate(
-        &second_schedule,
-        due,
-        1,
-        config.maximum_horizon_seconds,
-    )?;
+    let second_blueprint = execution_schedule_run_blueprint(&second_schedule)?;
+    let second_run =
+        second_blueprint.instantiate(&second_schedule, due, 1, config.maximum_horizon_seconds)?;
+    insert_schedule_planning_context(
+        &pool,
+        tenant_id,
+        second_schedule.run_as_identity.id,
+        &second_blueprint,
+    )
+    .await?;
     let replay_run = second_run.clone();
     let saturated_request = ExecutionScheduleRunAdmission {
         tenant_id,
@@ -949,12 +955,6 @@ fn schedule_request(
         plan: CanonicalExecutionPlan {
             definition: ExecutionPlanDefinition {
                 cancel_policy: ExecutionCancelPolicy::RetainEffects,
-                input_wait_policy: ExecutionWaitPolicy {
-                    expiry: ExecutionTemporalTarget::After {
-                        delay_seconds: 3_600,
-                    },
-                    on_expiry: ExecutionWaitExpiryAction::FailTask,
-                },
                 input_schema: serde_json::json!({"type":"object"}),
                 output_schema: serde_json::json!({"type":"object"}),
                 nodes: vec![ExecutionNode {

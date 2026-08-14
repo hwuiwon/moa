@@ -72,6 +72,113 @@ fn watchdog_output_node() -> ExecutionNode {
 }
 
 #[tokio::test]
+async fn task_start_uses_post_lock_progress_time_db() -> TestResult {
+    // Pins: a task-start transaction whose PostgreSQL NOW() predates a contended run lock still
+    // advances both task and run progress monotonically after the lock owner commits newer times.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let repository = ExecutionRepository::new(pool.clone());
+    let config = execution_capacity_config();
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let mut candidate = new_run(
+        tenant_id,
+        None,
+        "task-start-post-lock-time",
+        ExecutionRunStatus::Queued,
+        budget(10),
+    );
+    candidate.plan.definition.nodes = vec![watchdog_output_node()];
+    let run = create_run(&repository, scope, candidate).await?;
+    repository
+        .initialize_scheduler_state(scope, run.run_uid)
+        .await?;
+    assert!(matches!(
+        repository
+            .materialize_ready_page(
+                scope,
+                &config,
+                ReadyMaterializationRequest {
+                    run_uid: run.run_uid,
+                    plan_revision: 1,
+                    node_id: "watchdog-work".to_string(),
+                    expected_cursor: 0,
+                    reduce_cursor: None,
+                    source_exhausted: true,
+                    terminal_output: None,
+                    condition_skipped: false,
+                    tasks: vec![logical_task(
+                        run.run_uid,
+                        "watchdog-work",
+                        "one",
+                        estimate(1),
+                    )],
+                },
+            )
+            .await?,
+        ReadyMaterializationOutcome::Applied { .. }
+    ));
+    let admitted = repository
+        .admit_ready_attempts(&config, 1, Utc::now())
+        .await?
+        .admitted
+        .into_iter()
+        .next()
+        .expect("one task must be admitted");
+    let fence = TaskAttemptFence {
+        tenant_id: admitted.tenant_id,
+        run_uid: admitted.run_uid,
+        task_id: admitted.task_id,
+        controller_generation: admitted.controller_generation,
+        attempt_generation: admitted.attempt_generation,
+        dispatch_uid: admitted.dispatch_uid,
+        capacity_reservation_uid: admitted.capacity_reservation_uid,
+        watchdog_trigger_uid: admitted.watchdog_trigger_uid,
+        attempt_deadline_at: admitted.attempt_deadline_at,
+    };
+
+    let mut lock_owner = pool.begin().await?;
+    sqlx::query("SELECT run_uid FROM moa.execution_run WHERE run_uid=$1 FOR UPDATE")
+        .bind(run.run_uid)
+        .fetch_one(&mut *lock_owner)
+        .await?;
+    let start_repository = repository.clone();
+    let start = tokio::spawn(async move { start_repository.start_task_attempt(fence).await });
+    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    let newer_progress: DateTime<Utc> = sqlx::query_scalar(
+        "UPDATE moa.execution_task SET last_progress_at=clock_timestamp() \
+         WHERE run_uid=$1 AND task_id=$2 RETURNING last_progress_at",
+    )
+    .bind(run.run_uid)
+    .bind(admitted.task_id.as_uuid())
+    .fetch_one(&mut *lock_owner)
+    .await?;
+    sqlx::query("UPDATE moa.execution_run SET last_progress_at=$2 WHERE run_uid=$1")
+        .bind(run.run_uid)
+        .bind(newer_progress)
+        .execute(&mut *lock_owner)
+        .await?;
+    lock_owner.commit().await?;
+
+    assert!(matches!(
+        tokio::time::timeout(StdDuration::from_secs(5), start).await???,
+        TaskAttemptStartOutcome::Started(_)
+    ));
+    let persisted: (DateTime<Utc>, DateTime<Utc>) = sqlx::query_as(
+        "SELECT run.last_progress_at, task.last_progress_at \
+         FROM moa.execution_run AS run JOIN moa.execution_task AS task USING (run_uid) \
+         WHERE run.run_uid=$1 AND task.task_id=$2",
+    )
+    .bind(run.run_uid)
+    .bind(admitted.task_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(persisted.0 >= newer_progress);
+    assert!(persisted.1 >= newer_progress);
+    Ok(())
+}
+
+#[tokio::test]
 async fn trigger_creation_is_atomic_and_firing_is_due_generation_fenced_db() -> TestResult {
     // Pins: a trigger and its fallback delivery commit together; early delivery does not
     // advance state; one current due generation wakes once; stale and duplicate delivery no-op.

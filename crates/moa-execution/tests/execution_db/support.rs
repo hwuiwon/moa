@@ -593,12 +593,6 @@ pub(crate) fn canonical_plan(seed: u8) -> CanonicalExecutionPlan {
     CanonicalExecutionPlan {
         definition: moa_artifacts::execution_plan::ExecutionPlanDefinition {
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: ExecutionWaitPolicy {
-                expiry: ExecutionTemporalTarget::After {
-                    delay_seconds: 3_600,
-                },
-                on_expiry: ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
             nodes: Vec::new(),

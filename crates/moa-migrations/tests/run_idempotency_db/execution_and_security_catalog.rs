@@ -838,12 +838,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                     'definition',jsonb_build_object(
                         'cancel_policy','retain_effects','input_schema','{}'::JSONB,
                         'output_schema','{}'::JSONB,
-                        'input_wait_policy',jsonb_build_object(
-                            'expiry',jsonb_build_object(
-                                'kind','after','delay_seconds',1
-                            ),
-                            'on_expiry',jsonb_build_object('kind','fail_task')
-                        ),
                         'nodes','[]'::JSONB
                     ),
                     'plan_hash',repeat('3',64),'catalog_hash',repeat('0',64),
@@ -853,12 +847,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                     'definition',jsonb_build_object(
                         'cancel_policy','retain_effects','input_schema','{}'::JSONB,
                         'output_schema','{}'::JSONB,
-                        'input_wait_policy',jsonb_build_object(
-                            'expiry',jsonb_build_object(
-                                'kind','after','delay_seconds',1
-                            ),
-                            'on_expiry',jsonb_build_object('kind','fail_task')
-                        ),
                         'nodes','[]'::JSONB
                     ),
                     'plan_hash',repeat('3',64),'catalog_hash',repeat('0',64),
@@ -982,12 +970,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                         'definition',jsonb_build_object(\
                             'cancel_policy','retain_effects',\
                             'input_schema','{}'::JSONB,'output_schema','{}'::JSONB,\
-                            'input_wait_policy',jsonb_build_object(\
-                                'expiry',jsonb_build_object(\
-                                    'kind','after','delay_seconds',1\
-                                ),\
-                                'on_expiry',jsonb_build_object('kind','fail_task')\
-                            ),\
                             'nodes','[]'::JSONB\
                         ),\
                         'plan_hash',repeat('3',64),'catalog_hash',repeat('0',64),\
@@ -997,12 +979,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                         'definition',jsonb_build_object(\
                             'cancel_policy','retain_effects',\
                             'input_schema','{}'::JSONB,'output_schema','{}'::JSONB,\
-                            'input_wait_policy',jsonb_build_object(\
-                                'expiry',jsonb_build_object(\
-                                    'kind','after','delay_seconds',1\
-                                ),\
-                                'on_expiry',jsonb_build_object('kind','fail_task')\
-                            ),\
                             'nodes','[]'::JSONB\
                         ),\
                         'plan_hash',repeat('3',64),'catalog_hash',repeat('0',64),\
@@ -1703,16 +1679,17 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
         .await
         .is_err();
 
-        let catalog_shape: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+        let catalog_shape: (bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
             r#"
             SELECT
-                (SELECT count(*) = 169
+                (SELECT count(*) = 170
                  FROM information_schema.columns
                  WHERE table_schema = 'moa'
                    AND (
                      (table_name = 'execution_run' AND column_name IN (
                         'admitted_identity', 'controller_generation', 'activation_state',
                         'next_wake_at', 'waiting_since', 'last_progress_at',
+                        'budget_deadline_suspended_at',
                         'pause_requested_at', 'paused_at',
                         'activation_failure_count', 'ready_task_count',
                         'active_task_count', 'waiting_task_count',
@@ -1941,6 +1918,10 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
                      ,'execution_amendment_planning_settlement_pkey'
                      ,'execution_amendment_planning_settlement_reservation_uid_key'
                    )),
+                (SELECT indexdef LIKE '%budget_deadline_suspended_at IS NULL%'
+                 FROM pg_indexes
+                 WHERE schemaname = 'moa'
+                   AND indexname = 'execution_run_overdue_deadline_idx'),
                 moa.execution_admitted_identity_is_valid(admitted_identity, tenant_id)
                     AND activation_state = 'terminal'
                     AND status = 'cancelled',
@@ -1986,7 +1967,7 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
                    AND table_name = 'execution_maintenance_checkpoint'
                    AND grantee = 'moa_app')
                 AND
-                (SELECT count(*) = 10
+                (SELECT count(*) = 11
                  FROM pg_constraint
                  WHERE conname IN (
                     'execution_compensation_release_intent_shape_check',
@@ -1998,7 +1979,8 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
                     'execution_amendment_receipt_release_shape_check',
                     'execution_task_output_inline_size_check',
                     'execution_trigger_start_recovery_shape_check',
-                    'execution_completion_scan_kind_shape_check'
+                    'execution_completion_scan_kind_shape_check',
+                    'execution_run_budget_deadline_state_check'
                  ))
                 AND
                 (SELECT count(*) = 2
@@ -2006,8 +1988,8 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
                         AND bool_and(
                             pg_get_constraintdef(oid)
                                 LIKE '%execution_plan_snapshot_is_current%'
-                            AND pg_get_constraintdef(oid) LIKE '%completed%'
-                            AND pg_get_constraintdef(oid) LIKE '%cancelled%'
+                            AND pg_get_constraintdef(oid) NOT LIKE '%completed%'
+                            AND pg_get_constraintdef(oid) NOT LIKE '%cancelled%'
                         )
                  FROM pg_constraint
                  WHERE conrelid = 'moa.execution_run'::regclass
@@ -2264,7 +2246,7 @@ async fn long_horizon_execution_cutover_rejects_live_runs_and_installs_fenced_ca
         invalid_attempt_generation_rejected,
         "attempt generation may only advance one fence at a time"
     );
-    assert_eq!(catalog_shape, (true, true, true, true, true, true));
+    assert_eq!(catalog_shape, (true, true, true, true, true, true, true));
     let (purge_catalog_count, purge_batch_constant, purge_catalog_drift, receipts_drain_first) =
         purge_catalog;
     assert_eq!(
@@ -2300,10 +2282,6 @@ async fn seed_queued_execution_run(
             "cancel_policy": "retain_effects",
             "input_schema": {},
             "output_schema": {},
-            "input_wait_policy": {
-                "expiry": {"kind": "after", "delay_seconds": 3600},
-                "on_expiry": {"kind": "fail_task"}
-            },
             "nodes": [{
                 "id": "output",
                 "requirement_ids": [],

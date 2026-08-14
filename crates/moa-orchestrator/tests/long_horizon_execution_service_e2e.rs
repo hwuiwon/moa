@@ -208,28 +208,6 @@ fn continue_wait(days: u64, output: Value) -> ExecutionWaitPolicy {
     }
 }
 
-fn fixture_input_wait_policy(
-    compile_now: DateTime<Utc>,
-    admitted_deadline_at: DateTime<Utc>,
-) -> Result<ExecutionWaitPolicy> {
-    let remaining_seconds = admitted_deadline_at
-        .signed_duration_since(compile_now)
-        .to_std()
-        .context("fixture execution deadline already elapsed before compilation")?
-        .as_secs();
-    if remaining_seconds < 2 {
-        bail!(
-            "fixture execution deadline leaves no whole-second input wait strictly inside its horizon"
-        );
-    }
-    Ok(ExecutionWaitPolicy {
-        expiry: ExecutionTemporalTarget::After {
-            delay_seconds: remaining_seconds / 2,
-        },
-        on_expiry: ExecutionWaitExpiryAction::FailTask,
-    })
-}
-
 fn node(
     id: &str,
     depends_on: &[&str],
@@ -449,11 +427,6 @@ async fn start_plan_with_capability_policy(
         }
     }
     let compile_now = moa_test_support::fixtures::pg_now();
-    let admitted_deadline_at = planning
-        .snapshot
-        .budget
-        .deadline_at
-        .context("planning context omitted its admitted execution deadline")?;
     let goal = ExecutionGoalContract {
         objective,
         requirements: vec![ExecutionRequirement {
@@ -473,7 +446,6 @@ async fn start_plan_with_capability_policy(
     };
     let plan = ExecutionPlanDefinition {
         cancel_policy: ExecutionCancelPolicy::RetainEffects,
-        input_wait_policy: fixture_input_wait_policy(compile_now, admitted_deadline_at)?,
         input_schema: json!({"type": "object", "additionalProperties": false}),
         output_schema: json!({"type": "object"}),
         nodes,
@@ -886,8 +858,6 @@ mod fixture_contract_tests {
             goal,
             plan: ExecutionPlanDefinition {
                 cancel_policy: ExecutionCancelPolicy::RetainEffects,
-                input_wait_policy: fixture_input_wait_policy(now, deadline_at)
-                    .expect("fixture horizon should admit an input wait"),
                 input_schema: json!({"type": "object", "additionalProperties": false}),
                 output_schema: json!({"type": "object"}),
                 nodes: vec![output_node(&[], json!({"status": "complete"}))],
@@ -910,20 +880,6 @@ mod fixture_contract_tests {
             config: ExecutionConfig::default(),
             now,
         }
-    }
-
-    #[test]
-    fn short_fixture_horizon_gets_a_strictly_bounded_input_wait_offline() {
-        // Pins: the shared fixture must not copy a day-scale default into a
-        // short plan whose admitted deadline is only three seconds away.
-        let now = fixed_now();
-        let policy = fixture_input_wait_policy(now, now + TimeDelta::seconds(3))
-            .expect("three-second fixture horizon should admit a wait");
-
-        assert_eq!(
-            policy.expiry,
-            ExecutionTemporalTarget::After { delay_seconds: 1 }
-        );
     }
 
     #[test]

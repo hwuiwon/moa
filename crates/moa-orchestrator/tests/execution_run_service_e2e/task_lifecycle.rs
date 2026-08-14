@@ -30,8 +30,7 @@ use moa_execution::{
     compiler::{CompileExecutionRequest, CompiledExecution, compile},
     repository::{
         ExecutionRepository, ExecutionRunRecord, ExecutionScope, ExecutionTaskRecord,
-        NewExecutionRun, ReservationOutcome, TaskOutcomeRejection, TaskOutcomeWrite,
-        TransitionOutcome, run::RunAdmissionOutcome,
+        NewExecutionRun, ReservationOutcome, TaskOutcomeWrite, run::RunAdmissionOutcome,
     },
     state::{
         ExecutionRunStatus, ExecutionTaskId, ExecutionTaskStatus, ExecutionTerminalCause,
@@ -61,7 +60,7 @@ use serde_json::{Value, json};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use crate::evaluation::{assert_execution_eval_case, assert_repository_execution_eval_case};
+use crate::evaluation::assert_execution_eval_case;
 use crate::execution_execution_support::{
     assertions::journal_requests,
     fixtures::{POLL_INTERVAL, SERVICE_TIMEOUT, await_execution_terminal, list_execution_tasks},
@@ -134,7 +133,26 @@ async fn execution_eval_rate_limit_reuses_task_identity_service_e2e() -> Result<
     assert_eq!(task.task_id, run.task_id);
     assert_eq!(task.attempt, 2);
     assert_eq!(task.generation, 2);
-    assert_eq!(task.generation_history.len(), 2);
+    let settlement_history = task
+        .generation_history
+        .iter()
+        .filter(|entry| {
+            entry.get("kind").and_then(Value::as_str) == Some("bounded_attempt_settlement")
+        })
+        .map(|entry| {
+            json!({
+                "attempt_generation": entry.get("attempt_generation"),
+                "retry_scheduled": entry.get("retry_scheduled"),
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        settlement_history,
+        vec![
+            json!({"attempt_generation": 1, "retry_scheduled": true}),
+            json!({"attempt_generation": 2, "retry_scheduled": false}),
+        ]
+    );
     assert_eq!(task.status, ExecutionTaskStatus::Completed);
     assert_eq!(terminal.run.budget_ledger.consumed.tasks, 2);
     assert_eq!(terminal.run.budget_ledger.consumed.tool_calls, 2);
@@ -376,10 +394,10 @@ async fn confirmation_retries_after_persisted_epoch_before_dispatch_service_e2e(
     let recovered = tokio::time::timeout(SERVICE_TIMEOUT, interrupted)
         .await
         .context("confirmation request did not retry after orchestrator recovery")???;
-    assert!(matches!(
-        recovered,
-        ExecutionMutationResponse::Applied { .. } | ExecutionMutationResponse::Replayed { .. }
-    ));
+    assert!(
+        matches!(recovered, ExecutionMutationResponse::Replayed { .. }),
+        "a crash before ctx.run result journaling must rebuild the accepted handoff from Postgres"
+    );
 
     let provider_requests = journal_requests(
         fixture
@@ -546,18 +564,18 @@ async fn cancellation_releases_reservations_and_prevents_dispatch_service_e2e() 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
 async fn cancellation_retries_after_persisted_epoch_before_dispatch_service_e2e() -> Result<()> {
-    // Pins: a process crash after the cancellation fence commits but before the dispatcher
-    // accepts the kick cannot return success or advance the epoch twice;
-    // an already-admitted late effect remains authoritative under RetainEffects.
+    // Pins: a process crash after the cancellation fence commits but before the journaled
+    // result and exact LLM-owner fence cannot return success or invent a controller wake;
+    // recovery replays the same cancellation transport identity and rejects a late result.
     let tool_name = "lifecycle_cancel_handoff_probe";
     let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
     fixture
         .restart_orchestrator_with_env(vec![(
-            "MOA_EXECUTION_TEST_PAUSE_MUTATION_HANDOFF".to_string(),
+            "MOA_EXECUTION_TEST_PAUSE_CANCEL_DB_HANDOFF".to_string(),
             "true".to_string(),
         )])
         .await
-        .context("arm the post-commit execution-mutation handoff pause")?;
+        .context("arm the post-commit/pre-journal cancellation handoff pause")?;
     let prepared = prepare_capability_run(
         &fixture,
         "cancellation-handoff-recovery",
@@ -627,7 +645,7 @@ async fn cancellation_retries_after_persisted_epoch_before_dispatch_service_e2e(
     );
     let task = load_task(&run).await?;
     assert_eq!(task.generation, 1);
-    assert_eq!(task.status, ExecutionTaskStatus::Completed);
+    assert_eq!(task.status, ExecutionTaskStatus::Cancelled);
     assert_eq!(controller.calls().len(), 1);
     let attempts = controller.transport_attempts();
     assert_eq!(attempts.len(), 2);
@@ -1301,150 +1319,81 @@ async fn action_review_terminal_states_deliver_once_service_e2e() -> Result<()> 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
 async fn stale_generation_is_audit_only_service_e2e() -> Result<()> {
-    // Pins: a stale completion appends one rejected audit without changing projection or usage.
+    // Pins: a stale public signal delivery appends one rejected audit without changing
+    // projection or usage, while the exact generation still completes through the service.
     let tool_name = "lifecycle_stale_probe";
     let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
     let prepared = prepare_capability_run(
         &fixture,
         "stale-generation",
         tool_name,
-        RetryPolicy {
-            max_attempts: 2,
-            initial_backoff_ms: 0,
-            max_backoff_ms: 0,
-        },
-        ActionPolicyEffect::Allow,
-    )
-    .await?;
-    let run = create_direct_run(&prepared, prepared.planning.snapshot.budget.clone(), None).await?;
-    reserve_and_mark_running(&run).await?;
-    let retryable = ExecutionTaskOutcome {
-        schema_version: 1,
-        usage: zero_usage(),
-        result: ExecutionTaskResult::Failed {
-            class: ExecutionFailureClass::Retryable,
-            message: "retry under generation two".to_string(),
-        },
-    };
-    assert!(matches!(
-        run.repository
-            .record_task_outcome(run.scope, run.run_uid, run.task_id, 1, retryable)
-            .await?,
-        TaskOutcomeWrite::Applied { .. }
-    ));
-    assert!(matches!(
-        run.repository
-            .retry_task(run.scope, run.run_uid, run.task_id, 1)
-            .await?,
-        TransitionOutcome::Applied(_)
-    ));
-    let run_before = load_run(&run).await?;
-    let task_before = load_task(&run).await?;
-    assert_eq!(task_before.attempt, 2);
-    assert_eq!(task_before.generation, 2);
-    let controlled_before = controlled_task_projection(&task_before);
-
-    let stale = completed_outcome(json!({"result": "stale"}), zero_usage());
-    let rejected = run
-        .repository
-        .record_task_outcome(run.scope, run.run_uid, run.task_id, 1, stale)
-        .await?;
-    let TaskOutcomeWrite::Rejected { task, reason } = rejected else {
-        bail!("stale generation completion was not audit-only")
-    };
-    assert_eq!(reason, TaskOutcomeRejection::StaleGeneration);
-    assert_eq!(controlled_task_projection(&task), controlled_before);
-    assert_eq!(
-        task.outcome_audit.len(),
-        task_before.outcome_audit.len() + 1
-    );
-    let stale_audit = task
-        .outcome_audit
-        .last()
-        .context("stale completion omitted its audit record")?;
-    assert_eq!(stale_audit.get("accepted"), Some(&json!(false)));
-    assert_eq!(stale_audit.get("received_generation"), Some(&json!(1)));
-    assert_eq!(stale_audit.get("received_attempt"), Some(&json!(1)));
-    assert_eq!(
-        stale_audit.get("rejection"),
-        Some(&json!("stale_generation"))
-    );
-    assert_eq!(load_run(&run).await?, run_before);
-    let controller = fixture_capability(&fixture)?;
-    assert!(controller.calls().is_empty());
-    assert_repository_execution_eval_case(
-        &fixture,
-        &run.repository,
-        run.scope,
-        &run.request,
-        "stale-generation-write-is-fenced",
-        &[
-            ExecutionInvariantSpec::BudgetWithinApproved,
-            ExecutionInvariantSpec::ProgressMatchesTasks,
-            ExecutionInvariantSpec::NoDuplicateLogicalEffects,
-            ExecutionInvariantSpec::NoRawTaskOutputEvents,
-        ],
-    )
-    .await?;
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn duplicate_completion_does_not_double_account_service_e2e() -> Result<()> {
-    // Pins: exact task completion replay is byte-identical and consumes one logical task once.
-    let tool_name = "lifecycle_duplicate_probe";
-    let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
-    let prepared = prepare_capability_run(
-        &fixture,
-        "duplicate-completion",
-        tool_name,
         no_retry(),
         ActionPolicyEffect::Allow,
     )
     .await?;
-    let run = create_direct_run(&prepared, prepared.planning.snapshot.budget.clone(), None).await?;
-    reserve_and_mark_running(&run).await?;
-    let completion = completed_outcome(
-        json!({"result": "accepted-once"}),
-        ExecutionUsage {
-            cost_microusd: 0,
-            tokens: 0,
-            tool_calls: 1,
-            retrieved_bytes: 32,
-        },
-    );
-    assert!(matches!(
-        run.repository
-            .record_task_outcome(run.scope, run.run_uid, run.task_id, 1, completion.clone(),)
-            .await?,
-        TaskOutcomeWrite::Applied {
-            budget_overrun: false,
-            ..
-        }
-    ));
-    let run_before = load_run(&run).await?;
-    let task_before = load_task(&run).await?;
-    assert_eq!(run_before.consumed.tasks, 1);
-    assert_eq!(run_before.consumed.tool_calls, 1);
-    assert_eq!(run_before.progress_completed_tasks, 1);
-    assert_eq!(task_before.actual_tasks, 1);
+    let prepared = recompile_as_external_wait(prepared, ExternalWaitKind::Signal)?;
+    let run = start_service_run(&fixture, &prepared, false).await?;
+    let task_before = await_task_status(&run, ExecutionTaskStatus::WaitingSignal).await?;
+    let run_before = await_run_status(&run, ExecutionRunStatus::WaitingSignal).await?;
+    assert_eq!(task_before.attempt, 1);
+    assert_eq!(task_before.generation, 1);
+    let controlled_before = controlled_task_projection(&task_before);
 
-    let replayed = run
-        .repository
-        .record_task_outcome(run.scope, run.run_uid, run.task_id, 1, completion)
+    let payload = json!({"result": "signal-delivered"});
+    let stale_request = ExecutionSignalRequest {
+        tenant_id: run.tenant_id,
+        contact_id: None,
+        run_uid: run.run_uid,
+        task_id: run.task_id,
+        expected_generation: 2,
+        signal_name: "fixture-ready".to_string(),
+        payload: payload.clone(),
+    };
+    let rejected: ExecutionMutationResponse = fixture
+        .client
+        .post_call("/Execution/deliver_signal", &stale_request)
+        .await?;
+    assert_eq!(
+        rejected,
+        ExecutionMutationResponse::Conflict {
+            reason: ExecutionConflictReason::GenerationMismatch,
+        }
+    );
+    let stale_task = load_task(&run).await?;
+    assert_eq!(controlled_task_projection(&stale_task), controlled_before);
+    assert_eq!(
+        stale_task.outcome_audit.len(),
+        task_before.outcome_audit.len() + 1
+    );
+    let stale_audit = stale_task
+        .outcome_audit
+        .last()
+        .context("stale signal delivery omitted its audit record")?;
+    assert_eq!(stale_audit.get("accepted"), Some(&json!(false)));
+    assert_eq!(stale_audit.get("received_generation"), Some(&json!(2)));
+    assert_eq!(stale_audit.get("received_attempt"), Some(&Value::Null));
+    assert_eq!(
+        stale_audit.get("rejection"),
+        Some(&json!("stale_generation"))
+    );
+    assert_eq!(
+        controlled_run_projection(&load_run(&run).await?),
+        controlled_run_projection(&run_before)
+    );
+
+    let accepted_request = ExecutionSignalRequest {
+        expected_generation: 1,
+        ..stale_request
+    };
+    let accepted: ExecutionMutationResponse = fixture
+        .client
+        .post_call("/Execution/deliver_signal", &accepted_request)
         .await?;
     assert!(matches!(
-        replayed,
-        TaskOutcomeWrite::Replayed {
-            budget_overrun: false,
-            ..
-        }
+        accepted,
+        ExecutionMutationResponse::Applied { .. }
     ));
-    assert_eq!(load_run(&run).await?, run_before);
-    assert_eq!(load_task(&run).await?, task_before);
-
-    let terminal = drive_run_workflow(&fixture, &run).await?;
+    let terminal = await_execution_terminal(&fixture.client, &run.request).await?;
     assert_terminal(
         &terminal,
         ExecutionRunStatus::Completed,
@@ -1452,17 +1401,29 @@ async fn duplicate_completion_does_not_double_account_service_e2e() -> Result<()
         1,
         1,
     );
-    assert_eq!(terminal.run.budget_ledger.consumed.tasks, 2);
-    assert_eq!(terminal.run.budget_ledger.consumed.tool_calls, 1);
-    assert_eq!(terminal.run.completed_tasks, 2);
+    let completed = load_task(&run).await?;
+    assert_eq!(completed.status, ExecutionTaskStatus::Completed);
+    assert_eq!(completed.generation, 1);
+    assert_eq!(
+        completed.outcome_audit.len(),
+        task_before.outcome_audit.len() + 2
+    );
+    assert_eq!(
+        completed
+            .outcome_audit
+            .last()
+            .and_then(|audit| audit.get("accepted")),
+        Some(&json!(true))
+    );
     let controller = fixture_capability(&fixture)?;
     assert!(controller.calls().is_empty());
-    assert_repository_execution_eval_case(
+    assert!(controller.transport_attempts().is_empty());
+    assert_execution_eval_case(
         &fixture,
-        &run.repository,
-        run.scope,
+        &fixture.client,
         &run.request,
-        "duplicate-completion-is-idempotent",
+        Some(controller),
+        "stale-generation-write-is-fenced",
         &[
             ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Completed],
@@ -1988,12 +1949,6 @@ fn recompile_as_agent(
     });
     let plan = ExecutionPlanDefinition {
         cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-        input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-            expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                delay_seconds: 86_400,
-            },
-            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-        },
         input_schema: json!({"type": "object", "additionalProperties": false}),
         output_schema: output_schema.clone(),
         nodes: vec![
@@ -2070,7 +2025,7 @@ fn recompile_as_external_wait(
             signal_name: "fixture-ready".to_string(),
             wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
                 expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                    delay_seconds: 86_400,
+                    delay_seconds: 3_600,
                 },
                 on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
             },
@@ -2078,12 +2033,6 @@ fn recompile_as_external_wait(
     };
     let plan = ExecutionPlanDefinition {
         cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-        input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-            expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                delay_seconds: 86_400,
-            },
-            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-        },
         input_schema: json!({"type": "object", "additionalProperties": false}),
         output_schema: output_schema.clone(),
         nodes: vec![
@@ -2300,12 +2249,6 @@ fn lifecycle_plan_with_output_schema(
 ) -> ExecutionPlanDefinition {
     ExecutionPlanDefinition {
         cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-        input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-            expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                delay_seconds: 86_400,
-            },
-            on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-        },
         input_schema: json!({"type": "object", "additionalProperties": false}),
         output_schema: output_schema.clone(),
         nodes: vec![
@@ -2377,33 +2320,6 @@ fn zero_usage() -> ExecutionUsage {
     }
 }
 
-fn completed_outcome(output: Value, usage: ExecutionUsage) -> ExecutionTaskOutcome {
-    ExecutionTaskOutcome {
-        schema_version: 1,
-        usage,
-        result: ExecutionTaskResult::Completed {
-            output,
-            citations: Vec::new(),
-        },
-    }
-}
-
-async fn reserve_and_mark_running(run: &RunningCapabilityRun) -> Result<()> {
-    assert!(matches!(
-        run.repository
-            .reserve_task(run.scope, run.run_uid, run.task_id, 1)
-            .await?,
-        ReservationOutcome::Reserved(_)
-    ));
-    assert!(matches!(
-        run.repository
-            .mark_task_running(run.scope, run.run_uid, run.task_id, 1)
-            .await?,
-        TransitionOutcome::Applied(_)
-    ));
-    Ok(())
-}
-
 async fn await_committed_cancellation_fence(
     run: &RunningCapabilityRun,
     previous_epoch: u64,
@@ -2417,9 +2333,8 @@ async fn await_committed_cancellation_fence(
             .is_some_and(|pending| pending.status == ExecutionRunStatus::Cancelled)
         {
             assert_eq!(
-                persisted.wake_epoch,
-                previous_epoch + 1,
-                "the cancellation transaction must advance its wake epoch exactly once"
+                persisted.wake_epoch, previous_epoch,
+                "terminal drain must await the exact cancellation callback instead of inventing a controller wake"
             );
             return Ok(persisted.wake_epoch);
         }
@@ -2586,14 +2501,6 @@ async fn replay_run_through_public_start(
     assert!(!replayed.created);
     assert_eq!(replayed.run.run_uid, run.run_uid);
     Ok(())
-}
-
-async fn drive_run_workflow(
-    fixture: &OrchestratorTestFixture,
-    run: &RunningCapabilityRun,
-) -> Result<ExecutionStatusResponse> {
-    replay_run_through_public_start(fixture, run).await?;
-    await_execution_terminal(&fixture.client, &run.request).await
 }
 
 async fn load_run(run: &RunningCapabilityRun) -> Result<ExecutionRunRecord> {
@@ -2783,5 +2690,41 @@ fn controlled_task_projection(task: &ExecutionTaskRecord) -> Value {
         "output": task.output,
         "error": task.error,
         "citations": task.citations,
+    })
+}
+
+fn controlled_run_projection(run: &ExecutionRunRecord) -> Value {
+    json!({
+        "run_uid": run.run_uid,
+        "status": run.status,
+        "controller_generation": run.controller_generation,
+        "plan_revision": run.plan_revision,
+        "active_plan_hash": run.active_plan_hash,
+        "output": run.output,
+        "terminal_evidence": run.terminal_evidence,
+        "terminal_reason": run.terminal_reason,
+        "pending_terminal": run.pending_terminal,
+        "manual_repair_required": run.manual_repair_required,
+        "reserved": run.reserved,
+        "consumed": run.consumed,
+        "budget_overrun": run.budget_overrun,
+        "progress": {
+            "total": run.progress_total_tasks,
+            "completed": run.progress_completed_tasks,
+            "failed": run.progress_failed_tasks,
+            "cancelled": run.progress_cancelled_tasks,
+        },
+        "scheduler_counts": {
+            "ready": run.ready_task_count,
+            "active": run.active_task_count,
+            "waiting": run.waiting_task_count,
+            "waiting_input": run.waiting_input_task_count,
+            "waiting_review": run.waiting_review_task_count,
+            "waiting_signal": run.waiting_signal_task_count,
+            "waiting_timer": run.waiting_timer_task_count,
+            "waiting_external": run.waiting_external_task_count,
+            "waiting_replan": run.waiting_replan_task_count,
+        },
+        "waiting_reasons": run.waiting_reasons,
     })
 }

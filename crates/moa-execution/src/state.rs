@@ -951,8 +951,6 @@ pub enum WaitingReason {
         audience: InputAudience,
         /// Exact task question.
         question: String,
-        /// Absolute expiry and deterministic expiry action.
-        wait_policy: ExecutionWaitPolicy,
     },
     /// One task needs a tenant review decision.
     Review {

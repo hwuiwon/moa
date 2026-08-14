@@ -934,12 +934,6 @@ fn validate_execution_plan_at(
     allow_absolute_temporal_targets: bool,
     report: &mut ValidationReport,
 ) {
-    execution_plan::validate_input_wait_policy(
-        &format!("{root}.input_wait_policy"),
-        &definition.input_wait_policy,
-        allow_absolute_temporal_targets,
-        report,
-    );
     validate_json_schema(
         &format!("{root}.input_schema"),
         &definition.input_schema,

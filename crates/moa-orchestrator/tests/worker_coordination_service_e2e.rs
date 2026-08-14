@@ -618,6 +618,50 @@ async fn invocation_count(
     .map(|rows| rows.len())
 }
 
+async fn latest_worker_turn_call_journal(
+    fixture: &OrchestratorTestFixture,
+) -> Result<Vec<(u64, String)>> {
+    let rows = restate_query_rows(
+        fixture,
+        "SELECT journal.index, journal.entry_lite_json \
+         FROM sys_journal AS journal \
+         WHERE journal.id = ( \
+             SELECT id FROM sys_invocation \
+             WHERE target_service_name = 'WorkerTurnExecution' \
+               AND target_handler_name = 'run' \
+             ORDER BY created_at DESC LIMIT 1 \
+         ) \
+           AND journal.entry_type IN ('Command: Call', 'Command: OneWayCall') \
+         ORDER BY journal.index",
+    )
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            let index = row
+                .get("index")
+                .and_then(Value::as_u64)
+                .context("worker-turn journal row omitted its index")?;
+            let entry = row
+                .get("entry_lite_json")
+                .and_then(Value::as_str)
+                .context("worker-turn journal row omitted its call payload")?
+                .to_string();
+            Ok((index, entry))
+        })
+        .collect()
+}
+
+fn call_journal_index(entries: &[(u64, String)], service: &str, handler: &str) -> Result<u64> {
+    entries
+        .iter()
+        .find(|(_, entry)| {
+            entry.contains(&format!("\"name\":\"{service}\""))
+                && entry.contains(&format!("\"handler\":\"{handler}\""))
+        })
+        .map(|(index, _)| *index)
+        .with_context(|| format!("journal omitted {service}/{handler}; entries={entries:#?}"))
+}
+
 async fn await_invocation_count(
     fixture: &OrchestratorTestFixture,
     service: &str,
@@ -1221,6 +1265,26 @@ async fn needs_input_wakes_parent_and_resolves_exact_awakeable_once_service_e2e(
         invocation_count(&fixture, "WorkerTurnExecution", None, Some("run")).await?,
         1,
         "the input wait must be inside one worker workflow"
+    );
+    let call_journal = latest_worker_turn_call_journal(&fixture).await?;
+    let capture_index = call_journal_index(
+        &call_journal,
+        "ToolExecutor",
+        "capture_worker_hand_release_fence",
+    )?;
+    let register_index = call_journal_index(&call_journal, "Worker", "register_input_request")?;
+    let release_index = call_journal_index(
+        &call_journal,
+        "ToolExecutor",
+        "checkpoint_and_release_worker_hand",
+    )?;
+    let signal_index = call_journal_index(&call_journal, "Session", "record_child_signal")?;
+    assert!(
+        capture_index < register_index
+            && register_index < release_index
+            && release_index < signal_index,
+        "worker input park must capture the live hand, register the exact wait, and finish \
+         checkpoint/release before publishing NeedsInput: {call_journal:#?}"
     );
 
     let reply = start_turn_request(INPUT_ANSWER);

@@ -9,7 +9,7 @@ use moa_artifacts::execution_plan::{
     ExecutionCancelPolicy, ExecutionCondition, ExecutionGoalContract, ExecutionNode,
     ExecutionOperation, ExecutionPlanDefinition, ExecutionReducer, ExecutionReference,
     ExecutionRequirement, ExecutionTaskOutcome, ExecutionTaskResult, ExecutionTemporalTarget,
-    ExecutionUsage, ExecutionWaitExpiryAction, ExecutionWaitPolicy, MapTask, RetryPolicy,
+    ExecutionUsage, MapTask, RetryPolicy,
 };
 use moa_config::ExecutionConfig;
 use moa_core::types::{
@@ -830,15 +830,6 @@ fn canonical(nodes: Vec<ExecutionNode>) -> CanonicalExecutionPlan {
     CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: ExecutionWaitPolicy {
-                expiry: ExecutionTemporalTarget::At {
-                    at: Utc
-                        .with_ymd_and_hms(2026, 7, 13, 12, 0, 0)
-                        .single()
-                        .expect("input wait expiry"),
-                },
-                on_expiry: ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
             nodes,

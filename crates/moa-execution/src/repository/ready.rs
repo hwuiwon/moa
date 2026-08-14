@@ -15,6 +15,7 @@ use crate::schema::validate_instance;
 
 use super::*;
 use super::{
+    capacity::{ExecutionCapacityDimension, prelock_capacity_dimensions_in_tx},
     materialize::{ensure_materialization_replay_matches, prepare_task_materialization_batch},
     outcome_support::outcome_projection_fields,
     rows::*,
@@ -965,7 +966,39 @@ impl ExecutionRepository {
                 message: "ready materialization cursor overflow".to_string(),
             }
         })?;
+        let may_enter_storage_wait = tasks.first().is_some_and(|task| {
+            matches!(
+                &task.kind,
+                LogicalTaskKind::Review { .. }
+                    | LogicalTaskKind::WaitSignal { .. }
+                    | LogicalTaskKind::WaitUntil { .. }
+            )
+        });
         let mut conn = scope.begin(&self.pool).await?;
+        let visible_tenant_id = if may_enter_storage_wait {
+            let tenant_id = sqlx::query_scalar::<_, Uuid>(
+                "SELECT tenant_id FROM moa.execution_run WHERE run_uid=$1",
+            )
+            .bind(run_uid)
+            .fetch_optional(conn.as_mut())
+            .await
+            .map_err(sqlx_error)?;
+            let Some(tenant_id) = tenant_id else {
+                conn.commit().await.map_err(storage_error)?;
+                return Ok(ReadyMaterializationOutcome::Conflict);
+            };
+            let tenant_id = TenantId(tenant_id);
+            prelock_capacity_dimensions_in_tx(
+                conn.as_mut(),
+                config,
+                tenant_id,
+                &[ExecutionCapacityDimension::ScheduledTriggers],
+            )
+            .await?;
+            Some(tenant_id)
+        } else {
+            None
+        };
         let Some(run_row) = sqlx::query(LOAD_RUN_FOR_UPDATE_SQL)
             .bind(run_uid)
             .fetch_optional(conn.as_mut())
@@ -976,6 +1009,12 @@ impl ExecutionRepository {
             return Ok(ReadyMaterializationOutcome::Conflict);
         };
         let run = run_from_row(&run_row)?;
+        if visible_tenant_id.is_some_and(|tenant_id| tenant_id != run.tenant_id) {
+            return Err(Error::InvalidRepositoryData {
+                message: "execution run tenant changed while acquiring storage-wait capacity locks"
+                    .to_string(),
+            });
+        }
         if run.plan_revision != plan_revision
             || !matches!(
                 run.status,
@@ -1637,14 +1676,14 @@ impl ExecutionRepository {
                 }
             })?;
         let citation_ids = sqlx::query_scalar::<_, String>(
-            "SELECT citation.value ->> 'source_id' \
-             FROM moa.execution_task task \
-             CROSS JOIN LATERAL jsonb_array_elements(task.citations) \
-               WITH ORDINALITY AS citation(value, position) \
-             WHERE task.run_uid = $1 \
-               AND NULLIF(btrim(citation.value ->> 'source_id'), '') IS NOT NULL \
-             ORDER BY task.node_id, task.item_key, task.task_id, citation.position \
-             LIMIT $2",
+            "SELECT source_id FROM ( \
+                 SELECT DISTINCT citation.value ->> 'source_id' AS source_id \
+                 FROM moa.execution_task AS task \
+                 CROSS JOIN LATERAL jsonb_array_elements(task.citations) AS citation(value) \
+                 WHERE task.run_uid = $1 \
+                   AND NULLIF(btrim(citation.value ->> 'source_id'), '') IS NOT NULL \
+             ) AS citation_ids \
+             ORDER BY source_id LIMIT $2",
         )
         .bind(run_uid)
         .bind(citation_limit)
@@ -1652,10 +1691,10 @@ impl ExecutionRepository {
         .await
         .map_err(sqlx_error)?;
         let failures = sqlx::query_scalar::<_, String>(
-            "SELECT COALESCE(error, current_outcome #>> '{result,message}') \
+            "SELECT COALESCE(error ->> 'message', current_outcome #>> '{result,message}') \
              FROM moa.execution_task WHERE run_uid = $1 \
                AND status IN ('failed', 'unknown_outcome') \
-               AND COALESCE(error, current_outcome #>> '{result,message}') IS NOT NULL \
+               AND COALESCE(error ->> 'message', current_outcome #>> '{result,message}') IS NOT NULL \
              ORDER BY node_id, item_key, task_id LIMIT $2",
         )
         .bind(run_uid)
@@ -2579,7 +2618,7 @@ async fn transition_node_counters_inner(
     Ok(())
 }
 
-async fn cancel_unmaterialized_dependents_in_tx(
+pub(super) async fn cancel_unmaterialized_dependents_in_tx(
     conn: &mut PgConnection,
     run: &ExecutionRunRecord,
     failed_node_id: &str,

@@ -345,7 +345,6 @@ capabilities, database bootstrap, and a fresh supervised reaper heartbeat.
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
-| `MOA_SESSION_LIMITS_COORDINATOR_INPUT_TIMEOUT_MS` | `session_limits.coordinator_input_timeout_ms` | 1800000 | Maximum time a coordinator security-input round-trip blocks before the turn stops safely |
 | `MOA_SESSION_LIMITS_LOOP_DETECTION_THRESHOLD` | `session_limits.loop_detection_threshold` | 3 | Number of identical consecutive turn fingerprints that triggers a loop pause |
 | `MOA_SESSION_LIMITS_MAX_MODEL_TURNS_DELEGATION` | `session_limits.max_model_turns_delegation` | 12 | Maximum model loop iterations once a standard turn has delegated to at least one worker; replaces the base cap for the rest of that turn |
 | `MOA_SESSION_LIMITS_MAX_TOOL_CALLS` | `session_limits.max_tool_calls` | 30 | Maximum tool calls allowed within one turn |
@@ -357,7 +356,6 @@ capabilities, database bootstrap, and a fresh supervised reaper heartbeat.
 | `MOA_SESSION_LIMITS_WORKER_CLEANUP_GRACE_MS` | `session_limits.worker_cleanup_grace_ms` | 60000 | Grace window before a terminal worker self-cleans (removes itself from the parent fan-out and clears its VO state) after reporting its result |
 | `MOA_SESSION_LIMITS_WORKER_HEARTBEAT_INTERVAL_MS` | `session_limits.worker_heartbeat_interval_ms` | 15000 | Target cadence, in milliseconds, at which an active child refreshes its telemetry-plane heartbeat while running |
 | `MOA_SESSION_LIMITS_WORKER_HEARTBEAT_STALE_MS` | `session_limits.worker_heartbeat_stale_ms` | 60000 | Age, in milliseconds, beyond which the Worker's one outstanding liveness deadline emits a stale transition |
-| `MOA_SESSION_LIMITS_WORKER_INPUT_TIMEOUT_MS` | `session_limits.worker_input_timeout_ms` | 1800000 | Maximum time a child `request_input` round-trip blocks on its awakeable before returning a "no input received" result so the child can proceed or abort |
 | `MOA_SESSION_LIMITS_WORKER_RESUME_MAX_PER_WINDOW` | `session_limits.worker_resume_max_per_window` | 6 | Maximum guarded coordinator auto-resumes dispatched per rolling window before the resume path backs off |
 | `MOA_SESSION_LIMITS_WORKER_RESUME_WINDOW_MS` | `session_limits.worker_resume_window_ms` | 600000 | Rolling-window length, in milliseconds, for the guarded parent-resume budget |
 

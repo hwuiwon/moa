@@ -132,12 +132,6 @@ async fn output_only_run_is_durable_detached_and_reaches_terminal_state() -> Res
         },
         plan: ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                    delay_seconds: 86_400,
-                },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: json!({"type": "object", "additionalProperties": false}),
             output_schema: json!({
                 "type": "object",
@@ -351,12 +345,6 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
         },
         plan: ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                    delay_seconds: 86_400,
-                },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
             nodes: vec![ExecutionNode {

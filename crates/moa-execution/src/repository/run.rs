@@ -10,7 +10,7 @@ use super::{
     },
     outbox::{
         ExecutionDispatchKind, ExecutionDispatchRecord, NewExecutionDispatch,
-        enqueue_dispatch_in_conn,
+        dispatch_from_row_for_repository, enqueue_dispatch_in_conn,
     },
     rows::*,
     sql::*,
@@ -40,6 +40,8 @@ pub struct ExecutionCancellationProjection {
     pub run: ExecutionRunRecord,
     /// Completed plan-node identities, bounded by the compiler-capped active plan.
     pub completed_node_ids: Vec<String>,
+    /// Exact terminal-cancellation receipts still joined to a current cancelling task attempt.
+    pub task_cancellation_dispatches: Vec<ExecutionDispatchRecord>,
 }
 const LOAD_RUN_BY_IDEMPOTENCY_FOR_SESSION_SQL: &str = r#"
     SELECT *
@@ -350,6 +352,7 @@ impl ExecutionRepository {
         scope: ExecutionScope,
         run_uid: Uuid,
         expected_session_id: SessionId,
+        max_current_task_owners: usize,
     ) -> Result<Option<ExecutionCancellationProjection>> {
         let mut conn = scope.begin(&self.pool).await?;
         let row = sqlx::query(LOAD_RUN_FOR_SESSION_SQL)
@@ -394,10 +397,26 @@ impl ExecutionRepository {
                 message: "cancellation projection exceeded its active-plan bound".to_string(),
             });
         }
+        let task_cancellation_dispatches = if run.status == ExecutionRunStatus::Cancelled
+            || run
+                .pending_terminal
+                .as_ref()
+                .is_some_and(|pending| pending.status == ExecutionRunStatus::Cancelled)
+        {
+            load_current_terminal_task_cancellation_dispatches(
+                &mut conn,
+                &run,
+                max_current_task_owners,
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
         conn.commit().await.map_err(storage_error)?;
         Ok(Some(ExecutionCancellationProjection {
             run,
             completed_node_ids,
+            task_cancellation_dispatches,
         }))
     }
 
@@ -967,6 +986,52 @@ impl ExecutionRepository {
     }
 }
 
+pub(super) async fn load_current_terminal_task_cancellation_dispatches(
+    conn: &mut ScopedConn<'_>,
+    run: &ExecutionRunRecord,
+    max_current_task_owners: usize,
+) -> Result<Vec<ExecutionDispatchRecord>> {
+    let fetch_limit = i64::try_from(max_current_task_owners)
+        .map_err(|_| Error::InvalidRepositoryInput {
+            message: "cancellation owner bound exceeds PostgreSQL BIGINT".to_string(),
+        })?
+        .checked_add(1)
+        .ok_or_else(|| Error::ArithmeticOverflow {
+            context: "cancellation owner projection limit".to_string(),
+        })?;
+    let rows = sqlx::query(
+        "SELECT dispatch.* FROM moa.execution_dispatch_outbox AS dispatch \
+         JOIN moa.execution_task AS task ON task.run_uid=dispatch.run_uid \
+          AND task.task_id=dispatch.task_id \
+         WHERE dispatch.run_uid=$1 AND dispatch.tenant_id=$2 \
+          AND dispatch.dispatch_kind='task_attempt_cancel' \
+          AND dispatch.controller_generation=$3 \
+          AND dispatch.attempt_generation=task.attempt_generation \
+          AND task.attempt_state='cancelling' \
+          AND task.active_dispatch_uid IS NOT NULL \
+          AND dispatch.payload->>'active_dispatch_uid'=task.active_dispatch_uid::TEXT \
+          AND dispatch.payload->>'task_generation'=task.generation::TEXT \
+          AND dispatch.payload->>'attempt_generation'=task.attempt_generation::TEXT \
+          AND dispatch.payload->>'controller_generation'=$3::TEXT \
+          AND dispatch.payload->>'reason'='run_terminal' \
+         ORDER BY dispatch.task_id, dispatch.dispatch_uid LIMIT $4",
+    )
+    .bind(run.run_uid)
+    .bind(run.tenant_id.0)
+    .bind(to_i64(run.controller_generation, "controller generation")?)
+    .bind(fetch_limit)
+    .fetch_all(conn.as_mut())
+    .await
+    .map_err(sqlx_error)?;
+    if rows.len() > max_current_task_owners {
+        return Err(Error::InvalidRepositoryData {
+            message: "cancellation owner projection exceeded its configured in-flight bound"
+                .to_string(),
+        });
+    }
+    rows.iter().map(dispatch_from_row_for_repository).collect()
+}
+
 /// Arms the exact immutable run-deadline trigger inside the caller's transaction.
 ///
 /// Multi-resource admission callers must prelock `ActiveRuns` then `ScheduledTriggers` before
@@ -979,6 +1044,9 @@ pub(super) async fn arm_run_deadline_in_conn(
 ) -> Result<RunDeadlineArmOutcome> {
     if run.status.is_terminal() {
         return Ok(RunDeadlineArmOutcome::Terminal);
+    }
+    if run.budget_deadline_suspended_at.is_some() {
+        return Ok(RunDeadlineArmOutcome::NoDeadline);
     }
     let Some(deadline_at) = run.approved_budget.deadline_at else {
         return Ok(RunDeadlineArmOutcome::NoDeadline);

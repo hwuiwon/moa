@@ -79,9 +79,15 @@ impl ToolRouter {
             self.hands.workspace_repository.as_ref().ok_or_else(|| {
                 MoaError::StorageError("workspace repository missing".to_string())
             })?;
+        let contact_id = request
+            .session
+            .contact
+            .as_ref()
+            .map(|contact| contact.contact_id);
         if let Some(receipt) = repository
             .get_task_execution_hand_release_receipt(
                 request.session.tenant_id,
+                contact_id,
                 request.run_id,
                 task_id,
                 logical_generation,
@@ -104,6 +110,7 @@ impl ToolRouter {
             .record_absent_task_execution_hand_release_receipt(AbsentTaskHandReleaseIntent {
                 receipt_id: absence_receipt_id,
                 tenant_id: request.session.tenant_id,
+                contact_id,
                 run_id: request.run_id,
                 task_id,
                 logical_generation,
@@ -159,6 +166,7 @@ impl ToolRouter {
         let (receipt_id, release_claim_token, requested_at) = repository
             .begin_task_execution_hand_release(TaskHandReleaseIntent {
                 receipt_id: candidate_receipt_id,
+                contact_id,
                 run_id: request.run_id,
                 task_id,
                 logical_generation,
@@ -283,7 +291,7 @@ impl ToolRouter {
                     }
                 })?;
             if !repository
-                .finalize_task_yield_destroy(&final_workspace.binding()?, &final_lease)
+                .finalize_checkpointed_hand_destroy(&final_workspace.binding()?, &final_lease)
                 .await?
             {
                 // The compute is gone but the durable release did not commit, so the
@@ -400,7 +408,7 @@ impl ToolRouter {
             released_at: Utc::now(),
         };
         repository
-            .record_task_execution_hand_release_receipt(&receipt, release_claim_token)
+            .record_task_execution_hand_release_receipt(&receipt, release_claim_token, contact_id)
             .await
     }
 
@@ -419,6 +427,11 @@ impl ToolRouter {
             self.hands.workspace_repository.as_ref().ok_or_else(|| {
                 MoaError::StorageError("workspace repository missing".to_string())
             })?;
+        let contact_id = request
+            .session
+            .contact
+            .as_ref()
+            .map(|contact| contact.contact_id);
         if let Some(receipt) = repository
             .get_compensation_execution_hand_release_receipt(
                 request.session.tenant_id,
@@ -440,14 +453,15 @@ impl ToolRouter {
             MoaError::StorageError("durable hand lease store missing".to_string())
         })?;
         if let Some(claim) = repository
-            .claim_pending_compensation_execution_hand_release(
-                request.session.tenant_id,
-                request.run_id,
+            .claim_pending_compensation_execution_hand_release(CompensationHandReleaseClaimIntent {
+                tenant_id: request.session.tenant_id,
+                contact_id,
+                run_id: request.run_id,
                 compensation_id,
                 logical_generation,
-                request.attempt_generation,
-                Utc::now() + ChronoDuration::minutes(5),
-            )
+                attempt_generation: request.attempt_generation,
+                recovery_claim_expires_at: Utc::now() + ChronoDuration::minutes(5),
+            })
             .await?
         {
             let persisted_identity = match (
@@ -571,6 +585,7 @@ impl ToolRouter {
                     request.session.id,
                     &hand_scope,
                     claim.claim_token,
+                    contact_id,
                 )
                 .await;
         }
@@ -596,6 +611,7 @@ impl ToolRouter {
             .begin_compensation_execution_hand_release(CompensationHandReleaseIntent {
                 receipt_id,
                 tenant_id: request.session.tenant_id,
+                contact_id,
                 session_id: request.session.id,
                 run_id: request.run_id,
                 compensation_id,
@@ -690,6 +706,7 @@ impl ToolRouter {
                 request.session.id,
                 &hand_scope,
                 claim_token,
+                contact_id,
             )
             .await
     }

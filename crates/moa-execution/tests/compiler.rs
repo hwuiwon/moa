@@ -238,12 +238,6 @@ fn compile_accepts_wait_until_strictly_between_validation_time_and_run_deadline(
 fn compile_accepts_wait_entry_relative_targets_inside_the_remaining_horizon() {
     // Pins: reusable relative waits remain relative until their task enters storage-only waiting.
     let mut request = valid_request();
-    request.plan.input_wait_policy = ExecutionWaitPolicy {
-        expiry: ExecutionTemporalTarget::After {
-            delay_seconds: 7_200,
-        },
-        on_expiry: ExecutionWaitExpiryAction::FailTask,
-    };
     request.plan.nodes[0].operation = ExecutionOperation::WaitUntil {
         wake: ExecutionTemporalTarget::After {
             delay_seconds: 3_600,
@@ -2307,7 +2301,6 @@ fn valid_request() -> CompileExecutionRequest {
         },
         plan: ExecutionPlanDefinition {
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: default_wait_policy(),
             input_schema: json!({
                 "type": "object",
                 "required": ["order_id"],
@@ -2806,18 +2799,6 @@ fn generous_budget() -> ExecutionBudgetLimit {
                 .single()
                 .expect("time"),
         ),
-    }
-}
-
-fn default_wait_policy() -> ExecutionWaitPolicy {
-    ExecutionWaitPolicy {
-        expiry: ExecutionTemporalTarget::At {
-            at: Utc
-                .with_ymd_and_hms(2026, 7, 20, 0, 0, 0)
-                .single()
-                .expect("wait expiry"),
-        },
-        on_expiry: ExecutionWaitExpiryAction::FailTask,
     }
 }
 

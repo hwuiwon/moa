@@ -4,6 +4,7 @@ mod commit;
 mod execution_release;
 mod management;
 mod materialization;
+mod worker_release;
 
 use chrono::{Duration as ChronoDuration, Utc};
 use moa_core::{
@@ -35,8 +36,9 @@ use super::{
     },
     failpoints,
     model::{
-        AbsentTaskHandReleaseIntent, CompensationHandReleaseIntent, SandboxWorkspace,
-        TaskHandReleaseIntent, WorkspaceTransition, WorkspaceWriterClaim,
+        AbsentTaskHandReleaseIntent, CompensationHandReleaseClaimIntent,
+        CompensationHandReleaseIntent, SandboxWorkspace, TaskHandReleaseIntent,
+        WorkspaceTransition, WorkspaceWriterClaim,
     },
     operations::WorkspaceOperationIntent,
 };

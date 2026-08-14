@@ -906,12 +906,6 @@ async fn insert_execution_task(pool: &PgPool, tenant_id: TenantId) -> ExecutionT
     let plan = serde_json::to_value(CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::At {
-                    at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
-                },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: serde_json::json!({ "type": "object" }),
             output_schema: serde_json::json!({ "type": "object" }),
             nodes: Vec::new(),
@@ -948,12 +942,21 @@ async fn insert_execution_task(pool: &PgPool, tenant_id: TenantId) -> ExecutionT
         r#"
         INSERT INTO moa.execution_run (
             run_uid, tenant_id, session_id, originating_user_sequence_num,
-            planning_context_uid, planning_context_hash, owner_user_id, goal_contract,
+            planning_context_uid, planning_context_hash, owner_user_id, admitted_identity,
+            goal_contract,
             initial_plan, active_plan, initial_plan_hash, active_plan_hash,
             capability_catalog, authorization_envelope, pinned_instruction_skills,
             source_provenance, source_kind,
             input, status, queued_at
-        ) VALUES ($1, $2, $3, 1, $4, $5, 'test-owner', '{}'::JSONB, $6,
+        ) VALUES ($1, $2, $3, 1, $4, $5, 'test-owner',
+                  jsonb_build_object(
+                      'identity_type', 'service',
+                      'id', $2::TEXT,
+                      'tenant_id', $2::TEXT,
+                      'api_key_id', NULL,
+                      'acting_on_behalf_of', NULL
+                  ),
+                  '{}'::JSONB, $6,
                   $6, $5, $5, '{}'::JSONB, '{}'::JSONB, '[]'::JSONB,
                   '{"kind":"generated_plan"}'::JSONB,
                   'generated_plan', '{}'::JSONB, 'queued', NOW())

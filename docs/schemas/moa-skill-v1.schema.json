@@ -360,7 +360,6 @@
       "additionalProperties": false,
       "required": [
         "cancel_policy",
-        "input_wait_policy",
         "input_schema",
         "output_schema",
         "nodes"
@@ -368,9 +367,6 @@
       "properties": {
         "cancel_policy": {
           "$ref": "#/$defs/ExecutionCancelPolicy"
-        },
-        "input_wait_policy": {
-          "$ref": "#/$defs/ExecutionInputWaitPolicy"
         },
         "input_schema": {},
         "output_schema": {},
@@ -794,35 +790,6 @@
         },
         "on_expiry": {
           "$ref": "#/$defs/ExecutionWaitExpiryAction"
-        }
-      }
-    },
-    "ExecutionInputWaitPolicy": {
-      "description": "Plan-level expiry policy for runtime input requests. It settles whichever task returned NeedsInput, so a declared continue_with output has no node output_schema to validate against and is rejected.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "expiry",
-        "on_expiry"
-      ],
-      "properties": {
-        "expiry": {
-          "$ref": "#/$defs/ExecutionTemporalTarget"
-        },
-        "on_expiry": {
-          "$ref": "#/$defs/ExecutionInputWaitExpiryAction"
-        }
-      }
-    },
-    "ExecutionInputWaitExpiryAction": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind"
-      ],
-      "properties": {
-        "kind": {
-          "const": "fail_task"
         }
       }
     },

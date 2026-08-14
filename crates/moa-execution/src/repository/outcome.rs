@@ -11,6 +11,9 @@ use super::{
     sql::*,
     transition::task_outcome_is_exact_replay,
 };
+use amendment_reconciliation::reconcile_amendment_node_state_in_conn;
+
+mod amendment_reconciliation;
 
 impl ExecutionRepository {
     /// Records one cumulative task outcome under the current generation fence.
@@ -530,6 +533,16 @@ impl ExecutionRepository {
                 .ok_or_else(|| Error::InvalidRepositoryInput {
                     message: "execution plan revision overflow".to_string(),
                 })?;
+        reconcile_amendment_node_state_in_conn(conn.as_mut(), &run, &task, &validated.active_plan)
+            .await?;
+        sqlx::query(SUPERSEDE_REPLAN_TASK_SQL)
+            .bind(run_uid)
+            .bind(task.task_id.as_uuid())
+            .bind(task_audit)
+            .bind(superseded_outcome)
+            .fetch_one(conn.as_mut())
+            .await
+            .map_err(sqlx_error)?;
         let history = json!({
             "base_plan_revision": expected_revision,
             "plan_revision": next_revision,
@@ -577,6 +590,7 @@ impl ExecutionRepository {
                 "run consumed tasks",
             )?)
             .bind(reconciliation.budget_overrun)
+            .bind(task.task_id.as_uuid())
             .fetch_optional(conn.as_mut())
             .await
             .map_err(sqlx_error)?;
@@ -585,14 +599,6 @@ impl ExecutionRepository {
             return Ok(AmendmentWrite::Conflict);
         };
         let run = run_from_row(&row)?;
-        sqlx::query(SUPERSEDE_REPLAN_TASK_SQL)
-            .bind(run_uid)
-            .bind(task.task_id.as_uuid())
-            .bind(task_audit)
-            .bind(superseded_outcome)
-            .fetch_one(conn.as_mut())
-            .await
-            .map_err(sqlx_error)?;
         sqlx::query(
             "INSERT INTO moa.execution_amendment_receipt (tenant_id,run_uid, \
                  base_plan_revision,amendment_hash,receipt_kind,superseded_task_id, \

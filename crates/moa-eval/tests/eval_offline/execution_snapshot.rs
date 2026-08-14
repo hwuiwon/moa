@@ -264,6 +264,7 @@ fn runtime_parts(
         waiting_input_tenant_admin_task_count: 0,
         waiting_input_external_task_count: 0,
         approved_budget: approved_budget.clone(),
+        budget_deadline_suspended_at: None,
         reserved: ExecutionEstimate::default(),
         consumed: estimate,
         budget_overrun: false,
@@ -481,12 +482,6 @@ fn canonical_plan(catalog_hash: ExecutionHash) -> CanonicalExecutionPlan {
     CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
             cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::At {
-                    at: fixed_time() + chrono::TimeDelta::hours(1),
-                },
-                on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
             nodes: vec![moa_artifacts::execution_plan::ExecutionNode {

@@ -74,6 +74,20 @@ struct AgentPending {
     external: Option<PendingExternalToolInvocation>,
 }
 
+fn resolve_declared_capability<'a>(
+    capabilities: &'a BTreeMap<String, &'a ExecutionCapability>,
+    invocation: &ToolInvocation,
+    usage: &ExecutionUsage,
+) -> Result<&'a ExecutionCapability, Box<ExecutionTaskOutcome>> {
+    capabilities.get(&invocation.name).copied().ok_or_else(|| {
+        Box::new(failed_task_outcome(
+            ExecutionFailureClass::Terminal,
+            format!("agent emitted undeclared capability `{}`", invocation.name),
+            usage.clone(),
+        ))
+    })
+}
+
 /// Executes one bounded task-local agent model or tool boundary.
 pub(super) async fn execute_agent_turn(
     workflow: &ExecutionTaskAttemptImpl,
@@ -436,12 +450,10 @@ pub(super) async fn execute_agent_turn(
     }
 
     let invocation = pending_tool_calls.remove(0);
-    let capability = capabilities.get(&invocation.name).copied().ok_or_else(|| {
-        TerminalError::new(format!(
-            "agent emitted undeclared capability `{}`",
-            invocation.name
-        ))
-    })?;
+    let capability = match resolve_declared_capability(&capabilities, &invocation, &usage) {
+        Ok(capability) => capability,
+        Err(outcome) => return Ok(ActiveTaskAttemptExit::Outcome(*outcome)),
+    };
     if disabled_capabilities.contains_key(&invocation.name) {
         let tool_use_id = invocation
             .id
@@ -813,6 +825,38 @@ mod tests {
     use moa_core::types::tools::IdempotencyClass;
 
     use super::*;
+
+    // Pins: a model-authored call outside the task's declared capability envelope
+    // becomes a typed terminal task outcome, preserving accumulated usage so the
+    // normal attempt-settlement path owns cleanup and controller progress.
+    #[test]
+    fn undeclared_agent_capability_becomes_terminal_task_outcome_offline() {
+        let invocation = ToolInvocation {
+            id: Some("undeclared-call".to_string()),
+            name: "fixture-capability__forbidden_execution_eval_action".to_string(),
+            input: json!({"case": "escape"}),
+        };
+        let usage = ExecutionUsage {
+            cost_microusd: 17,
+            tokens: 23,
+            tool_calls: 2,
+            retrieved_bytes: 31,
+        };
+        let capabilities = BTreeMap::<String, &ExecutionCapability>::new();
+
+        let outcome = resolve_declared_capability(&capabilities, &invocation, &usage)
+            .expect_err("an undeclared capability must stop through task settlement");
+
+        assert_eq!(
+            *outcome,
+            failed_task_outcome(
+                ExecutionFailureClass::Terminal,
+                "agent emitted undeclared capability `fixture-capability__forbidden_execution_eval_action`"
+                    .to_string(),
+                usage,
+            )
+        );
+    }
 
     // Pins: once an asynchronous provider start commits, the durable checkpoint
     // retains the exact model invocation, effect semantics, and MOA job identity;

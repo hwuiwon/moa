@@ -1,11 +1,18 @@
 //! Bounded persisted completion scanning and exact verifier materialization.
 
+mod coverage;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use moa_artifacts::execution_plan::{CompletionCheckKind, ExecutionFailureClass, RetryPolicy};
 use moa_config::ExecutionConfig;
 use serde::{Deserialize, Serialize};
 
+use self::coverage::{
+    CoverageTaskEvidence, PersistedCoverageEvaluation, accumulate_task_coverage_evidence,
+    coverage_by_node, load_persisted_coverage_evaluations, prepare_coverage_evidence,
+    resolve_coverage_expectation,
+};
 use super::*;
 use super::{
     materialize::prepare_task_materialization_batch,
@@ -94,6 +101,7 @@ struct CompletionTaskEvidence {
     authorization_denied: bool,
     unsupported_by_requirement: BTreeMap<String, UnsupportedRequirementEvidence>,
     citation_failures: BTreeMap<String, CitationFailureEvidence>,
+    coverage: BTreeMap<String, CoverageTaskEvidence>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -393,6 +401,14 @@ impl ExecutionRepository {
             scanned_tasks = u32::try_from(tasks.len()).map_err(|_| Error::ArithmeticOverflow {
                 context: "completion page task count".to_string(),
             })?;
+            for coverage in &run.goal.coverage {
+                let expectation =
+                    resolve_coverage_expectation(conn.as_mut(), &run, coverage).await?;
+                prepare_coverage_evidence(coverage, &expectation, &mut evidence)?;
+                for task in &tasks {
+                    accumulate_task_coverage_evidence(coverage, task, &expectation, &mut evidence)?;
+                }
+            }
             for task in &tasks {
                 accumulate_task_evidence(&run, task, &mut evidence)?;
             }
@@ -552,10 +568,14 @@ impl ExecutionRepository {
             conn.commit().await.map_err(storage_error)?;
             return Ok(CompletionAdvanceOutcome::WaitingForVerifiers);
         }
+        let coverage_evaluations =
+            load_persisted_coverage_evaluations(conn.as_mut(), &run, &node_evidence, &evidence)
+                .await?;
         let (mut evaluation, terminal_output) = evaluate_persisted_completion(
             &run,
             &node_evidence,
             &evidence,
+            &coverage_evaluations,
             &verifier_tasks,
             request.now,
         )?;
@@ -603,12 +623,16 @@ impl ExecutionRepository {
             });
         }
         let typed_failure = load_earliest_typed_task_failure(conn.as_mut(), run.run_uid).await?;
+        let typed_failure_class = typed_failure.as_ref().map(|failure| failure.class.clone());
         let terminal_projection =
             terminal_projection_for_evaluation(&evaluation, terminal_output, typed_failure)?;
         if evaluation.status != CompletionStatus::Completed {
-            let cause = ExecutionTerminalCause::Completion {
-                limit_stop: evaluation.limit_stop,
-            };
+            let cause = typed_failure_class.map_or(
+                ExecutionTerminalCause::Completion {
+                    limit_stop: evaluation.limit_stop,
+                },
+                |class| ExecutionTerminalCause::TaskFailure { class },
+            );
             let terminal_evidence = terminal_evidence_from_evaluation(cause, &evaluation)?;
             let reason = execution_terminal_reason(
                 &terminal_evidence.cause,
@@ -836,7 +860,7 @@ async fn materialize_verifiers_in_tx(
     nodes: &CompletionNodeEvidence,
     limit: u32,
 ) -> Result<(Vec<ExecutionTaskRecord>, bool)> {
-    let coverage_by_node = coverage_by_node(run, nodes);
+    let coverage_by_node = coverage_by_node(run, nodes, evidence)?;
     let unresolved = unsatisfied_requirements(run, nodes, &coverage_by_node);
     let terminal_output = nodes.terminal_output.clone();
     let existing = sqlx::query_scalar::<_, String>(
@@ -1207,6 +1231,7 @@ fn evaluate_persisted_completion(
     run: &ExecutionRunRecord,
     nodes: &CompletionNodeEvidence,
     evidence: &CompletionTaskEvidence,
+    coverage_evaluations: &[PersistedCoverageEvaluation],
     verifier_tasks: &[ExecutionTaskRecord],
     now: DateTime<Utc>,
 ) -> Result<(CompletionEvaluation, Option<Value>)> {
@@ -1215,11 +1240,10 @@ fn evaluate_persisted_completion(
     let mut coverage_by_node = BTreeMap::new();
     let mut failed_coverage = Vec::new();
     for coverage in &run.goal.coverage {
-        let passed = nodes
-            .coverage_passed
-            .get(&coverage.id)
-            .copied()
-            .unwrap_or(false);
+        let passed = coverage_evaluations
+            .iter()
+            .find(|evaluation| evaluation.coverage_id == coverage.id)
+            .is_some_and(|evaluation| evaluation.passed);
         coverage_by_node
             .entry(coverage.map_node_id.clone())
             .and_modify(|node_passed| *node_passed &= passed)
@@ -1274,18 +1298,13 @@ fn evaluate_persisted_completion(
                 )
             }
             CompletionCheckKind::MapCoverage { map_node_id } => {
-                let matching = run
-                    .goal
-                    .coverage
+                let matching = coverage_evaluations
                     .iter()
                     .filter(|coverage| coverage.map_node_id == *map_node_id)
                     .collect::<Vec<_>>();
                 let passed = !matching.is_empty()
                     && coverage_by_node.get(map_node_id).copied().unwrap_or(false);
-                (
-                    passed,
-                    json!({"map_node_id": map_node_id, "persisted_materialization_complete": passed}),
-                )
+                (passed, serde_json::to_value(matching)?)
             }
             CompletionCheckKind::Citations { .. } => {
                 let failed = evidence
@@ -1472,25 +1491,6 @@ fn unsatisfied_requirements(
     partition_requirements(run, nodes, coverage).1
 }
 
-fn coverage_by_node(
-    run: &ExecutionRunRecord,
-    nodes: &CompletionNodeEvidence,
-) -> BTreeMap<String, bool> {
-    let mut by_node = BTreeMap::new();
-    for coverage in &run.goal.coverage {
-        let passed = nodes
-            .coverage_passed
-            .get(&coverage.id)
-            .copied()
-            .unwrap_or(false);
-        by_node
-            .entry(coverage.map_node_id.clone())
-            .and_modify(|current| *current &= passed)
-            .or_insert(passed);
-    }
-    by_node
-}
-
 fn validate_completion_runtime_bounds(
     run: &ExecutionRunRecord,
     config: &ExecutionConfig,
@@ -1544,7 +1544,7 @@ async fn load_earliest_typed_task_failure(
     run_uid: Uuid,
 ) -> Result<Option<ExecutionTaskFailure>> {
     let row = sqlx::query(
-        "SELECT current_outcome \
+        "SELECT status,current_outcome \
          FROM moa.execution_task \
          WHERE run_uid = $1 \
            AND status IN ('failed', 'unknown_outcome') \
@@ -1559,19 +1559,32 @@ async fn load_earliest_typed_task_failure(
     let Some(row) = row else {
         return Ok(None);
     };
+    let status: String = row.try_get("status").map_err(row_error)?;
     let outcome: Value = row.try_get("current_outcome").map_err(row_error)?;
     let outcome: ExecutionTaskOutcome =
         serde_json::from_value(outcome).map_err(|error| Error::InvalidRepositoryData {
             message: format!("terminal failure outcome is undecodable: {error}"),
         })?;
-    Ok(match outcome.result {
-        ExecutionTaskResult::Failed { class, message } => Some(ExecutionTaskFailure {
+    let failure = match (status.as_str(), outcome.result) {
+        ("failed", ExecutionTaskResult::Failed { class, message }) => ExecutionTaskFailure {
             class,
             message,
             capability_ref: None,
-        }),
-        _ => None,
-    })
+        },
+        ("unknown_outcome", ExecutionTaskResult::UnknownOutcome { message }) => {
+            ExecutionTaskFailure {
+                class: ExecutionFailureClass::Terminal,
+                message,
+                capability_ref: None,
+            }
+        }
+        (status, _) => {
+            return Err(Error::InvalidRepositoryData {
+                message: format!("terminal task status `{status}` has an incompatible outcome"),
+            });
+        }
+    };
+    Ok(Some(failure))
 }
 
 fn terminal_projection_for_evaluation(

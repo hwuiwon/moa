@@ -29,17 +29,11 @@ use super::{
         transition_node_counters_with_input_audience_in_tx,
     },
     rows::*,
-    run::enqueue_run_activation_in_conn,
+    run::{arm_run_deadline_in_conn, enqueue_run_activation_in_conn},
     sql::*,
     transition::{refresh_run_after_wait_settlement_in_conn, task_outcome_is_exact_replay},
-    trigger::{
-        ExecutionTriggerKind, ExecutionTriggerSupersedeOutcome, NewExecutionTrigger,
-        create_trigger_with_dispatch_in_conn, supersede_trigger_in_conn,
-    },
+    trigger::{ExecutionTriggerKind, ExecutionTriggerSupersedeOutcome, supersede_trigger_in_conn},
 };
-
-const TASK_INPUT_WAIT_TRIGGER_NAMESPACE: Uuid =
-    Uuid::from_u128(0x9a2e_18f4_1c5e_57c4_8bf5_ea73_52e9_4a11);
 
 /// Immutable identity of one admitted bounded task-attempt slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -555,8 +549,7 @@ pub struct ResolveTaskAttemptReviewRequest {
     pub resolved_at: DateTime<Utc>,
 }
 
-struct SettleTaskAttemptRequest<'a> {
-    config: &'a ExecutionConfig,
+struct SettleTaskAttemptRequest {
     fence: TaskAttemptFence,
     outcome: ExecutionTaskOutcome,
     retry_at: Option<DateTime<Utc>>,
@@ -1412,7 +1405,8 @@ impl ExecutionRepository {
             "UPDATE moa.execution_task \
              SET status = 'running', attempt_state = 'running', \
                  attempt_started_at = COALESCE(attempt_started_at, NOW()), \
-                 started_at = COALESCE(started_at, NOW()), last_progress_at = NOW(), \
+                 started_at = COALESCE(started_at, NOW()), \
+                 last_progress_at = GREATEST(last_progress_at, clock_timestamp()), \
                  progress_step_bound_seconds = NULL, \
                  updated_at = NOW() \
              WHERE run_uid = $1 AND task_id = $2 AND status = 'dispatching' \
@@ -1429,7 +1423,8 @@ impl ExecutionRepository {
         sqlx::query(
             "UPDATE moa.execution_run \
              SET status = CASE WHEN status = 'queued' THEN 'running' ELSE status END, \
-                 started_at = COALESCE(started_at, NOW()), last_progress_at = NOW(), \
+                 started_at = COALESCE(started_at, NOW()), \
+                 last_progress_at = GREATEST(last_progress_at, clock_timestamp()), \
                  updated_at = NOW() WHERE run_uid = $1",
         )
         .bind(fence.run_uid)
@@ -1830,14 +1825,13 @@ impl ExecutionRepository {
     /// can admit the next slice.
     pub async fn settle_task_attempt(
         &self,
-        config: &ExecutionConfig,
+        _config: &ExecutionConfig,
         fence: TaskAttemptFence,
         outcome: ExecutionTaskOutcome,
         retry_at: Option<DateTime<Utc>>,
         settled_at: DateTime<Utc>,
     ) -> Result<TaskAttemptSettlementOutcome> {
         self.settle_task_attempt_inner(SettleTaskAttemptRequest {
-            config,
             fence,
             outcome,
             retry_at,
@@ -1852,7 +1846,7 @@ impl ExecutionRepository {
     /// Finalizes a cancelling attempt only after exact sandbox release proof is available.
     pub async fn settle_released_task_attempt(
         &self,
-        config: &ExecutionConfig,
+        _config: &ExecutionConfig,
         fence: TaskAttemptFence,
         outcome: ExecutionTaskOutcome,
         retry_at: Option<DateTime<Utc>>,
@@ -1872,7 +1866,6 @@ impl ExecutionRepository {
             return Ok(TaskAttemptSettlementOutcome::Stale);
         }
         self.settle_task_attempt_inner(SettleTaskAttemptRequest {
-            config,
             fence,
             outcome,
             retry_at,
@@ -1997,7 +1990,7 @@ impl ExecutionRepository {
     /// Settles an input wait while preserving the exact resumable agent continuation.
     pub async fn settle_released_task_attempt_with_checkpoint(
         &self,
-        config: &ExecutionConfig,
+        _config: &ExecutionConfig,
         fence: TaskAttemptFence,
         outcome: ExecutionTaskOutcome,
         settled_at: DateTime<Utc>,
@@ -2011,7 +2004,6 @@ impl ExecutionRepository {
             return Ok(TaskAttemptSettlementOutcome::InvalidState);
         }
         self.settle_task_attempt_inner(SettleTaskAttemptRequest {
-            config,
             fence,
             outcome,
             retry_at: None,
@@ -2198,10 +2190,9 @@ impl ExecutionRepository {
 
     async fn settle_task_attempt_inner(
         &self,
-        request: SettleTaskAttemptRequest<'_>,
+        request: SettleTaskAttemptRequest,
     ) -> Result<TaskAttemptSettlementOutcome> {
         let SettleTaskAttemptRequest {
-            config,
             fence,
             outcome,
             retry_at,
@@ -2263,6 +2254,16 @@ impl ExecutionRepository {
             conn.rollback().await.map_err(storage_error)?;
             return Ok(TaskAttemptSettlementOutcome::Stale);
         }
+        // Preserve the global capacity lock order before locking the run: task settlement may
+        // make the run fully input-parked and supersede its deadline trigger. Deadline delivery
+        // takes ScheduledTriggers before the run, so taking that bucket here prevents a
+        // run-to-trigger lock inversion without retaining active task capacity.
+        prelock_existing_capacity_dimensions_in_tx(
+            conn.as_mut(),
+            fence.tenant_id,
+            &[ExecutionCapacityDimension::ScheduledTriggers],
+        )
+        .await?;
         let Some(run_row) = sqlx::query(LOAD_RUN_FOR_UPDATE_SQL)
             .bind(fence.run_uid)
             .fetch_optional(conn.as_mut())
@@ -2284,35 +2285,6 @@ impl ExecutionRepository {
             return Ok(TaskAttemptSettlementOutcome::NotFound);
         };
         let task = task_from_row(&task_row)?;
-        // A relative input-wait expiry resolves against wait entry, not compile time, so a delay
-        // that was legal when the plan compiled can land past the run deadline here. That is a
-        // product outcome for a long-horizon run, so the task fails terminally with a typed
-        // deadline failure instead of parking on a wait that can never settle in time.
-        let needs_input = matches!(outcome.result, ExecutionTaskResult::NeedsInput { .. });
-        let outcome = match run.approved_budget.deadline_at {
-            Some(run_deadline_at) if needs_input => {
-                match crate::interpreter::resolve_temporal_target_within_deadline(
-                    &run.active_plan.definition.input_wait_policy.expiry,
-                    settled_at,
-                    run_deadline_at,
-                )? {
-                    crate::interpreter::TemporalTargetResolution::Due(_) => outcome,
-                    crate::interpreter::TemporalTargetResolution::DeadlineExceeded {
-                        due_at,
-                        run_deadline_at,
-                    } => failed_task_outcome(
-                        moa_artifacts::execution_plan::ExecutionFailureClass::DeadlineExceeded,
-                        format!(
-                            "input wait on node `{}` entered at {settled_at} resolves at \
-                             {due_at}, at or after the run deadline {run_deadline_at}",
-                            task.node_id
-                        ),
-                        outcome.usage.clone(),
-                    ),
-                }
-            }
-            _ => outcome,
-        };
         if capacity == CapacityReleaseOutcome::AlreadyReleased {
             let replay = task_attempt_settlement_replayed(&task, &fence, &outcome);
             if replay {
@@ -2503,21 +2475,6 @@ impl ExecutionRepository {
         .await
         .map_err(sqlx_error)?;
         let task = task_from_row(&row)?;
-        let input_wait_due_at = if task.status == ExecutionTaskStatus::WaitingInput {
-            let run_deadline_at =
-                run.approved_budget
-                    .deadline_at
-                    .ok_or_else(|| Error::InvalidRepositoryInput {
-                        message: "input waits require an absolute run deadline".to_string(),
-                    })?;
-            Some(crate::interpreter::resolve_temporal_target(
-                &run.active_plan.definition.input_wait_policy.expiry,
-                settled_at,
-                run_deadline_at,
-            )?)
-        } else {
-            None
-        };
         if task.status == ExecutionTaskStatus::WaitingInput {
             let input_audience = task
                 .current_outcome
@@ -2559,20 +2516,6 @@ impl ExecutionRepository {
                     task_id: task.task_id,
                     audience,
                     question,
-                    wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                        expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::At {
-                            at: input_wait_due_at.ok_or_else(|| Error::InvalidRepositoryData {
-                                message: "waiting-input task is missing its resolved expiry"
-                                    .to_string(),
-                            })?,
-                        },
-                        on_expiry: run
-                            .active_plan
-                            .definition
-                            .input_wait_policy
-                            .on_expiry
-                            .clone(),
-                    },
                 },
                 settled_at,
             )
@@ -2588,45 +2531,8 @@ impl ExecutionRepository {
             )
             .await?;
         }
-        if task.status == ExecutionTaskStatus::WaitingInput {
-            let due_at = input_wait_due_at.ok_or_else(|| Error::InvalidRepositoryData {
-                message: "waiting-input task is missing its resolved expiry".to_string(),
-            })?;
-            let trigger_uid = Uuid::new_v5(
-                &TASK_INPUT_WAIT_TRIGGER_NAMESPACE,
-                format!(
-                    "{}:{}:{}:{}",
-                    fence.run_uid, task.task_id, task.generation, settled_at
-                )
-                .as_bytes(),
-            );
-            create_trigger_with_dispatch_in_conn(
-                conn.as_mut(),
-                config,
-                &NewExecutionTrigger {
-                    trigger_uid,
-                    tenant_id: fence.tenant_id,
-                    run_uid: Some(fence.run_uid),
-                    task_id: Some(fence.task_id.as_uuid()),
-                    compensation_id: None,
-                    schedule_uid: None,
-                    schedule_incarnation: None,
-                    kind: ExecutionTriggerKind::WaitExpiry,
-                    controller_generation: Some(fence.controller_generation),
-                    attempt_generation: Some(task.generation),
-                    compensation_generation: None,
-                    compensation_attempt_generation: None,
-                    occurrence_sequence: None,
-                    due_at,
-                    payload: json!({
-                        "task_generation": task.generation,
-                        "waiting_since": settled_at,
-                        "source": "active_task_input_wait",
-                    }),
-                },
-            )
+        suspend_run_deadline_if_fully_waiting_for_input_in_tx(&mut conn, fence.run_uid, settled_at)
             .await?;
-        }
         let activation_at = retry_at.unwrap_or(settled_at);
         enqueue_run_activation_in_conn(
             conn.as_mut(),
@@ -4744,7 +4650,7 @@ impl ExecutionRepository {
             resume_input,
         } = request;
         let mut conn = scope.begin(&self.pool).await?;
-        let locked_wait_trigger_uid = if kind == ResumeKind::Input {
+        if kind == ResumeKind::Input {
             let config = config.ok_or_else(|| Error::InvalidRepositoryInput {
                 message: "input resume requires validated execution capacity configuration"
                     .to_string(),
@@ -4772,26 +4678,7 @@ impl ExecutionRepository {
                 ],
             )
             .await?;
-            let trigger_uids = sqlx::query_scalar::<_, Uuid>(
-                "SELECT trigger_uid FROM moa.execution_trigger \
-                 WHERE run_uid=$1 AND task_id=$2 AND trigger_kind='wait_expiry' \
-                   AND state = 'pending' \
-                 ORDER BY trigger_uid LIMIT 2 FOR UPDATE",
-            )
-            .bind(run_uid)
-            .bind(task_id.as_uuid())
-            .fetch_all(conn.as_mut())
-            .await
-            .map_err(sqlx_error)?;
-            if trigger_uids.len() > 1 {
-                return Err(Error::InvalidRepositoryData {
-                    message: "waiting-input task owns multiple active expiry triggers".to_string(),
-                });
-            }
-            trigger_uids.into_iter().next()
-        } else {
-            None
-        };
+        }
         let Some(run_row) = sqlx::query(LOAD_RUN_FOR_UPDATE_SQL)
             .bind(run_uid)
             .fetch_optional(conn.as_mut())
@@ -4875,10 +4762,18 @@ impl ExecutionRepository {
                 TransitionRejection::InvalidRunStatus,
             ));
         }
-        let admission_rejection = if run
-            .approved_budget
-            .deadline_at
-            .is_some_and(|deadline| Utc::now() > deadline)
+        let resumed_at = Utc::now();
+        let deadline_was_resumed = if kind == ResumeKind::Input {
+            resume_run_deadline_after_input_wait_in_tx(&mut conn, run_uid, task_id, resumed_at)
+                .await?
+        } else {
+            false
+        };
+        let admission_rejection = if kind == ResumeKind::Retry
+            && run
+                .approved_budget
+                .deadline_at
+                .is_some_and(|deadline| Utc::now() > deadline)
         {
             Some((
                 moa_artifacts::execution_plan::ExecutionFailureClass::DeadlineExceeded,
@@ -4904,7 +4799,6 @@ impl ExecutionRepository {
                 TransitionRejection::CounterOverflow,
             ));
         };
-        let resumed_at = Utc::now();
         let input_audience = if kind == ResumeKind::Input {
             Some(
                 task.current_outcome
@@ -4922,33 +4816,6 @@ impl ExecutionRepository {
             None
         };
         if kind == ResumeKind::Input {
-            let Some(trigger_uid) = locked_wait_trigger_uid else {
-                return Err(Error::InvalidRepositoryData {
-                    message: "waiting-input task is missing its active expiry trigger".to_string(),
-                });
-            };
-            match supersede_trigger_in_conn(
-                conn.as_mut(),
-                trigger_uid,
-                ExecutionTriggerKind::WaitExpiry,
-                Some(run.controller_generation),
-                Some(task.generation),
-                None,
-                None,
-            )
-            .await?
-            {
-                ExecutionTriggerSupersedeOutcome::Superseded
-                | ExecutionTriggerSupersedeOutcome::AlreadySuperseded
-                | ExecutionTriggerSupersedeOutcome::AlreadyInactive => {}
-                ExecutionTriggerSupersedeOutcome::StaleOrMissing => {
-                    return Err(Error::InvalidRepositoryData {
-                        message: "waiting-input expiry trigger lost its generation fence"
-                            .to_string(),
-                    });
-                }
-            }
-
             let current_checkpoint = sqlx::query(
                 "SELECT * FROM moa.execution_task_checkpoint WHERE tenant_id=$1 AND run_uid=$2 \
                  AND task_id=$3 AND superseded_at IS NULL FOR UPDATE",
@@ -5057,6 +4924,23 @@ impl ExecutionRepository {
                 &task.item_key,
                 expected_status,
                 task.status,
+            )
+            .await?;
+        }
+        if deadline_was_resumed {
+            let row = sqlx::query(LOAD_RUN_FOR_UPDATE_SQL)
+                .bind(run_uid)
+                .fetch_one(conn.as_mut())
+                .await
+                .map_err(sqlx_error)?;
+            let resumed_run = run_from_row(&row)?;
+            let _ = arm_run_deadline_in_conn(
+                conn.as_mut(),
+                config.ok_or_else(|| Error::InvalidRepositoryInput {
+                    message: "input resume requires validated execution capacity configuration"
+                        .to_string(),
+                })?,
+                &resumed_run,
             )
             .await?;
         }
@@ -5306,6 +5190,180 @@ impl ExecutionRepository {
         conn.commit().await.map_err(storage_error)?;
         Ok(write)
     }
+}
+
+/// Suspends wall-clock run deadline accounting once no executable work remains and every
+/// durable wait is human input. Active attempt watchdogs have already been settled before this
+/// helper runs; review, signal, timer, and provider waits keep their ordinary deadlines.
+async fn suspend_run_deadline_if_fully_waiting_for_input_in_tx(
+    conn: &mut ScopedConn<'_>,
+    run_uid: Uuid,
+    suspended_at: DateTime<Utc>,
+) -> Result<bool> {
+    let row = sqlx::query(
+        "SELECT budget_deadline_at, budget_deadline_suspended_at, ready_task_count, \
+         active_task_count, waiting_task_count, waiting_input_task_count \
+         FROM moa.execution_run WHERE run_uid=$1 FOR UPDATE",
+    )
+    .bind(run_uid)
+    .fetch_one(conn.as_mut())
+    .await
+    .map_err(sqlx_error)?;
+    let ready_task_count = required_u64(&row, "ready_task_count")?;
+    let active_task_count = required_u64(&row, "active_task_count")?;
+    let waiting_task_count = required_u64(&row, "waiting_task_count")?;
+    let waiting_input_task_count = required_u64(&row, "waiting_input_task_count")?;
+    let deadline_at: Option<DateTime<Utc>> =
+        row.try_get("budget_deadline_at").map_err(row_error)?;
+    let deadline_suspended_at: Option<DateTime<Utc>> = row
+        .try_get("budget_deadline_suspended_at")
+        .map_err(row_error)?;
+    if ready_task_count != 0
+        || active_task_count != 0
+        || waiting_task_count == 0
+        || waiting_task_count != waiting_input_task_count
+        || deadline_at.is_none()
+        || deadline_suspended_at.is_some()
+    {
+        return Ok(false);
+    }
+    let deadline_at = deadline_at.ok_or_else(|| Error::InvalidRepositoryData {
+        message: "fully input-waiting run lost its deadline before suspension".to_string(),
+    })?;
+    if deadline_at <= suspended_at {
+        return Err(Error::InvalidRepositoryData {
+            message: "active attempt settled NeedsInput after the run deadline".to_string(),
+        });
+    }
+    let deadline_triggers = sqlx::query(
+        "SELECT trigger_uid, controller_generation FROM moa.execution_trigger \
+         WHERE run_uid=$1 AND trigger_kind='run_deadline' AND state='pending' \
+         ORDER BY trigger_uid LIMIT 2 FOR UPDATE",
+    )
+    .bind(run_uid)
+    .fetch_all(conn.as_mut())
+    .await
+    .map_err(sqlx_error)?;
+    if deadline_triggers.len() > 1 {
+        return Err(Error::InvalidRepositoryData {
+            message: "input-waiting run owns multiple active deadline triggers".to_string(),
+        });
+    }
+    for trigger in deadline_triggers {
+        let trigger_uid: Uuid = trigger.try_get("trigger_uid").map_err(row_error)?;
+        let trigger_generation = required_u64(&trigger, "controller_generation")?;
+        if supersede_trigger_in_conn(
+            conn.as_mut(),
+            trigger_uid,
+            ExecutionTriggerKind::RunDeadline,
+            Some(trigger_generation),
+            None,
+            None,
+            None,
+        )
+        .await?
+            == ExecutionTriggerSupersedeOutcome::StaleOrMissing
+        {
+            return Err(Error::InvalidRepositoryData {
+                message: "input-waiting run deadline lost its exact trigger fence".to_string(),
+            });
+        }
+    }
+    let run_updated = sqlx::query(
+        "UPDATE moa.execution_run SET budget_deadline_suspended_at=$2, waiting_since=$2, \
+         next_wake_at=(SELECT min(due_at) FROM moa.execution_trigger \
+           WHERE run_uid=$1 AND state='pending'), \
+         last_progress_at=GREATEST(last_progress_at,$2), updated_at=NOW() \
+         WHERE run_uid=$1 AND budget_deadline_at=$3 \
+           AND budget_deadline_suspended_at IS NULL \
+           AND EXISTS (SELECT 1 FROM moa.execution_task WHERE run_uid=$1 \
+             AND status='waiting_input')",
+    )
+    .bind(run_uid)
+    .bind(suspended_at)
+    .bind(deadline_at)
+    .execute(conn.as_mut())
+    .await
+    .map_err(sqlx_error)?;
+    if run_updated.rows_affected() != 1 {
+        return Err(Error::InvalidRepositoryData {
+            message: "input-wait deadline suspension lost its run fence".to_string(),
+        });
+    }
+    Ok(true)
+}
+
+/// Shifts the run deadline by exactly the human-wait interval when input wakes a suspended run.
+async fn resume_run_deadline_after_input_wait_in_tx(
+    conn: &mut ScopedConn<'_>,
+    run_uid: Uuid,
+    task_id: ExecutionTaskId,
+    resumed_at: DateTime<Utc>,
+) -> Result<bool> {
+    let (deadline_at, suspended_at) =
+        sqlx::query_as::<_, (Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(
+            "SELECT budget_deadline_at,budget_deadline_suspended_at \
+         FROM moa.execution_run WHERE run_uid=$1 FOR UPDATE",
+        )
+        .bind(run_uid)
+        .fetch_one(conn.as_mut())
+        .await
+        .map_err(sqlx_error)?;
+    if suspended_at.is_none() {
+        return Ok(false);
+    }
+    let deadline_at = deadline_at.ok_or_else(|| Error::InvalidRepositoryData {
+        message: "suspended input wait is missing its original run deadline".to_string(),
+    })?;
+    let suspended_at = suspended_at.ok_or_else(|| Error::InvalidRepositoryData {
+        message: "input wait is missing its deadline suspension timestamp".to_string(),
+    })?;
+    let wait_duration = resumed_at.signed_duration_since(suspended_at);
+    if wait_duration < chrono::TimeDelta::zero() {
+        return Err(Error::InvalidRepositoryData {
+            message: "input resume predates its deadline suspension".to_string(),
+        });
+    }
+    let restored_deadline = deadline_at
+        .checked_add_signed(wait_duration)
+        .ok_or_else(|| Error::ArithmeticOverflow {
+            context: "resumed input-wait run deadline".to_string(),
+        })?;
+    let run_updated = sqlx::query(
+        "UPDATE moa.execution_run SET budget_deadline_at=$2, \
+         budget_deadline_suspended_at=NULL, \
+         last_progress_at=GREATEST(last_progress_at,$3), updated_at=NOW() \
+         WHERE run_uid=$1 AND budget_deadline_at=$4 \
+           AND budget_deadline_suspended_at=$5",
+    )
+    .bind(run_uid)
+    .bind(restored_deadline)
+    .bind(resumed_at)
+    .bind(deadline_at)
+    .bind(suspended_at)
+    .execute(conn.as_mut())
+    .await
+    .map_err(sqlx_error)?;
+    if run_updated.rows_affected() != 1 {
+        return Err(Error::InvalidRepositoryData {
+            message: "input resume lost its suspended run deadline fence".to_string(),
+        });
+    }
+    let task_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM moa.execution_task \
+         WHERE run_uid=$1 AND task_id=$2 AND status='waiting_input')",
+    )
+    .bind(run_uid)
+    .bind(task_id.as_uuid())
+    .fetch_one(conn.as_mut())
+    .await
+    .map_err(sqlx_error)?;
+    if !task_exists {
+        return Err(Error::InvalidRepositoryData {
+            message: "input resume lost its waiting-task fence".to_string(),
+        });
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

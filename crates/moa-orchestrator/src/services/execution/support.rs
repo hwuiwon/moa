@@ -1,6 +1,11 @@
 //! Shared execution-service mutation handoff types and conversion helpers.
 
 use super::*;
+use crate::runtime::execution_dispatch::{ExecutionDispatchTarget, JournaledExecutionDispatch};
+use moa_execution::{
+    repository::outbox::{ExecutionDispatchKind, ExecutionDispatchRecord},
+    wire::ExecutionAttemptCancelReason,
+};
 
 pub(super) fn scoped_catalog_error(
     error: crate::connector_catalog::ScopedConnectorCatalogError,
@@ -16,6 +21,7 @@ pub(super) fn scoped_catalog_error(
 pub(crate) struct ExecutionMutationHandoff {
     wake_epoch: u64,
     task_ids_to_release: Vec<moa_execution::state::ExecutionTaskId>,
+    llm_owner_dispatch_uids: Vec<uuid::Uuid>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -43,6 +49,23 @@ impl ExecutionMutationAccepted {
     ) -> Self {
         if let Self::Accepted { handoff, .. } = &mut self {
             handoff.task_ids_to_release = task_ids_to_release;
+        }
+        self
+    }
+
+    pub(crate) fn llm_owner_dispatch_uids(&self) -> &[uuid::Uuid] {
+        match self {
+            Self::Accepted { handoff, .. } => &handoff.llm_owner_dispatch_uids,
+            Self::Rejected { .. } => &[],
+        }
+    }
+
+    pub(crate) fn with_llm_owner_dispatch_uids(
+        mut self,
+        llm_owner_dispatch_uids: Vec<uuid::Uuid>,
+    ) -> Self {
+        if let Self::Accepted { handoff, .. } = &mut self {
+            handoff.llm_owner_dispatch_uids = llm_owner_dispatch_uids;
         }
         self
     }
@@ -376,6 +399,7 @@ pub(super) fn applied_mutation(run: &ExecutionRunRecord) -> ExecutionMutationAcc
         handoff: ExecutionMutationHandoff {
             wake_epoch: run.wake_epoch,
             task_ids_to_release: Vec::new(),
+            llm_owner_dispatch_uids: Vec::new(),
         },
     }
 }
@@ -388,8 +412,39 @@ pub(super) fn replayed_mutation(run: &ExecutionRunRecord) -> ExecutionMutationAc
         handoff: ExecutionMutationHandoff {
             wake_epoch: run.wake_epoch,
             task_ids_to_release: Vec::new(),
+            llm_owner_dispatch_uids: Vec::new(),
         },
     }
+}
+
+pub(super) fn terminal_task_llm_owner_dispatch_uids(
+    cancellation_dispatches: &[ExecutionDispatchRecord],
+) -> Result<Vec<uuid::Uuid>, HandlerError> {
+    let mut owner_dispatch_uids = Vec::new();
+    for dispatch in cancellation_dispatches {
+        if dispatch.kind != ExecutionDispatchKind::TaskAttemptCancel {
+            continue;
+        }
+        let target = JournaledExecutionDispatch::from(dispatch.clone())
+            .target()
+            .map_err(execution_error)?;
+        let ExecutionDispatchTarget::TaskAttemptCancel(request) = target else {
+            return Err(TerminalError::new(
+                "task cancellation dispatch decoded to a different execution target",
+            )
+            .into());
+        };
+        if request.reason != ExecutionAttemptCancelReason::RunTerminal {
+            return Err(TerminalError::new(
+                "terminal cancellation handoff contained a non-terminal task cancellation",
+            )
+            .into());
+        }
+        owner_dispatch_uids.push(request.active_dispatch_uid);
+    }
+    owner_dispatch_uids.sort_unstable();
+    owner_dispatch_uids.dedup();
+    Ok(owner_dispatch_uids)
 }
 
 pub(super) fn conflict_mutation(reason: ExecutionConflictReason) -> ExecutionMutationAccepted {
@@ -503,6 +558,18 @@ pub(super) async fn pause_execution_mutation_handoff_for_test() {
 
 #[cfg(not(feature = "integration"))]
 pub(super) async fn pause_execution_mutation_handoff_for_test() {}
+
+#[cfg(feature = "integration")]
+pub(super) async fn pause_execution_cancel_db_handoff_for_test() {
+    if std::env::var("MOA_EXECUTION_TEST_PAUSE_CANCEL_DB_HANDOFF").as_deref() == Ok("true") {
+        // Deliberately inside the journaled closure but after the database commit: recovery must
+        // rebuild the exact current owner fence from Postgres when this result was not journaled.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    }
+}
+
+#[cfg(not(feature = "integration"))]
+pub(super) async fn pause_execution_cancel_db_handoff_for_test() {}
 
 pub(super) fn invalid_execution_request(message: impl Into<String>) -> HandlerError {
     TerminalError::new_with_code(400, message.into()).into()

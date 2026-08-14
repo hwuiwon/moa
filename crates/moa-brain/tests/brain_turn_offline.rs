@@ -906,10 +906,6 @@ fn execution_planning_candidate(objective: &str, max_attempts: u32) -> String {
         },
         "plan": {
             "cancel_policy": "retain_effects",
-            "input_wait_policy": {
-                "expiry": {"kind": "after", "delay_seconds": 3600},
-                "on_expiry": {"kind": "fail_task"}
-            },
             "input_schema": { "type": "object" },
             "output_schema": { "type": "object" },
             "nodes": [{

@@ -290,8 +290,7 @@ async fn waiting_replan_uses_confirmed_budget_for_planning_apply_and_replay_db()
     use moa_artifacts::execution_plan::{
         CompletionCheck, CompletionCheckKind, ExecutionBudgetLimit, ExecutionCancelPolicy,
         ExecutionGoalContract, ExecutionNode, ExecutionOperation, ExecutionPlanDefinition,
-        ExecutionRequirement, ExecutionTaskOutcome, ExecutionTaskResult, ExecutionTemporalTarget,
-        ExecutionUsage, ExecutionWaitExpiryAction, ExecutionWaitPolicy,
+        ExecutionRequirement, ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage,
         GeneratedAmendmentCandidate, RetryPolicy,
     };
     use moa_core::types::execution_planning::{
@@ -383,12 +382,6 @@ async fn waiting_replan_uses_confirmed_budget_for_planning_apply_and_replay_db()
     fn replan_plan() -> ExecutionPlanDefinition {
         ExecutionPlanDefinition {
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: ExecutionWaitPolicy {
-                expiry: ExecutionTemporalTarget::At {
-                    at: chrono::Utc::now() + chrono::TimeDelta::minutes(30),
-                },
-                on_expiry: ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
             nodes: vec![

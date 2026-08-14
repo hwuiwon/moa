@@ -15,6 +15,7 @@ impl PostgresWorkspaceRepository {
     ) -> Result<(Uuid, Uuid, chrono::DateTime<chrono::Utc>)> {
         let TaskHandReleaseIntent {
             receipt_id,
+            contact_id,
             run_id,
             task_id,
             logical_generation,
@@ -60,7 +61,9 @@ impl PostgresWorkspaceRepository {
             )
         })?;
         let claim_token = Uuid::now_v7();
-        let mut conn = self.begin(workspace.tenant_id).await?;
+        let mut conn = self
+            .begin_with_contact(workspace.tenant_id, contact_id)
+            .await?;
         let row = sqlx::query(
             r#"
             INSERT INTO moa.sandbox_execution_hand_release_receipts (
@@ -170,6 +173,7 @@ impl PostgresWorkspaceRepository {
     pub async fn get_task_execution_hand_release_receipt(
         &self,
         tenant_id: TenantId,
+        contact_id: Option<ContactId>,
         run_id: ExecutionRunScopeId,
         task_id: ExecutionTaskScopeId,
         logical_generation: u64,
@@ -185,7 +189,7 @@ impl PostgresWorkspaceRepository {
                 "execution task attempt generation overflows Postgres bigint".to_string(),
             )
         })?;
-        let mut conn = self.begin(tenant_id).await?;
+        let mut conn = self.begin_with_contact(tenant_id, contact_id).await?;
         let row = sqlx::query(
             r#"
             SELECT receipt_id, tenant_id, run_uid, owner_kind, task_id, compensation_id,
@@ -238,7 +242,9 @@ impl PostgresWorkspaceRepository {
                 "execution task attempt generation overflows Postgres bigint".to_string(),
             )
         })?;
-        let mut conn = self.begin(intent.tenant_id).await?;
+        let mut conn = self
+            .begin_with_contact(intent.tenant_id, intent.contact_id)
+            .await?;
         sqlx::query(
             r#"
             WITH locked_task AS MATERIALIZED (
@@ -350,6 +356,7 @@ impl PostgresWorkspaceRepository {
         let CompensationHandReleaseIntent {
             receipt_id,
             tenant_id,
+            contact_id,
             session_id,
             run_id,
             compensation_id,
@@ -381,7 +388,7 @@ impl PostgresWorkspaceRepository {
             )
         })?;
         let claim_token = Uuid::now_v7();
-        let mut conn = self.begin(tenant_id).await?;
+        let mut conn = self.begin_with_contact(tenant_id, contact_id).await?;
         let row = sqlx::query(
             r#"
             INSERT INTO moa.sandbox_execution_hand_release_receipts (
@@ -509,13 +516,17 @@ impl PostgresWorkspaceRepository {
     /// finalize the persisted receipt using its original provisioning identity.
     pub async fn claim_pending_compensation_execution_hand_release(
         &self,
-        tenant_id: TenantId,
-        run_id: ExecutionRunScopeId,
-        compensation_id: ExecutionCompensationScopeId,
-        logical_generation: u64,
-        attempt_generation: u64,
-        recovery_claim_expires_at: chrono::DateTime<chrono::Utc>,
+        intent: CompensationHandReleaseClaimIntent,
     ) -> Result<Option<CompensationHandReleaseClaim>> {
+        let CompensationHandReleaseClaimIntent {
+            tenant_id,
+            contact_id,
+            run_id,
+            compensation_id,
+            logical_generation,
+            attempt_generation,
+            recovery_claim_expires_at,
+        } = intent;
         let logical_generation = i64::try_from(logical_generation).map_err(|_| {
             MoaError::ValidationError(
                 "compensation logical generation overflows Postgres bigint".to_string(),
@@ -527,7 +538,7 @@ impl PostgresWorkspaceRepository {
             )
         })?;
         let claim_token = Uuid::now_v7();
-        let mut conn = self.begin(tenant_id).await?;
+        let mut conn = self.begin_with_contact(tenant_id, contact_id).await?;
         let row = sqlx::query(
             r#"
             UPDATE moa.sandbox_execution_hand_release_receipts AS receipt
@@ -593,6 +604,7 @@ impl PostgresWorkspaceRepository {
         session_id: SessionId,
         hand_scope: &str,
         claim_token: Uuid,
+        contact_id: Option<ContactId>,
     ) -> Result<ExecutionHandReleaseReceipt> {
         let (compensation_id, logical_generation) = match receipt.owner {
             ExecutionHandReleaseOwner::Compensation {
@@ -632,7 +644,9 @@ impl PostgresWorkspaceRepository {
                 "compensation hand release identity must be wholly present or absent".to_string(),
             ));
         }
-        let mut conn = self.begin(receipt.tenant_id).await?;
+        let mut conn = self
+            .begin_with_contact(receipt.tenant_id, contact_id)
+            .await?;
         let row = sqlx::query(
             r#"
             UPDATE moa.sandbox_execution_hand_release_receipts AS receipt
@@ -716,6 +730,7 @@ impl PostgresWorkspaceRepository {
         &self,
         receipt: &ExecutionHandReleaseReceipt,
         claim_token: Uuid,
+        contact_id: Option<ContactId>,
     ) -> Result<ExecutionHandReleaseReceipt> {
         let (task_id, logical_generation) = match receipt.owner {
             ExecutionHandReleaseOwner::Task {
@@ -803,7 +818,9 @@ impl PostgresWorkspaceRepository {
                 "checkpoint logical bytes overflow Postgres bigint".to_string(),
             )
         })?;
-        let mut conn = self.begin(receipt.tenant_id).await?;
+        let mut conn = self
+            .begin_with_contact(receipt.tenant_id, contact_id)
+            .await?;
         let row = sqlx::query(
             r#"
             UPDATE moa.sandbox_execution_hand_release_receipts AS receipt
@@ -946,10 +963,11 @@ impl PostgresWorkspaceRepository {
     /// Finalizes verified compute destruction after a checkpoint was already committed.
     ///
     /// This is the recovery seam for an ambiguous checkpoint attempt that was later
-    /// reconciled with its attachment retained. Provider destruction happens before
+    /// reconciled with its attachment retained. Execution tasks and conversational
+    /// workers share this exact atomic boundary. Provider destruction happens before
     /// this call; the lease, capacity charge, and workspace state then advance under
     /// the exact hand and workspace generations in one transaction.
-    pub async fn finalize_task_yield_destroy(
+    pub async fn finalize_checkpointed_hand_destroy(
         &self,
         binding: &WorkspaceBinding,
         lease: &HandLease,

@@ -5,6 +5,7 @@ use moa_core::types::identifiers::SessionId;
 use super::*;
 use super::{
     capacity::{ExecutionCapacityDimension, prelock_capacity_dimensions_in_tx},
+    ready::cancel_unmaterialized_dependents_in_tx,
     rows::{required_u64, run_from_row},
     run::enqueue_run_activation_in_conn,
     sql::LOAD_RUN_SQL,
@@ -170,7 +171,7 @@ impl ExecutionRepository {
             return Ok(ReplanStopIntentWriteOutcome::Conflict);
         }
         let task = sqlx::query(
-            "SELECT generation,status,current_outcome FROM moa.execution_task \
+            "SELECT node_id,generation,status,current_outcome FROM moa.execution_task \
              WHERE run_uid=$1 AND task_id=$2 FOR UPDATE",
         )
         .bind(run.run_uid)
@@ -183,6 +184,7 @@ impl ExecutionRepository {
             return Ok(ReplanStopIntentWriteOutcome::Conflict);
         };
         let task_generation = required_u64(&task, "generation")?;
+        let origin_node_id: String = task.try_get("node_id").map_err(row_error)?;
         let task_status: String = task.try_get("status").map_err(row_error)?;
         let current_outcome: Option<ExecutionTaskOutcome> = task
             .try_get::<Option<Value>, _>("current_outcome")
@@ -199,6 +201,7 @@ impl ExecutionRepository {
             conn.commit().await.map_err(storage_error)?;
             return Ok(ReplanStopIntentWriteOutcome::Conflict);
         }
+        cancel_unmaterialized_dependents_in_tx(conn.as_mut(), &run, &origin_node_id).await?;
 
         let dispatch = enqueue_run_activation_in_conn(
             conn.as_mut(),

@@ -250,6 +250,9 @@ pub(super) fn run_from_row(row: &PgRow) -> Result<ExecutionRunRecord> {
             max_retrieved_bytes: optional_u64(row, "budget_max_retrieved_bytes")?,
             deadline_at: row.try_get("budget_deadline_at").map_err(row_error)?,
         },
+        budget_deadline_suspended_at: row
+            .try_get("budget_deadline_suspended_at")
+            .map_err(row_error)?,
         reserved: estimate_from_row(row, "reserved")?,
         consumed: estimate_from_row(row, "consumed")?,
         budget_overrun: row.try_get("budget_overrun").map_err(row_error)?,

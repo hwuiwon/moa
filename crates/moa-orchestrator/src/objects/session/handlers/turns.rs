@@ -2,6 +2,7 @@
 
 use super::*;
 
+mod coordinator_input;
 mod outcomes;
 mod replies;
 mod resume;
@@ -148,6 +149,17 @@ impl SessionImpl {
                 .take_next(pending_state.turn_generation)
         {
             pending_state.active_turn_id = Some(queued.turn_id.clone());
+            reacquire_parked_turn_admission_for_dispatch(
+                &ctx,
+                &mut pending_state,
+                &self.turn_admission,
+                session_id,
+                state
+                    .ensure_initialized()
+                    .map_err(moa_error_to_handler_error)?
+                    .tenant_id,
+            )
+            .await?;
             activate_coordinator_security_owner(&mut state, &queued.turn_id, queued.generation);
             let now = durable_utc_now(&ctx).await?;
             state.set_status(SessionStatus::Running, now);
@@ -176,6 +188,17 @@ impl SessionImpl {
         if dispatch_next && let Some(next) = pending_state.pending_messages.pop_front() {
             let next_turn_id = generate_turn_id(&mut ctx);
             pending_state.active_turn_id = Some(next_turn_id.clone());
+            reacquire_parked_turn_admission_for_dispatch(
+                &ctx,
+                &mut pending_state,
+                &self.turn_admission,
+                session_id,
+                state
+                    .ensure_initialized()
+                    .map_err(moa_error_to_handler_error)?
+                    .tenant_id,
+            )
+            .await?;
             activate_coordinator_security_owner(&mut state, &next_turn_id, next.generation);
             let now = durable_utc_now(&ctx).await?;
             state.set_status(SessionStatus::Running, now);
@@ -221,6 +244,19 @@ impl SessionImpl {
 
         {
             let now = durable_utc_now(&ctx).await?;
+            if matches!(outcome.kind, ExecutionTurnOutcomeKind::Completed) {
+                reacquire_parked_turn_admission_for_dispatch(
+                    &ctx,
+                    &mut pending_state,
+                    &self.turn_admission,
+                    session_id,
+                    state
+                        .ensure_initialized()
+                        .map_err(moa_error_to_handler_error)?
+                        .tenant_id,
+                )
+                .await?;
+            }
             let resumed = if matches!(outcome.kind, ExecutionTurnOutcomeKind::Completed) {
                 dispatch_queued_parent_resume_if_idle(
                     &mut ctx,
@@ -262,81 +298,19 @@ impl SessionImpl {
             sync_status(&ctx, session_id, &state).await?;
         }
         if pending_state.active_turn_id.is_none() {
+            let admission_was_parked = pending_state.turn_admission_parked.take().is_some();
             let tenant_id = state
                 .ensure_initialized()
                 .map_err(moa_error_to_handler_error)?
                 .tenant_id;
-            self.turn_admission
-                .release(&ctx, session_id, tenant_id)
-                .await?;
+            if !admission_was_parked {
+                self.turn_admission
+                    .release(&ctx, session_id, tenant_id)
+                    .await?;
+            }
         }
         persist_pending_state(&ctx, &pending_state);
         resolve_turn_waiters(&ctx, turn_waiters, &outcome)?;
-        Ok(())
-    }
-
-    pub(super) async fn handle_register_coordinator_input(
-        &self,
-        ctx: ObjectContext<'_>,
-        request: Json<RegisterCoordinatorInputRequest>,
-    ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("Session", "register_coordinator_input");
-        let request = request.into_inner();
-        let session_id = parse_session_key(ctx.key())?;
-        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
-
-        // Delivery history is the terminal fence for this request identity. A
-        // replay after the awakeable was resolved must not advertise the target
-        // again or emit a new question for work that has already continued.
-        if state.coordinator_input_already_delivered(&request.input_request_id) {
-            return Ok(());
-        }
-
-        if !state.register_coordinator_input(CoordinatorPendingInput {
-            turn_id: request.turn_id.clone(),
-            generation: request.generation,
-            input_request_id: request.input_request_id.clone(),
-            awakeable_id: request.awakeable_id,
-            waiting_workflow_id: request.waiting_workflow_id,
-        }) {
-            return Ok(());
-        }
-        // Advertising the pending target is what lets an unaddressed plain reply be
-        // routed here instead of starting an ordinary turn behind the blocked one.
-        state.upsert_pending_user_reply_target(PendingUserReplyTarget::CoordinatorInput {
-            turn_id: request.turn_id,
-            generation: request.generation,
-            input_request_id: request.input_request_id.clone(),
-        });
-        append_session_event_deduped(
-            &ctx,
-            session_id,
-            Event::Warning {
-                message: request.question,
-            },
-            format!("coordinator_input_request:{}", request.input_request_id),
-        )
-        .await?;
-        state.persist(&ctx);
-        Ok(())
-    }
-
-    pub(super) async fn handle_clear_coordinator_input(
-        &self,
-        ctx: ObjectContext<'_>,
-        request: Json<ClearCoordinatorInputRequest>,
-    ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("Session", "clear_coordinator_input");
-        let request = request.into_inner();
-        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
-        if state.clear_coordinator_input(
-            &request.turn_id,
-            request.generation,
-            &request.input_request_id,
-            &request.waiting_workflow_id,
-        ) {
-            state.persist(&ctx);
-        }
         Ok(())
     }
 
@@ -461,4 +435,23 @@ impl SessionImpl {
         }
         Ok(())
     }
+}
+
+/// Reacquires shared admission before dispatching work after a human-input park.
+async fn reacquire_parked_turn_admission_for_dispatch(
+    ctx: &ObjectContext<'_>,
+    pending_state: &mut SessionPendingState,
+    turn_admission: &crate::objects::session::admission::TurnAdmission,
+    session_id: SessionId,
+    tenant_id: moa_core::types::identifiers::TenantId,
+) -> Result<(), HandlerError> {
+    if pending_state.turn_admission_parked.is_none() {
+        return Ok(());
+    }
+    turn_admission
+        .acquire(ctx, session_id, tenant_id, "turn_admission_parked_dispatch")
+        .await?;
+    pending_state.turn_admission_parked = None;
+    arm_turn_admission_heartbeat(ctx, pending_state, turn_admission);
+    Ok(())
 }

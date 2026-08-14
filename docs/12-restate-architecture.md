@@ -380,14 +380,19 @@ before returning. Immediate Restate delivery is an optimization; the singleton
 maintenance owner reclaims undelivered rows and due triggers. The stable
 dispatch/trigger identity makes duplicate delivery a no-op.
 
+`Execution/cancel` additionally waits for idempotent cancellation fences on
+every exact current execution-task LLM owner before acknowledging. Attempt hand
+release and terminal drain remain bounded, outbox-driven work.
+
 The graph is acyclic and has exactly eight operations: `Capability`, `Agent`,
 `Map`, `Reduce`, `Review`, `WaitSignal`, `WaitUntil`, and `Output`. A map creates one task for
 each stable item key and cannot contain another map. Reduce uses structured
 batches; an agent reducer is a deterministic hierarchical tree bounded by
 `batch_size`.
 
-`Review`, `WaitSignal`, run input, and `WaitUntil` carry explicit expiry or wake
-targets. `At { at }` denotes an exact UTC instant and is valid for a generated
+`Review`, `WaitSignal`, and `WaitUntil` carry explicit expiry or wake targets.
+Human `NeedsInput` continuations park indefinitely without active compute until
+authorized input or explicit lifecycle control. `At { at }` denotes an exact UTC instant and is valid for a generated
 one-off plan. Nonzero `After { delay_seconds }` is resolved from the instant the
 task enters the wait. Reusable templates reject `At` and use `After`, so earlier
 dependency duration cannot make a template timer stale. Entering any wait
@@ -554,8 +559,10 @@ mutation surface. The private handlers are reachable only service-to-service;
 public traffic enters through edge-owned product surfaces. Their inactivity
 timeout is 360 seconds with a 60-second abort cleanup window. Provider stream
 configuration is capped at 300 seconds, leaving that cleanup margin. Durable
-human waits suspend and therefore do not need a larger
-inactivity timeout. The normal product endpoint does not contain
+human waits suspend indefinitely and therefore do not need a larger inactivity
+timeout. Coordinator waits release shared fleet/tenant admission and reacquire it
+under the exact turn-generation fence before resuming. Worker waits checkpoint and
+release sandbox compute before parking. The normal product endpoint does not contain
 `Session/migrate_status_idle` or `StatusMigrationDispatcher`. Those two handlers
 exist only in the pre-runtime migration endpoint; the raw Session handler is
 ingress-private, and the endpoint intentionally omits `Health` and every product

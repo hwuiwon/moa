@@ -1,15 +1,22 @@
 //! Long-horizon execution state, identity, RLS, and generation-fence contracts.
 
 use moa_artifacts::execution_plan::{ExecutionNode, ExecutionOperation};
+use moa_execution::repository::outbox::ExecutionDispatchKind;
 use moa_execution::repository::ready::{ReadyMaterializationOutcome, ReadyMaterializationRequest};
 use moa_execution::repository::task::{
     ActiveAttemptLiveness, NewTaskAttemptCheckpoint, TaskAttemptCheckpointKind,
     TaskAttemptContinuationYieldOutcome, TaskAttemptFence, TaskAttemptProgressOutcome,
-    TaskAttemptReleaseClaimOutcome, TaskAttemptStartOutcome, classify_active_attempt_liveness,
+    TaskAttemptReleaseClaimOutcome, TaskAttemptSettlementOutcome, TaskAttemptStartOutcome,
+    classify_active_attempt_liveness,
+};
+use moa_execution::repository::terminal::{
+    PendingTerminalAdvanceOutcome, PendingTerminalAdvanceStage,
 };
 use moa_execution::repository::trigger::{
     ExecutionTriggerNoOp, ExecutionWatchdogDeferOutcome, ExecutionWatchdogTriggerOutcome,
 };
+use moa_execution::state::ExecutionTerminalEvidence;
+use moa_execution::wire::{ExecutionAttemptCancelReason, ExecutionTaskAttemptCancelRequest};
 
 use super::support::*;
 
@@ -358,6 +365,431 @@ async fn start_admitted_attempts(
         started.push((fence, record.task.last_progress_at));
     }
     Ok((run.run_uid, started))
+}
+
+#[tokio::test]
+async fn terminal_drain_recovers_orphaned_cancelling_task_once_db() -> TestResult {
+    // Pins: if an attempt workflow fails after claiming its release boundary but before it can
+    // settle, explicit terminal drain must create the exact cancellation dispatch. Replaying the
+    // same terminal fence must not duplicate either that outbox row or active-capacity ownership.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let repository = ExecutionRepository::new(pool.clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let config = ExecutionConfig::default();
+    let (run_uid, started) = start_admitted_attempts(
+        &repository,
+        tenant_id,
+        "orphaned-cancelling-terminal-drain",
+        &config,
+        &["orphaned"],
+    )
+    .await?;
+    let [(fence, _)] = started[..] else {
+        panic!("one exact task attempt must start");
+    };
+    let active = listed_task(&repository, scope, run_uid, fence.task_id).await?;
+    assert!(matches!(
+        repository
+            .begin_task_attempt_release(
+                fence,
+                active.generation,
+                "task_outcome",
+                moa_test_support::fixtures::pg_now(),
+            )
+            .await?,
+        TaskAttemptReleaseClaimOutcome::Applied(_)
+    ));
+    let orphaned = listed_task(&repository, scope, run_uid, fence.task_id).await?;
+    assert_eq!(orphaned.attempt_state, ExecutionAttemptState::Cancelling);
+
+    let current = repository
+        .load_run(scope, run_uid)
+        .await?
+        .expect("orphaned attempt run remains visible");
+    let pending = PendingExecutionTerminal {
+        status: ExecutionRunStatus::Cancelled,
+        reason: ExecutionTerminalReason::Cancelled,
+        terminal_evidence: ExecutionTerminalEvidence {
+            cause: ExecutionTerminalCause::Cancellation,
+            satisfied_requirement_count: 0,
+            requirement_count: 1,
+        },
+        completion_check_results: Vec::new(),
+        terminal_gaps: Vec::new(),
+        output: None,
+        cancellation_reason: Some("operator cancelled orphaned attempt".to_string()),
+    };
+    let PendingTerminalAdvanceOutcome::Applied(first) = repository
+        .fence_completion_terminal_and_enqueue_settlement(
+            &config,
+            scope,
+            run_uid,
+            current.controller_generation,
+            current.wake_epoch,
+            pending.clone(),
+            moa_test_support::fixtures::pg_now(),
+            1,
+        )
+        .await?
+    else {
+        panic!("terminal drain must recover the orphaned cancelling attempt");
+    };
+    assert_eq!(first.stage, PendingTerminalAdvanceStage::Draining);
+    assert_eq!(first.cancellation_dispatches.len(), 1);
+    let cancellation_dispatch = &first.cancellation_dispatches[0];
+    assert_eq!(
+        cancellation_dispatch.kind,
+        ExecutionDispatchKind::TaskAttemptCancel
+    );
+    let cancellation: ExecutionTaskAttemptCancelRequest =
+        serde_json::from_value(cancellation_dispatch.payload.clone())?;
+    assert_eq!(cancellation.active_dispatch_uid, fence.dispatch_uid);
+    assert_eq!(
+        cancellation.capacity_reservation_uid,
+        fence.capacity_reservation_uid
+    );
+    assert_eq!(
+        cancellation.watchdog_trigger_uid,
+        fence.watchdog_trigger_uid
+    );
+    assert_eq!(
+        cancellation.reason,
+        ExecutionAttemptCancelReason::RunTerminal
+    );
+    let cancellation_projection = repository
+        .load_cancellation_projection_for_session(
+            scope,
+            run_uid,
+            current.session_id,
+            config.max_in_flight_tasks,
+        )
+        .await?
+        .expect("the exact session-owned cancellation projection remains visible");
+    assert_eq!(
+        cancellation_projection.task_cancellation_dispatches,
+        vec![cancellation_dispatch.clone()],
+        "crash replay must reconstruct only the current cancelling attempt receipt"
+    );
+
+    let PendingTerminalAdvanceOutcome::Replayed(replayed) = repository
+        .fence_completion_terminal_and_enqueue_settlement(
+            &config,
+            scope,
+            run_uid,
+            current.controller_generation,
+            current.wake_epoch,
+            pending.clone(),
+            moa_test_support::fixtures::pg_now(),
+            1,
+        )
+        .await?
+    else {
+        panic!("the exact terminal fence must replay idempotently");
+    };
+    assert!(replayed.work_remaining);
+    assert_eq!(
+        replayed.cancellation_dispatches,
+        vec![cancellation_dispatch.clone()],
+        "same-wake replay must carry the current owner fence without duplicating it"
+    );
+
+    let cancellation_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM moa.execution_dispatch_outbox \
+         WHERE run_uid=$1 AND task_id=$2 AND dispatch_kind='task_attempt_cancel'",
+    )
+    .bind(run_uid)
+    .bind(fence.task_id.as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(cancellation_rows, 1);
+    let capacity_rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT reservation_uid,state FROM moa.execution_capacity_reservation \
+         WHERE run_uid=$1 AND task_id=$2 AND resource_dimension='active_tasks'",
+    )
+    .bind(run_uid)
+    .bind(fence.task_id.as_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        capacity_rows,
+        vec![(fence.capacity_reservation_uid, "reconciling".to_string())]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_cancellation_claims_fresh_wake_for_parked_replan_once_db() -> TestResult {
+    // Pins: cancelling a storage-only WaitingReplan run whose current wake is already
+    // acknowledged must claim one internal terminal-drain wake, install the cancellation, and
+    // replay without dispatching a redundant controller activation.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let repository = ExecutionRepository::new(pool.clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let config = ExecutionConfig::default();
+    let (run_uid, started) = start_admitted_attempts(
+        &repository,
+        tenant_id,
+        "parked-replan-external-cancellation",
+        &config,
+        &["replan"],
+    )
+    .await?;
+    let [(fence, _)] = started[..] else {
+        panic!("one exact task attempt must start");
+    };
+    let TaskAttemptSettlementOutcome::Applied { run: waiting, task } = repository
+        .settle_task_attempt(&config, fence, needs_replan(1), None, Utc::now())
+        .await?
+    else {
+        panic!("task must enter its durable replan wait");
+    };
+    assert_eq!(waiting.status, ExecutionRunStatus::WaitingReplan);
+    assert_eq!(task.status, ExecutionTaskStatus::WaitingReplan);
+
+    let RunControllerClaimOutcome::Claimed(claimed) = repository
+        .claim_controller_wake(
+            scope,
+            run_uid,
+            waiting.controller_generation,
+            waiting.wake_epoch,
+        )
+        .await?
+    else {
+        panic!("the replan wait wake must be claimable");
+    };
+    let RunControllerCompletionOutcome::Applied {
+        run: parked,
+        continuation,
+    } = repository
+        .complete_controller_wake(
+            scope,
+            &config,
+            run_uid,
+            RunControllerCompletionRequest {
+                controller_generation: claimed.controller_generation,
+                wake_epoch: claimed.wake_epoch,
+                checkpoint: ExecutionRunActivationCheckpoint {
+                    status: ExecutionRunStatus::WaitingReplan,
+                    activation_state: ExecutionActivationState::Idle,
+                    next_wake_at: claimed.next_wake_at,
+                    waiting_since: claimed.waiting_since,
+                    ready_task_count: claimed.ready_task_count,
+                    active_task_count: claimed.active_task_count,
+                },
+                continuation_payload: None,
+                continuation_not_before_at: Utc::now(),
+            },
+        )
+        .await?
+    else {
+        panic!("the replan wait must become storage-only");
+    };
+    assert!(continuation.is_none());
+    assert_eq!(parked.status, ExecutionRunStatus::WaitingReplan);
+    assert_eq!(parked.activation_state, ExecutionActivationState::Idle);
+    assert_eq!(parked.wake_epoch, parked.processed_wake_epoch);
+    let parked_wake_epoch = parked.wake_epoch;
+
+    let pending = PendingExecutionTerminal {
+        status: ExecutionRunStatus::Cancelled,
+        reason: ExecutionTerminalReason::Cancelled,
+        terminal_evidence: ExecutionTerminalEvidence {
+            cause: ExecutionTerminalCause::Cancellation,
+            satisfied_requirement_count: 0,
+            requirement_count: 0,
+        },
+        completion_check_results: Vec::new(),
+        terminal_gaps: Vec::new(),
+        output: None,
+        cancellation_reason: Some("operator cancelled parked replan".to_string()),
+    };
+    let PendingTerminalAdvanceOutcome::Applied(first) = repository
+        .fence_cancellation_terminal_and_enqueue_settlement(
+            &config,
+            scope,
+            run_uid,
+            parked.controller_generation,
+            parked_wake_epoch,
+            pending.clone(),
+            moa_test_support::fixtures::pg_now(),
+            1,
+        )
+        .await?
+    else {
+        panic!("first external cancellation must install its terminal fence");
+    };
+    assert_eq!(first.run.status, ExecutionRunStatus::WaitingReplan);
+    assert_eq!(first.run.processed_wake_epoch, parked_wake_epoch + 1);
+    assert_eq!(first.run.pending_terminal, Some(pending.clone()));
+    assert_eq!(first.settled_task_count, 1);
+    let continuation = first
+        .continuation
+        .as_ref()
+        .expect("bounded trigger cleanup must own one continuation");
+    assert_eq!(continuation.kind, ExecutionDispatchKind::RunActivation);
+    assert_eq!(continuation.wake_epoch, Some(first.run.wake_epoch));
+    assert!(first.run.wake_epoch > first.run.processed_wake_epoch);
+    assert_eq!(
+        listed_task(&repository, scope, run_uid, fence.task_id)
+            .await?
+            .status,
+        ExecutionTaskStatus::Cancelled
+    );
+
+    let PendingTerminalAdvanceOutcome::Replayed(replayed) = repository
+        .fence_cancellation_terminal_and_enqueue_settlement(
+            &config,
+            scope,
+            run_uid,
+            parked.controller_generation,
+            parked_wake_epoch,
+            pending.clone(),
+            moa_test_support::fixtures::pg_now(),
+            1,
+        )
+        .await?
+    else {
+        panic!("the exact external cancellation must replay");
+    };
+    assert_eq!(replayed.run.status, ExecutionRunStatus::WaitingReplan);
+    assert_eq!(replayed.run.pending_terminal, Some(pending.clone()));
+    assert_eq!(replayed.run.wake_epoch, first.run.wake_epoch);
+    assert_eq!(replayed.settled_task_count, 0);
+    let internal_wake_activation_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM moa.execution_dispatch_outbox \
+         WHERE run_uid=$1 AND dispatch_kind='run_activation' AND wake_epoch=$2",
+    )
+    .bind(run_uid)
+    .bind(i64::try_from(parked_wake_epoch + 1)?)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(internal_wake_activation_count, 0);
+
+    let PendingTerminalAdvanceOutcome::Applied(terminal) = repository
+        .advance_pending_terminal_settlement(
+            &config,
+            scope,
+            run_uid,
+            parked.controller_generation,
+            first.run.wake_epoch,
+            moa_test_support::fixtures::pg_now(),
+            1,
+        )
+        .await?
+    else {
+        panic!("the bounded cleanup continuation must finalize cancellation");
+    };
+    assert_eq!(terminal.run.status, ExecutionRunStatus::Cancelled);
+    assert_eq!(
+        terminal.run.terminal_evidence,
+        Some(pending.terminal_evidence)
+    );
+    assert_eq!(
+        terminal.run.cancellation_reason,
+        pending.cancellation_reason
+    );
+    assert!(terminal.run.pending_terminal.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_drain_prioritizes_a_current_cancelling_owner_over_storage_work_db() -> TestResult
+{
+    // Pins: a bounded first terminal page must fence every current provider owner before it
+    // spends page capacity settling an idle waiting task. The lower task ID is deliberately
+    // parked so task-ID ordering alone would strand the higher cancelling owner.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let repository = ExecutionRepository::new(test_db.store().pool().clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let config = ExecutionConfig {
+        max_in_flight_tasks: 3,
+        maximum_activation_steps: 1,
+        dispatch_batch_size: 3,
+        ..ExecutionConfig::default()
+    };
+    let (run_uid, mut started) = start_admitted_attempts(
+        &repository,
+        tenant_id,
+        "current-owner-before-storage-terminal-drain",
+        &config,
+        &["first", "second"],
+    )
+    .await?;
+    started.sort_by_key(|(fence, _)| fence.task_id);
+    let storage_fence = started[0].0;
+    let cancelling_fence = started[1].0;
+
+    let TaskAttemptSettlementOutcome::Applied { task, .. } = repository
+        .settle_task_attempt(&config, storage_fence, needs_input(1), None, Utc::now())
+        .await?
+    else {
+        panic!("lower-ID task must park on human input");
+    };
+    assert_eq!(task.status, ExecutionTaskStatus::WaitingInput);
+    let active = listed_task(&repository, scope, run_uid, cancelling_fence.task_id).await?;
+    assert!(matches!(
+        repository
+            .begin_task_attempt_release(
+                cancelling_fence,
+                active.generation,
+                "task_outcome",
+                moa_test_support::fixtures::pg_now(),
+            )
+            .await?,
+        TaskAttemptReleaseClaimOutcome::Applied(_)
+    ));
+
+    let current = repository
+        .load_run(scope, run_uid)
+        .await?
+        .expect("terminal-drain run remains visible");
+    let pending = PendingExecutionTerminal {
+        status: ExecutionRunStatus::Cancelled,
+        reason: ExecutionTerminalReason::Cancelled,
+        terminal_evidence: ExecutionTerminalEvidence {
+            cause: ExecutionTerminalCause::Cancellation,
+            satisfied_requirement_count: 0,
+            requirement_count: 1,
+        },
+        completion_check_results: Vec::new(),
+        terminal_gaps: Vec::new(),
+        output: None,
+        cancellation_reason: Some("operator cancelled both tasks".to_string()),
+    };
+    let PendingTerminalAdvanceOutcome::Applied(commit) = repository
+        .fence_completion_terminal_and_enqueue_settlement(
+            &config,
+            scope,
+            run_uid,
+            current.controller_generation,
+            current.wake_epoch,
+            pending,
+            moa_test_support::fixtures::pg_now(),
+            1,
+        )
+        .await?
+    else {
+        panic!("first terminal page must apply");
+    };
+    assert_eq!(commit.settled_task_count, 0);
+    assert_eq!(commit.cancellation_dispatches.len(), 1);
+    let cancellation: ExecutionTaskAttemptCancelRequest =
+        serde_json::from_value(commit.cancellation_dispatches[0].payload.clone())?;
+    assert_eq!(cancellation.task_id, cancelling_fence.task_id);
+    assert_eq!(
+        cancellation.active_dispatch_uid,
+        cancelling_fence.dispatch_uid
+    );
+    assert_eq!(
+        cancellation.reason,
+        ExecutionAttemptCancelReason::RunTerminal
+    );
+    Ok(())
 }
 
 #[tokio::test]

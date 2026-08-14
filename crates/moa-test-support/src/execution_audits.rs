@@ -78,6 +78,13 @@ pub async fn load_execution_planning_audits(
                         'outcome', outcome,
                         'provider_model', provider_model,
                         'prompt_version', prompt_version,
+                        'usage', jsonb_build_object(
+                            'input_tokens_uncached', input_tokens_uncached,
+                            'input_tokens_cache_write', input_tokens_cache_write,
+                            'input_tokens_cache_read', input_tokens_cache_read,
+                            'output_tokens', output_tokens
+                        ),
+                        'cost_microusd', cost_microusd,
                         'candidate_hash', candidate_hash,
                         'candidate_json', candidate_json::TEXT,
                         'compiler_report', compiler_report::TEXT,

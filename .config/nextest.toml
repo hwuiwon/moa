@@ -80,6 +80,8 @@ inherits = "default"
 test-threads = 1
 default-filter = '''
 binary(/^(session_turn_lifecycle_service_e2e|turn_execution_smoke_service_e2e)$/)
+  | (binary(/^llm_gateway_provider_e2e$/)
+      & test(/^direct_llm_gateway_ingress_is_rejected$/))
   - test(/recovery_matrix_/)
 '''
 
@@ -95,6 +97,8 @@ default-filter = '''
 binary(/^orchestrator_fixture_service_e2e$/)
   | binary(/^(action_policy_service_e2e|guardrails_service_e2e|ingestion_service_e2e|memory_service_e2e|turn_responsiveness_service_e2e)$/)
   | binary(/^turn_terminal_failure_service_e2e$/)
+  | (binary(/^coordinator_worker_behavior_provider_e2e$/)
+      & test(/^duplicate_worker_rejection_persists_tool_result_and_turn_continues_service_e2e$/))
 '''
 
 # Accelerated eight-logical-day execution validation. The binary owns one
@@ -221,18 +225,22 @@ binary(/^mock_loadtest_service_e2e$/)
 [profile.provider-e2e]
 inherits = "default"
 test-threads = 1
-# The coordinator provider binary also contains deterministic crash/recovery
-# fixtures. Those fixtures own a dedicated Restate instance and run in the
-# restate-recovery lane, so they cannot share the external Restate configured
-# for provider E2E. The paid 20x5 execution evaluation has a separate budget
-# authorization contract and must never be swept into the ordinary provider
-# lane merely because its binary name ends in `_provider_e2e`.
+# The coordinator provider binary also contains deterministic dedicated-fixture
+# tests. They run in fixture/recovery lanes with external Restate discovery
+# disabled, so they cannot share the external Restate configured for provider
+# E2E. The paid 20x5 execution evaluation has a separate budget authorization
+# contract and must never be swept into the ordinary provider lane merely
+# because its binary name ends in `_provider_e2e`.
 default-filter = '''
 (
   binary(/_provider_e2e$/)
     | binary(/^(provider_matrix_live|query_rewrite_live)$/)
 )
   - (binary(/^coordinator_worker_behavior_provider_e2e$/) & test(/^recovery_matrix_/))
+  - (binary(/^coordinator_worker_behavior_provider_e2e$/)
+      & test(/^duplicate_worker_rejection_persists_tool_result_and_turn_continues_service_e2e$/))
+  - (binary(/^llm_gateway_provider_e2e$/)
+      & test(/^direct_llm_gateway_ingress_is_rejected$/))
   - binary(/^execution_eval_provider_e2e$/)
 '''
 
@@ -264,7 +272,6 @@ binary(/^execution_run_service_e2e$/)
       | test(/remove_only_amendment_is_no_progress_service_e2e/)
       | test(/useful_amendment_preserves_completed_work_service_e2e/)
       | test(/stale_generation_is_audit_only_service_e2e/)
-      | test(/duplicate_completion_does_not_double_account_service_e2e/)
       | (test(/execution_eval_/) - test(/execution_eval_silent_incomplete_500_item_universe/))
     )
 '''

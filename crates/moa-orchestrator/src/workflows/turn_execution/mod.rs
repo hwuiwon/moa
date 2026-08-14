@@ -284,8 +284,6 @@ enum TurnIterationOutcome {
     ToolBudgetExceeded(ToolBudgetExhausted),
     /// The prompt-injection circuit halted this coordinator turn.
     SecurityHalt,
-    /// The coordinator's bounded security-input wait expired.
-    SecurityInputTimedOut,
 }
 
 struct DurableUpgradeGuard {
@@ -799,24 +797,6 @@ async fn execute_turn_inside_workflow(
                 return Ok(BodyOutcome {
                     kind: TurnOutcomeKind::Failed,
                     message: SECURITY_CIRCUIT_HALT_MESSAGE.to_string(),
-                    post_outcome_assessment,
-                });
-            }
-            TurnIterationOutcome::SecurityInputTimedOut => {
-                let post_outcome_assessment = capture_current_active_segment_assessment(
-                    workflow,
-                    ctx,
-                    session_id,
-                    AssessmentPhase::Final,
-                    &[],
-                    last_response_cutoff_before_seq(ctx).await?,
-                )
-                .await?;
-                return Ok(BodyOutcome {
-                    kind: TurnOutcomeKind::Failed,
-                    message: last_summary.take().unwrap_or_else(|| {
-                        "The turn stopped safely because required user input timed out.".to_string()
-                    }),
                     post_outcome_assessment,
                 });
             }
@@ -1503,9 +1483,6 @@ async fn run_once_inside_workflow(
         }
         ToolDispatchOutcome::SecurityHalt => {
             return Ok(TurnIterationOutcome::SecurityHalt);
-        }
-        ToolDispatchOutcome::SecurityInputTimedOut => {
-            return Ok(TurnIterationOutcome::SecurityInputTimedOut);
         }
     }
 

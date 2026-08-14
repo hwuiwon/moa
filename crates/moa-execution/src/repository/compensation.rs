@@ -22,15 +22,16 @@ use super::{
     },
     outcome::record_task_outcome_in_conn,
     projection::budget_ledger,
-    ready::transition_node_counters_in_tx,
+    ready::{transition_node_counters_in_tx, transition_node_counters_with_input_audience_in_tx},
     rows::*,
-    run::enqueue_run_activation_in_conn,
+    run::{enqueue_run_activation_in_conn, load_current_terminal_task_cancellation_dispatches},
     sql::*,
     task::settle_external_job_terminal_in_conn as settle_task_external_job_terminal_in_conn,
     terminal::{
         PendingTerminalAdvanceCommit, PendingTerminalAdvanceOutcome, PendingTerminalAdvanceStage,
         ReplanStopReceipt, drain_run_triggers_page_in_conn,
     },
+    transition::refresh_run_after_wait_settlement_in_conn,
     trigger::{
         ExecutionTriggerKind, ExecutionTriggerWrite, NewExecutionTrigger,
         create_trigger_with_dispatch_in_conn, release_trigger_capacity_in_conn, trigger_from_row,
@@ -355,7 +356,10 @@ impl ExecutionRepository {
             conn.as_mut(),
             config,
             visible_run.tenant_id,
-            &[ExecutionCapacityDimension::ActiveTasks],
+            &[
+                ExecutionCapacityDimension::ActiveTasks,
+                ExecutionCapacityDimension::ScheduledTriggers,
+            ],
         )
         .await?;
         let Some(run_row) = sqlx::query(LOAD_RUN_FOR_UPDATE_SQL)

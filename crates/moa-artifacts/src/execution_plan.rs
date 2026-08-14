@@ -129,8 +129,6 @@ pub enum CompletionCheckKind {
 pub struct ExecutionPlanDefinition {
     /// Explicit policy for effects already committed when the run is cancelled.
     pub cancel_policy: ExecutionCancelPolicy,
-    /// Expiry behavior for runtime input requests returned by executable tasks.
-    pub input_wait_policy: ExecutionWaitPolicy,
     /// JSON Schema for run input.
     pub input_schema: Value,
     /// JSON Schema for terminal output.

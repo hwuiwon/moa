@@ -5,8 +5,8 @@ use moa_artifacts::execution_plan::{
     CapabilityReference, CompletionCheck, CompletionCheckKind, CoverageRequirement,
     ExecutionBudgetLimit, ExecutionCancelPolicy, ExecutionCitation, ExecutionDeliverable,
     ExecutionGoalContract, ExecutionNode, ExecutionOperation, ExecutionPlanDefinition,
-    ExecutionRequirement, ExecutionTaskOutcome, ExecutionTaskResult, ExecutionTemporalTarget,
-    ExecutionUsage, ExecutionWaitExpiryAction, ExecutionWaitPolicy, MapTask, RetryPolicy,
+    ExecutionRequirement, ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage, MapTask,
+    RetryPolicy,
 };
 use moa_execution::{
     budget::BudgetLedger,
@@ -594,12 +594,6 @@ fn canonical(nodes: Vec<ExecutionNode>) -> CanonicalExecutionPlan {
     CanonicalExecutionPlan {
         definition: ExecutionPlanDefinition {
             cancel_policy: ExecutionCancelPolicy::RetainEffects,
-            input_wait_policy: ExecutionWaitPolicy {
-                expiry: ExecutionTemporalTarget::After {
-                    delay_seconds: 3_600,
-                },
-                on_expiry: ExecutionWaitExpiryAction::FailTask,
-            },
             input_schema: json!({ "type": "object" }),
             output_schema: json!({ "type": "object" }),
             nodes,

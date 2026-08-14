@@ -382,6 +382,8 @@ pub struct ExecutionRunRecord {
     pub waiting_input_external_task_count: u64,
     /// Approved resource limits.
     pub approved_budget: ExecutionBudgetLimit,
+    /// Start of the current human-input interval excluded from wall-clock deadline accounting.
+    pub budget_deadline_suspended_at: Option<DateTime<Utc>>,
     /// Resources held by nonterminal tasks.
     pub reserved: ExecutionEstimate,
     /// Reconciled actual resources and terminal logical tasks.

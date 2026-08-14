@@ -260,13 +260,6 @@ fn skill_revision(name: &str, revision_uid: u128) -> StoredArtifactRevision {
                     plan: ExecutionPlanDefinition {
                         cancel_policy:
                             moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-                        input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                            expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                                delay_seconds: 86_400,
-                            },
-                            on_expiry:
-                                moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-                        },
                         input_schema: json!({"type": "object"}),
                         output_schema: json!({"type": "object"}),
                         nodes: Vec::new(),
@@ -634,12 +627,6 @@ fn accepted_turn_requires_skill_template_provenance_from_planning_snapshot() {
             },
             plan: ExecutionPlanDefinition {
                 cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-                input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                    expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                        delay_seconds: 86_400,
-                    },
-                    on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-                },
                 input_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
                 nodes: Vec::new(),
@@ -715,12 +702,6 @@ fn pinned_execution_template(
             },
             plan: ExecutionPlanDefinition {
                 cancel_policy: moa_artifacts::execution_plan::ExecutionCancelPolicy::RetainEffects,
-                input_wait_policy: moa_artifacts::execution_plan::ExecutionWaitPolicy {
-                    expiry: moa_artifacts::execution_plan::ExecutionTemporalTarget::After {
-                        delay_seconds: 86_400,
-                    },
-                    on_expiry: moa_artifacts::execution_plan::ExecutionWaitExpiryAction::FailTask,
-                },
                 input_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
                 nodes: Vec::new(),
@@ -1164,7 +1145,14 @@ fn execution_external_wait_payload_is_validated_against_node_schema() {
                 "required": ["approved"],
                 "properties": {"approved": {"type": "boolean"}}
             },
-            "operation": {"kind": "review", "prompt": "Approve?"},
+            "operation": {
+                "kind": "review",
+                "prompt": "Approve?",
+                "wait_policy": {
+                    "expiry": {"kind": "after", "delay_seconds": 3600},
+                    "on_expiry": {"kind": "fail_task"}
+                }
+            },
             "compensation": null,
             "retry": {"max_attempts": 1, "initial_backoff_ms": 1, "max_backoff_ms": 1},
             "budget": null

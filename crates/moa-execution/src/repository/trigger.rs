@@ -652,8 +652,18 @@ impl ExecutionRepository {
             .ok_or_else(|| Error::InvalidRepositoryData {
                 message: "run deadline trigger is missing run identity".to_string(),
             })?;
-        let run = sqlx::query_as::<_, (i64, i64, String, Option<DateTime<Utc>>)>(
-            "SELECT controller_generation, wake_epoch, status, budget_deadline_at \
+        let run = sqlx::query_as::<
+            _,
+            (
+                i64,
+                i64,
+                String,
+                Option<DateTime<Utc>>,
+                Option<DateTime<Utc>>,
+            ),
+        >(
+            "SELECT controller_generation, wake_epoch, status, budget_deadline_at, \
+                    budget_deadline_suspended_at \
              FROM moa.execution_run \
              WHERE tenant_id=$1 AND run_uid=$2 FOR UPDATE",
         )
@@ -662,12 +672,30 @@ impl ExecutionRepository {
         .fetch_optional(conn.as_mut())
         .await
         .map_err(sqlx_error)?;
-        let Some((controller_generation, wake_epoch, status, approved_deadline_at)) = run else {
+        let Some((controller_generation, wake_epoch, status, approved_deadline_at, suspended_at)) =
+            run
+        else {
             conn.commit().await.map_err(storage_error)?;
             return Ok(ExecutionRunDeadlineTriggerOutcome::NoOp(
                 ExecutionTriggerNoOp::NotFound,
             ));
         };
+        if suspended_at.is_some() {
+            supersede_trigger_in_conn(
+                conn.as_mut(),
+                trigger_uid,
+                ExecutionTriggerKind::RunDeadline,
+                trigger.controller_generation,
+                None,
+                None,
+                None,
+            )
+            .await?;
+            conn.commit().await.map_err(storage_error)?;
+            return Ok(ExecutionRunDeadlineTriggerOutcome::NoOp(
+                ExecutionTriggerNoOp::StaleGeneration,
+            ));
+        }
         if matches!(
             status.as_str(),
             "completed" | "partial" | "blocked" | "unsupported" | "failed" | "cancelled"
@@ -2337,6 +2365,7 @@ async fn run_deadline_is_current(
         SELECT EXISTS (
             SELECT 1 FROM moa.execution_run
             WHERE run_uid = $1 AND tenant_id = $2 AND budget_deadline_at = $3
+              AND budget_deadline_suspended_at IS NULL
               AND status NOT IN (
                   'completed', 'partial', 'blocked', 'unsupported', 'failed', 'cancelled'
               )

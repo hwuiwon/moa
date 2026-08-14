@@ -394,6 +394,20 @@ impl ExecutionRepository {
                         i64::from(config.max_tenant_active_tasks),
                     )
                     .await?;
+                    // Admission already holds the fleet active-tasks bucket for the whole
+                    // transaction. That fleet lock is the barrier that prevents another
+                    // multi-resource task transaction from reaching a tenant active-tasks row
+                    // while this batch is open. Lock the watchdog's scheduled-trigger buckets
+                    // now, before `lock_oldest_ready_task` takes a run row: task settlement may
+                    // have pre-released active-task capacity and therefore legitimately hold
+                    // scheduled-trigger capacity before it asks for the same run row.
+                    prelock_capacity_dimensions_in_tx(
+                        conn.as_mut(),
+                        config,
+                        TenantId::from(tenant_id),
+                        &[ExecutionCapacityDimension::ScheduledTriggers],
+                    )
+                    .await?;
                     tenant_available_by_id.insert(tenant_id, available);
                     available
                 }
