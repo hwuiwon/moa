@@ -283,6 +283,13 @@ impl ExecutionRepository {
                 oldest_ready_at: None,
             });
         }
+        let now =
+            DateTime::<Utc>::from_timestamp_micros(now.timestamp_micros()).ok_or_else(|| {
+                Error::InvalidRepositoryInput {
+                    message: "task admission time is outside PostgreSQL timestamp bounds"
+                        .to_string(),
+                }
+            })?;
         let deadline = now
             .checked_add_signed(Duration::seconds(
                 i64::try_from(config.active_attempt_timeout_seconds).map_err(|_| {

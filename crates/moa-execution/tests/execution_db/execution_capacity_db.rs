@@ -8,7 +8,9 @@ use moa_config::ExecutionConfig;
 use moa_db::ScopedConn;
 use moa_execution::repository::ready::ReadyMaterializationRequest;
 use moa_execution::repository::{
-    capacity::ExecutionAdmissionBatch, ready::ReadyMaterializationOutcome,
+    capacity::ExecutionAdmissionBatch,
+    ready::ReadyMaterializationOutcome,
+    task::{TaskAttemptFence, TaskAttemptStartOutcome},
 };
 
 use super::support::*;
@@ -75,6 +77,45 @@ async fn ready_run(
         ReadyMaterializationOutcome::Applied { .. }
     ));
     Ok(run.run_uid)
+}
+
+#[tokio::test]
+async fn task_admission_canonicalizes_submicrosecond_attempt_deadline_db() -> TestResult {
+    // Pins: an admitted task's wire fence and PostgreSQL row must carry the same microsecond
+    // deadline. Linux clocks can supply nanoseconds; returning that unpersisted precision makes
+    // the immediately following task start stale against its own durable attempt row.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let repository = ExecutionRepository::new(test_db.store().pool().clone());
+    let config = ExecutionConfig::default();
+    let tenant_id = TenantId::new();
+    ready_run(&repository, tenant_id, "submicrosecond-attempt-deadline", 1).await?;
+    let persisted_now = pg_deadline(Duration::seconds(1));
+    let requested_now = persisted_now + Duration::nanoseconds(321);
+    let admission = repository
+        .admit_ready_attempts(&config, 1, requested_now)
+        .await?
+        .admitted
+        .into_iter()
+        .next()
+        .expect("one task must be admitted");
+    let fence = TaskAttemptFence {
+        tenant_id: admission.tenant_id,
+        run_uid: admission.run_uid,
+        task_id: admission.task_id,
+        controller_generation: admission.controller_generation,
+        attempt_generation: admission.attempt_generation,
+        dispatch_uid: admission.dispatch_uid,
+        capacity_reservation_uid: admission.capacity_reservation_uid,
+        watchdog_trigger_uid: admission.watchdog_trigger_uid,
+        attempt_deadline_at: admission.attempt_deadline_at,
+    };
+
+    let outcome = repository.start_task_attempt(fence).await?;
+    assert!(
+        matches!(outcome, TaskAttemptStartOutcome::Started(_)),
+        "a newly admitted task must start with its persisted deadline fence, got {outcome:?}"
+    );
+    Ok(())
 }
 
 #[tokio::test]
