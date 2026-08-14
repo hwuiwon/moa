@@ -243,6 +243,17 @@ async fn start_rustfs_container(
 ) -> Result<(ContainerAsync<GenericImage>, u16)> {
     let mut failures = Vec::new();
     for attempt in 1..=3 {
+        // Docker on GitHub-hosted runners can ignore PublishAllPorts for this
+        // image even when the container port is explicitly exposed. An exact
+        // host binding avoids that daemon-specific path. The retry loop also
+        // closes the small release-to-create race around the reserved port.
+        let port_listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .context("reserve RustFS fixture host port")?;
+        let host_port = port_listener
+            .local_addr()
+            .context("read reserved RustFS fixture host port")?
+            .port();
+        drop(port_listener);
         let container = match GenericImage::new(RUSTFS_IMAGE, RUSTFS_TAG)
             .with_exposed_port(RUSTFS_PORT.tcp())
             .with_wait_for(WaitFor::seconds(2))
@@ -253,6 +264,7 @@ async fn start_rustfs_container(
             .with_env_var("RUSTFS_CONSOLE_ENABLE", "false")
             .with_mount(Mount::bind_mount(data_dir.display().to_string(), "/data"))
             .with_cmd(["/data"])
+            .with_mapped_port(host_port, RUSTFS_PORT.tcp())
             .start()
             .await
         {
