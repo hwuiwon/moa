@@ -233,10 +233,12 @@ async fn recovery_matrix_coordinator_review_restarts_once(
         .wait_for_committed_decision_and_blocked_continuation(review_id)
         .await?;
     assert_effect_once(effect.path(), &effect_marker)?;
-    barrier.release_and_remove().await?;
-    decision
+    barrier.release().await?;
+    let decision = decision
         .await
-        .context("join coordinator review decision request")??;
+        .context("join coordinator review decision request");
+    barrier.remove().await?;
+    decision??;
 
     wait_for_events(&test, session_id, |events| {
         continuation_facts(events, review_id).len() == 1
@@ -368,10 +370,12 @@ async fn recovery_matrix_worker_review_restarts_once(
         .wait_for_committed_decision_and_blocked_continuation(review_id)
         .await?;
     assert_effect_once(effect_path, WORKER_RECOVERY_EFFECT_MARKER)?;
-    barrier.release_and_remove().await?;
-    decision
+    barrier.release().await?;
+    let decision = decision
         .await
-        .context("join worker review decision request")??;
+        .context("join worker review decision request");
+    barrier.remove().await?;
+    decision??;
 
     let events = wait_for_events(&test, session_id, |events| {
         continuation_facts(events, review_id).len() == 1
@@ -1930,7 +1934,7 @@ impl ActionReviewRecoveryBarrier {
         }
     }
 
-    async fn release_and_remove(&mut self) -> Result<()> {
+    async fn release(&mut self) -> Result<()> {
         let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
             .bind(self.lock_key)
             .fetch_one(&mut self.lock_connection)
@@ -1940,6 +1944,10 @@ impl ActionReviewRecoveryBarrier {
             unlocked,
             "action-review continuation barrier was not held by its owning connection"
         );
+        Ok(())
+    }
+
+    async fn remove(&self) -> Result<()> {
         sqlx::raw_sql(
             r#"
             DROP TRIGGER IF EXISTS block_action_review_continuation_service_e2e
