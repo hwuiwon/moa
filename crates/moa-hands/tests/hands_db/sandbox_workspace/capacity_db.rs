@@ -77,7 +77,8 @@ async fn seed_volume_candidate(
         .await
         .expect("persist capacity-test workspace");
     let now = Utc::now();
-    PostgresWorkspaceOperationRepository::new(pool.clone())
+    let operations = PostgresWorkspaceOperationRepository::new(pool.clone());
+    operations
         .persist_intent(&WorkspaceOperationIntent {
             operation_id,
             tenant_id,
@@ -94,6 +95,12 @@ async fn seed_volume_candidate(
         })
         .await
         .expect("persist capacity-test create operation");
+    assert!(
+        operations
+            .begin_provider_attempt(tenant_id, operation_id)
+            .await
+            .expect("fence capacity-test provider attempt")
+    );
     PostgresWorkspaceStorageResourceRepository::new(pool.clone())
         .persist_create_intent(&StorageResourceCreateIntent {
             storage_resource_id,

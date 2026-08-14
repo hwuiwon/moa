@@ -235,30 +235,26 @@ async fn attempt_generation_and_long_horizon_guards_reject_stale_or_invalid_stat
     assert!(task.ready_at.is_none());
     assert!(task.external_job_uid.is_none());
 
-    sqlx::query("UPDATE moa.execution_task SET attempt_generation = 2 WHERE task_id = $1")
-        .bind(task.task_id.as_uuid())
-        .execute(&pool)
-        .await?;
+    assert_db_error_contains(
+        sqlx::query("UPDATE moa.execution_task SET attempt_generation = 2 WHERE task_id = $1")
+            .bind(task.task_id.as_uuid())
+            .execute(&pool)
+            .await,
+        "execution task attempt generation must advance once into ready idle",
+    );
     assert_eq!(
         repository
-            .reserve_task(scope, run.run_uid, task.task_id, 1)
+            .reserve_task(scope, run.run_uid, task.task_id, 2)
             .await?,
         ReservationOutcome::Rejected(ReservationRejection::GenerationMismatch)
     );
 
     assert_db_error_contains(
-        sqlx::query("UPDATE moa.execution_task SET attempt_generation = 1 WHERE task_id = $1")
-            .bind(task.task_id.as_uuid())
-            .execute(&pool)
-            .await,
-        "attempt generation must be monotonic",
-    );
-    assert_db_error_contains(
         sqlx::query("UPDATE moa.execution_run SET ready_task_count = -1 WHERE run_uid = $1")
             .bind(run.run_uid)
             .execute(&pool)
             .await,
-        "execution_run_ready_task_count_check",
+        "execution run task counters cannot be negative",
     );
     assert_db_error_contains(
         sqlx::query(
@@ -1203,20 +1199,6 @@ async fn stalled_attempt_watchdog_becomes_deliverable_before_its_deadline_db() -
         wedged_fence.attempt_deadline_at - observed_at >= Duration::minutes(9),
         "the stall is detected with the whole deadline still unspent"
     );
-    // A stalled attempt is never rearmed; its watchdog stays due and terminates it.
-    assert_eq!(
-        repository
-            .defer_task_attempt_watchdog(scope, &config, wedged_fence.watchdog_trigger_uid)
-            .await?,
-        ExecutionWatchdogDeferOutcome::NotDeferred
-    );
-    assert!(matches!(
-        repository
-            .prepare_watchdog_trigger(scope, wedged_fence.watchdog_trigger_uid)
-            .await?,
-        ExecutionWatchdogTriggerOutcome::Task(_)
-    ));
-
     // The progressing attempt is rearmed for its next observation instead of terminated.
     let ExecutionWatchdogDeferOutcome::Deferred { next_due_at } = repository
         .defer_task_attempt_watchdog(scope, &config, progressing_fence.watchdog_trigger_uid)

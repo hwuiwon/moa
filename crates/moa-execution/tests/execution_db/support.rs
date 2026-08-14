@@ -210,6 +210,9 @@ pub(crate) fn run_transition_allowed(source: &str, target: &str) -> bool {
         "queued" => matches!(
             target,
             "running"
+                | "waiting_review"
+                | "waiting_signal"
+                | "waiting_timer"
                 | "pause_requested"
                 | "compensating"
                 | "blocked"
@@ -234,10 +237,94 @@ pub(crate) fn run_transition_allowed(source: &str, target: &str) -> bool {
                 | "failed"
                 | "cancelled"
         ),
-        "waiting_input" | "waiting_review" | "waiting_signal" | "waiting_timer"
-        | "waiting_external" | "waiting_replan" => matches!(
+        "waiting_input" => matches!(
             target,
             "running"
+                | "waiting_review"
+                | "waiting_signal"
+                | "waiting_timer"
+                | "waiting_external"
+                | "waiting_replan"
+                | "pause_requested"
+                | "compensating"
+                | "partial"
+                | "blocked"
+                | "unsupported"
+                | "failed"
+                | "cancelled"
+        ),
+        "waiting_review" => matches!(
+            target,
+            "running"
+                | "waiting_input"
+                | "waiting_signal"
+                | "waiting_timer"
+                | "waiting_external"
+                | "waiting_replan"
+                | "pause_requested"
+                | "compensating"
+                | "partial"
+                | "blocked"
+                | "unsupported"
+                | "failed"
+                | "cancelled"
+        ),
+        "waiting_signal" => matches!(
+            target,
+            "running"
+                | "waiting_input"
+                | "waiting_review"
+                | "waiting_timer"
+                | "waiting_external"
+                | "waiting_replan"
+                | "pause_requested"
+                | "compensating"
+                | "partial"
+                | "blocked"
+                | "unsupported"
+                | "failed"
+                | "cancelled"
+        ),
+        "waiting_timer" => matches!(
+            target,
+            "running"
+                | "waiting_input"
+                | "waiting_review"
+                | "waiting_signal"
+                | "waiting_external"
+                | "waiting_replan"
+                | "pause_requested"
+                | "compensating"
+                | "partial"
+                | "blocked"
+                | "unsupported"
+                | "failed"
+                | "cancelled"
+        ),
+        "waiting_external" => matches!(
+            target,
+            "running"
+                | "waiting_input"
+                | "waiting_review"
+                | "waiting_signal"
+                | "waiting_timer"
+                | "waiting_replan"
+                | "pause_requested"
+                | "compensating"
+                | "partial"
+                | "blocked"
+                | "unsupported"
+                | "failed"
+                | "cancelled"
+        ),
+        "waiting_replan" => matches!(
+            target,
+            "running"
+                | "waiting_input"
+                | "waiting_review"
+                | "waiting_signal"
+                | "waiting_timer"
+                | "waiting_external"
                 | "pause_requested"
                 | "compensating"
                 | "partial"
@@ -248,10 +335,16 @@ pub(crate) fn run_transition_allowed(source: &str, target: &str) -> bool {
         ),
         "pause_requested" => matches!(target, "pausing" | "paused" | "running" | "cancelled"),
         "pausing" => matches!(target, "paused" | "failed" | "cancelled"),
-        "paused" => matches!(target, "queued" | "cancelled"),
+        "paused" => matches!(target, "queued" | "compensating" | "failed" | "cancelled"),
         "compensating" => matches!(
             target,
-            "completed" | "partial" | "blocked" | "unsupported" | "failed" | "cancelled"
+            "pause_requested"
+                | "completed"
+                | "partial"
+                | "blocked"
+                | "unsupported"
+                | "failed"
+                | "cancelled"
         ),
         "completed" | "partial" | "blocked" | "unsupported" | "failed" | "cancelled" => false,
         other => panic!("unknown run status in contract table: {other}"),
@@ -346,7 +439,17 @@ pub(crate) async fn set_run_status_path(
 /// Returns whether the durable task contract permits one status transition.
 pub(crate) fn task_transition_allowed(source: &str, target: &str) -> bool {
     match source {
-        "pending" => matches!(target, "ready" | "reserved" | "skipped" | "cancelled"),
+        "pending" => matches!(
+            target,
+            "ready"
+                | "reserved"
+                | "waiting_review"
+                | "waiting_signal"
+                | "waiting_timer"
+                | "failed"
+                | "skipped"
+                | "cancelled"
+        ),
         "ready" => matches!(target, "dispatching" | "reserved" | "cancelled"),
         "reserved" => matches!(target, "dispatching" | "running" | "cancelled"),
         "dispatching" => matches!(target, "running" | "ready" | "failed" | "cancelled"),
@@ -634,6 +737,13 @@ pub(crate) fn budget(max_tasks: u64) -> ExecutionBudgetLimit {
         max_retrieved_bytes: Some(max_tasks.saturating_mul(1_000)),
         deadline_at: Some(deadline),
     }
+}
+
+/// Builds a bounded execution-budget fixture without an absolute run deadline.
+pub(crate) fn budget_without_deadline(max_tasks: u64) -> ExecutionBudgetLimit {
+    let mut budget = budget(max_tasks);
+    budget.deadline_at = None;
+    budget
 }
 
 /// Builds a scaled execution-estimate fixture.

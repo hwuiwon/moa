@@ -155,7 +155,7 @@ impl PostgresWorkspaceStorageResourceRepository {
               AND operation.operation_id = $7 AND operation.operation_kind = 'create'
               AND operation.provider_account_id = $8
               AND operation.provider_account_generation = $9
-              AND operation.outcome_class = 'not_sent'
+              AND operation.outcome_class = 'unknown'
             ON CONFLICT (storage_resource_id) DO UPDATE
             SET updated_at = moa.sandbox_storage_resources.updated_at
             WHERE moa.sandbox_storage_resources.tenant_id = EXCLUDED.tenant_id

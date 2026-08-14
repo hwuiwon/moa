@@ -161,7 +161,7 @@ async fn invalid_compensation_mapping_registers_failed_without_rolling_back_forw
     assert_eq!(registration["mapped_input"], serde_json::Value::Null);
     assert_eq!(registration["status"], json!("failed"));
     assert_eq!(
-        registration["outcome"]["outcome"],
+        registration["outcome"]["result"],
         json!(ExecutionCompensationOutcome::Failed {
             message: expected_message.to_string(),
             retryable: false,

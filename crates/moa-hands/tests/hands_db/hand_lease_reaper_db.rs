@@ -137,10 +137,10 @@ async fn exact_owner_lookup_uses_index_under_large_session_history_db() {
     );
 
     let candidate_plan: serde_json::Value = sqlx::query_scalar(
-        "EXPLAIN (ANALYZE, FORMAT JSON)\
-         SELECT session_id, worker_id, provider FROM moa.hand_leases\
-          WHERE tenant_id = $1 AND session_id = $2 AND worker_id = $3\
-            AND status <> 'destroyed'\
+        "EXPLAIN (ANALYZE, FORMAT JSON) \
+         SELECT session_id, worker_id, provider FROM moa.hand_leases \
+          WHERE tenant_id = $1 AND session_id = $2 AND worker_id = $3 \
+            AND status <> 'destroyed' \
           ORDER BY provider LIMIT 2",
     )
     .bind(tenant_id)
@@ -161,9 +161,9 @@ async fn exact_owner_lookup_uses_index_under_large_session_history_db() {
         "exact owner lookup must not scan unrelated session history: {candidate_plan}"
     );
     let exists_plan: serde_json::Value = sqlx::query_scalar(
-        "EXPLAIN (ANALYZE, FORMAT JSON)\
-         SELECT EXISTS (SELECT 1 FROM moa.hand_leases\
-          WHERE tenant_id = $1 AND session_id = $2 AND worker_id = $3\
+        "EXPLAIN (ANALYZE, FORMAT JSON) \
+         SELECT EXISTS (SELECT 1 FROM moa.hand_leases \
+          WHERE tenant_id = $1 AND session_id = $2 AND worker_id = $3 \
             AND status <> 'destroyed')",
     )
     .bind(tenant_id)
@@ -260,9 +260,9 @@ async fn live_session_paging_is_indexed_bounded_and_replayable_db() {
     assert_eq!(second.next_cursor, None);
 
     let plan: serde_json::Value = sqlx::query_scalar(
-        "EXPLAIN (ANALYZE, FORMAT JSON)\
-         SELECT session_id, worker_id, provider FROM moa.hand_leases\
-          WHERE tenant_id = $1 AND session_id = $2 AND status <> 'destroyed'\
+        "EXPLAIN (ANALYZE, FORMAT JSON) \
+         SELECT session_id, worker_id, provider FROM moa.hand_leases \
+          WHERE tenant_id = $1 AND session_id = $2 AND status <> 'destroyed' \
           ORDER BY worker_id, provider LIMIT 65",
     )
     .bind(tenant_id)
@@ -967,6 +967,20 @@ async fn stale_reaper_claim_cannot_release_or_finalize_a_newer_attachment_db() {
     .execute(&pool)
     .await
     .expect("advance the durable workspace to the newer attachment and head");
+    sqlx::query(
+        "UPDATE moa.sandbox_capacity_reservations \
+         SET expected_writer_epoch = $2, expected_instance_generation = $3 \
+         WHERE tenant_id = $1 AND hand_provisioning_operation_id = $4 \
+           AND hand_lease_generation = $5 AND resource_dimension = 'active_hands'",
+    )
+    .bind(tenant_id)
+    .bind(newer.workspace_writer_epoch)
+    .bind(newer.workspace_instance_generation)
+    .bind(stale.provisioning_operation_id)
+    .bind(stale.generation)
+    .execute(&pool)
+    .await
+    .expect("advance the exact active-hand capacity fence with the attachment");
 
     assert!(
         !claims

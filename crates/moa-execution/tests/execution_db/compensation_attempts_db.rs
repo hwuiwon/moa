@@ -224,7 +224,13 @@ async fn concurrent_admission_replays_only_highest_reverse_order_slice_db() -> T
             admission.attempt.attempt_state,
             CompensationAttemptState::Dispatching
         );
-        assert_eq!(admission.attempt.run, run);
+        assert_eq!(admission.attempt.run.run_uid, run.run_uid);
+        assert_eq!(
+            admission.attempt.run.status,
+            ExecutionRunStatus::Compensating
+        );
+        assert_eq!(admission.attempt.run.active_task_count, 1);
+        assert_eq!(admission.attempt.run.processed_wake_epoch, run.wake_epoch);
         assert_eq!(
             admission.attempt.active_dispatch_uid,
             Some(admission.dispatch.dispatch_uid)
@@ -923,7 +929,7 @@ async fn review_resolution_requires_exact_uid_and_slice_generation_db() -> TestR
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let repository = ExecutionRepository::new(test_db.store().pool().clone());
     let tenant_id = TenantId::new();
-    let scope = ExecutionScope::Tenant { tenant_id };
+    let scope = ExecutionScope::ControlPlane;
     let (run, _) = compensating_run(&repository, scope, tenant_id, &["reviewed"]).await?;
     let now = moa_test_support::fixtures::pg_now();
     let config = ExecutionConfig::default();
@@ -1026,7 +1032,7 @@ async fn paused_compensation_review_decision_waits_for_resume_activation_db() ->
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let repository = ExecutionRepository::new(test_db.store().pool().clone());
     let tenant_id = TenantId::new();
-    let scope = ExecutionScope::Tenant { tenant_id };
+    let scope = ExecutionScope::ControlPlane;
     let config = ExecutionConfig::default();
     let (paused, fence, review_uid) = park_compensation_review_then_pause(
         &repository,
@@ -1121,7 +1127,7 @@ async fn paused_compensation_review_timeout_waits_for_resume_activation_db() -> 
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let repository = ExecutionRepository::new(test_db.store().pool().clone());
     let tenant_id = TenantId::new();
-    let scope = ExecutionScope::Tenant { tenant_id };
+    let scope = ExecutionScope::ControlPlane;
     let config = ExecutionConfig::default();
     let (paused, fence, review_uid) = park_compensation_review_then_pause(
         &repository,
@@ -1207,7 +1213,7 @@ async fn reviewed_external_job_is_parked_atomically_after_review_db() -> TestRes
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let repository = ExecutionRepository::new(test_db.store().pool().clone());
     let tenant_id = TenantId::new();
-    let scope = ExecutionScope::Tenant { tenant_id };
+    let scope = ExecutionScope::ControlPlane;
     let (run, _) = compensating_run(&repository, scope, tenant_id, &["reviewed-external"]).await?;
     let now = moa_test_support::fixtures::pg_now();
     let config = ExecutionConfig::default();

@@ -1666,7 +1666,11 @@ pub async fn apply_external_job_callback_in_conn(
         } => sqlx::query(
             r#"
                 UPDATE moa.execution_external_job
-                SET state = $2, progress_phase = $3, next_reconcile_at = $4,
+                SET state = CASE WHEN state = 'cancel_requested'
+                                 THEN state ELSE $2 END,
+                    progress_phase = $3,
+                    next_reconcile_at = CASE WHEN state = 'cancel_requested'
+                                             THEN next_reconcile_at ELSE $4 END,
                     last_provider_event_id = $5, updated_at = now()
                 WHERE external_job_uid = $1 AND job_generation = $6
                   AND state IN ('starting', 'running', 'waiting_reconcile', 'cancel_requested')

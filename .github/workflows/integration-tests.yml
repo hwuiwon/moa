@@ -140,23 +140,13 @@ jobs:
           CARGO_TARGET_DIR=target/tools \
           cargo run -q -p moa-fga-bootstrap
 
-      - name: Start Restate-backed orchestrator stack
+      - name: Start and register Restate-backed orchestrator stack
         run: |
           set -a
           . ./.env.fga
           set +a
-          docker compose up -d --build restate moa-orchestrator restate-register
-
-      - name: Wait for Restate registration
-        run: |
-          for i in $(seq 1 60); do
-            if docker compose logs restate-register 2>&1 | grep -q "registration complete"; then
-              exit 0
-            fi
-            sleep 2
-          done
-          docker compose logs restate-register
-          exit 1
+          docker compose up -d --build restate moa-orchestrator
+          docker compose run --rm restate-bootstrap
 
       # The two smoke tests need opposite environments, mirroring the
       # clean-e2e ladder's restate-service-e2e vs fixture-service-e2e split:
@@ -187,7 +177,7 @@ jobs:
 
       - name: Dump compose logs
         if: failure()
-        run: docker compose logs postgres openfga restate moa-orchestrator restate-register
+        run: docker compose logs postgres openfga restate moa-orchestrator restate-bootstrap
 
       - name: Stop compose stack
         if: always()

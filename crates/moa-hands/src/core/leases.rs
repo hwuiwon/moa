@@ -701,7 +701,6 @@ impl HandLeaseStore for PostgresHandLeaseStore {
                 reap_attempts = 0,
                 reap_not_before = EXCLUDED.reap_not_before
             WHERE moa.hand_leases.tenant_id = EXCLUDED.tenant_id
-              AND moa.hand_leases.handle IS NULL
               AND (
                     moa.hand_leases.status IN ('stale', 'destroyed')
                  OR (

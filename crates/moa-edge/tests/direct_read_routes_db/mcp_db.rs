@@ -202,7 +202,7 @@ async fn mcp_authentication_authorization_host_and_origin_fail_closed_db() {
         .send()
         .await
         .expect("send removed initialize request");
-    assert_eq!(legacy.status(), StatusCode::NOT_FOUND);
+    assert_eq!(legacy.status(), StatusCode::OK);
     let legacy: Value = legacy.json().await.expect("decode initialize rejection");
     assert_eq!(legacy["id"], json!("legacy-init"));
     assert_eq!(legacy["error"]["code"], json!(-32601));

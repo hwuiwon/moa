@@ -221,6 +221,7 @@ CREATE TABLE moa.sandbox_workspace_operations (
     reconcile_not_before TIMESTAMPTZ NOT NULL,
     outcome_class TEXT NOT NULL DEFAULT 'not_sent'
         CHECK (outcome_class IN ('not_sent', 'unknown', 'confirmed')),
+    direct_confirmation_pending BOOLEAN NOT NULL DEFAULT FALSE,
     confirmed_disposition TEXT CHECK (
         confirmed_disposition IN ('resource_present', 'resource_absent')
     ),
@@ -266,6 +267,10 @@ CREATE TABLE moa.sandbox_workspace_operations (
     ),
     CONSTRAINT sandbox_workspace_operations_outcome_disposition_pair_check CHECK (
         (outcome_class = 'confirmed') = (confirmed_disposition IS NOT NULL)
+    ),
+    CONSTRAINT sandbox_workspace_operations_direct_confirmation_check CHECK (
+        NOT direct_confirmation_pending
+        OR (outcome_class = 'unknown' AND claim_token IS NULL)
     ),
     CONSTRAINT sandbox_workspace_operations_absence_proof_shape_check CHECK (
         (
@@ -336,7 +341,9 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    IF OLD.outcome_class = 'not_sent' AND NEW.operation_kind <> 'delete' THEN
+    IF OLD.outcome_class = 'unknown'
+       AND OLD.direct_confirmation_pending
+       AND NEW.operation_kind <> 'delete' THEN
         -- A synchronous non-delete provider operation may authoritatively
         -- report that it created or retained no external resource.
         RETURN NEW;

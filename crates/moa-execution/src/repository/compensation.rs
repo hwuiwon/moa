@@ -3512,8 +3512,9 @@ async fn reconcile_run_after_compensation_capacity_release(
          activation_state=CASE WHEN status IN ('pause_requested','pausing') AND $3=0 \
                                THEN 'paused' ELSE activation_state END, \
          paused_at=CASE WHEN status IN ('pause_requested','pausing') AND $3=0 \
-                        THEN COALESCE(paused_at,$4) ELSE paused_at END, \
-         last_progress_at=GREATEST(last_progress_at,$4),updated_at=NOW() \
+                        THEN COALESCE(paused_at,GREATEST($4,pause_requested_at,clock_timestamp())) \
+                        ELSE paused_at END, \
+         last_progress_at=GREATEST(last_progress_at,$4,clock_timestamp()),updated_at=NOW() \
          WHERE run_uid=$1 AND controller_generation=$2 RETURNING *",
     )
     .bind(run.run_uid)

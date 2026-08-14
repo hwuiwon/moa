@@ -1,5 +1,7 @@
 //! Daytona tenant-volume ownership and lifetime-reservation behavior against Postgres.
 
+use std::time::Duration;
+
 use chrono::{Duration as ChronoDuration, Utc};
 use moa_core::{
     error::MoaError,
@@ -349,6 +351,26 @@ async fn ambiguous_create_retains_its_lifetime_charge_and_rejects_stale_callback
             .await
             .expect("mark ambiguous create operation")
     );
+    sqlx::query(
+        "UPDATE moa.sandbox_workspace_operations \
+         SET deadline_at = now() - interval '36501 days', \
+             reconcile_not_before = now() - interval '36500 days' \
+         WHERE tenant_id = $1 AND operation_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(seeded.operation_id)
+    .execute(&pool)
+    .await
+    .expect("make the ambiguous operation due for exact reconciliation");
+    let maintenance_operations =
+        PostgresWorkspaceOperationRepository::new_maintenance(pool.clone());
+    let claimed = maintenance_operations
+        .claim_reconciliation(1, Duration::from_secs(60))
+        .await
+        .expect("claim the exact ambiguous create")
+        .into_iter()
+        .find(|claim| claim.operation.operation_id == seeded.operation_id)
+        .expect("the isolated create operation is claimable");
 
     let ambiguous = resources
         .get(tenant_id, storage_resource_id)
@@ -384,12 +406,8 @@ async fn ambiguous_create_retains_its_lifetime_charge_and_rejects_stale_callback
             .expect("commit the exact linked lifetime reservation")
     );
     assert!(
-        operations
-            .confirm_disposition(
-                tenant_id,
-                seeded.operation_id,
-                WorkspaceConfirmedDisposition::ResourcePresent,
-            )
+        maintenance_operations
+            .confirm_present_claimed(&claimed)
             .await
             .expect("confirm the ambiguous provider create")
     );

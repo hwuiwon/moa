@@ -2422,9 +2422,10 @@ $old$;
             'pausing', 'paused', 'running', 'cancelled'
         )
         WHEN 'pausing' THEN NEW.status IN ('paused', 'failed', 'cancelled')
-        WHEN 'paused' THEN NEW.status IN ('queued', 'cancelled')
+        WHEN 'paused' THEN NEW.status IN ('queued', 'compensating', 'failed', 'cancelled')
         WHEN 'compensating' THEN NEW.status IN (
-            'completed', 'partial', 'blocked', 'unsupported', 'failed', 'cancelled'
+            'pause_requested', 'completed', 'partial', 'blocked', 'unsupported',
+            'failed', 'cancelled'
         )
         ELSE FALSE
     END;
@@ -2535,7 +2536,9 @@ BEGIN
             'ready', 'reserved', 'waiting_review', 'waiting_signal',
             'waiting_timer', 'failed', 'skipped', 'cancelled'
         )
-        WHEN 'ready' THEN NEW.status IN ('dispatching', 'reserved', 'cancelled')
+        -- A retry or input resume first advances into a fresh ready generation; a
+        -- deadline or budget rejection may then terminalize that generation before dispatch.
+        WHEN 'ready' THEN NEW.status IN ('dispatching', 'reserved', 'failed', 'cancelled')
         WHEN 'reserved' THEN NEW.status IN ('dispatching', 'running', 'cancelled')
         WHEN 'dispatching' THEN NEW.status IN ('running', 'ready', 'failed', 'cancelled')
         WHEN 'running' THEN NEW.status IN (
@@ -2616,7 +2619,7 @@ BEGIN
        AND NEW.active_task_count = 0 THEN
         NEW.status := 'paused';
         NEW.activation_state := 'paused';
-        NEW.paused_at := COALESCE(NEW.paused_at, now());
+        NEW.paused_at := COALESCE(NEW.paused_at, clock_timestamp());
     END IF;
     IF OLD.last_progress_at IS NOT NULL
        AND NEW.last_progress_at < OLD.last_progress_at THEN
@@ -2640,7 +2643,8 @@ BEGIN
     END IF;
     IF OLD.attempt_state = 'cancelling'
        AND NEW.attempt_state NOT IN (
-           'cancelling', 'idle', 'waiting_review', 'terminal', 'unknown_outcome'
+           'cancelling', 'idle', 'waiting_review', 'waiting_external', 'terminal',
+           'unknown_outcome'
        ) THEN
         RAISE EXCEPTION 'execution compensation cancelling state cannot become dispatchable';
     END IF;

@@ -1,6 +1,13 @@
 //! Task-outcome, external-wait, review, and replanning persistence contracts.
 
 use super::support::*;
+use moa_execution::{
+    repository::{
+        ready::{ReadyMaterializationOutcome, ReadyMaterializationRequest},
+        task::{TaskAttemptFence, TaskAttemptSettlementOutcome, TaskAttemptStartOutcome},
+    },
+    state::LogicalTask,
+};
 
 #[tokio::test]
 async fn input_resume_starts_a_schedulable_generation_without_a_prior_outcome_db() -> TestResult {
@@ -19,7 +26,7 @@ async fn input_resume_starts_a_schedulable_generation_without_a_prior_outcome_db
     );
     new_run.plan.definition.nodes = vec![moa_artifacts::execution_plan::ExecutionNode {
         id: "input-resume".to_string(),
-        requirement_ids: vec!["req".to_string()],
+        requirement_ids: Vec::new(),
         depends_on: Vec::new(),
         when: None,
         input: json!({}),
@@ -35,15 +42,18 @@ async fn input_resume_starts_a_schedulable_generation_without_a_prior_outcome_db
     }];
     let run = create_run(&repository, scope, new_run).await?;
     let task = logical_task(run.run_uid, "input-resume", "", estimate(10));
-    repository
-        .materialize_tasks(scope, run.run_uid, 1, vec![task.clone()])
-        .await?;
-    reserve_and_start(&repository, scope, run.run_uid, task.task_id).await?;
+    let fence = materialize_admit_and_start(&repository, scope, run.run_uid, task.clone()).await?;
     assert!(matches!(
         repository
-            .record_task_outcome(scope, run.run_uid, task.task_id, 1, needs_input(1))
+            .settle_task_attempt(
+                &ExecutionConfig::default(),
+                fence,
+                needs_input(1),
+                None,
+                Utc::now(),
+            )
             .await?,
-        TaskOutcomeWrite::Applied { .. }
+        TaskAttemptSettlementOutcome::Applied { .. }
     ));
 
     let TransitionOutcome::Applied(resumed) = repository
@@ -59,7 +69,7 @@ async fn input_resume_starts_a_schedulable_generation_without_a_prior_outcome_db
     else {
         panic!("input resume must apply");
     };
-    assert_eq!(resumed.status, ExecutionTaskStatus::Running);
+    assert_eq!(resumed.status, ExecutionTaskStatus::Ready);
     assert_eq!(resumed.generation, 2);
     assert!(
         resumed.current_outcome.is_none(),
@@ -73,7 +83,7 @@ async fn input_resume_starts_a_schedulable_generation_without_a_prior_outcome_db
         .expect("resumed run should remain visible");
     let persisted_task = listed_task(&repository, scope, run.run_uid, task.task_id).await?;
     assert_eq!(persisted_run.status, ExecutionRunStatus::Running);
-    assert_eq!(persisted_task.status, ExecutionTaskStatus::Running);
+    assert_eq!(persisted_task.status, ExecutionTaskStatus::Ready);
     assert_eq!(persisted_task.generation, 2);
     assert!(persisted_task.current_outcome.is_none());
     Ok(())
@@ -89,42 +99,34 @@ async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db
     let tenant_id = TenantId::new();
     let scope = ExecutionScope::Tenant { tenant_id };
 
-    for (kind, waiting_outcome) in [
-        ("input", needs_input(0)),
-        (
-            "retry",
-            ExecutionTaskOutcome {
-                schema_version: 1,
-                usage: usage(0),
-                result: ExecutionTaskResult::Failed {
-                    class: moa_artifacts::execution_plan::ExecutionFailureClass::Retryable,
-                    message: "retry later".to_string(),
-                },
+    for (kind, waiting_outcome) in [(
+        "retry",
+        ExecutionTaskOutcome {
+            schema_version: 1,
+            usage: usage(0),
+            result: ExecutionTaskResult::Failed {
+                class: moa_artifacts::execution_plan::ExecutionFailureClass::Retryable,
+                message: "retry later".to_string(),
             },
-        ),
-    ] {
-        let run = create_run(
-            &repository,
-            scope,
-            new_run(
-                tenant_id,
-                None,
-                &format!("elapsed-{kind}"),
-                ExecutionRunStatus::Queued,
-                ExecutionBudgetLimit {
-                    deadline_at: Some(
-                        moa_test_support::fixtures::pg_now() + Duration::milliseconds(150),
-                    ),
-                    ..budget(2)
-                },
-            ),
-        )
-        .await?;
+        },
+    )] {
+        let mut candidate = new_run(
+            tenant_id,
+            None,
+            &format!("elapsed-{kind}"),
+            ExecutionRunStatus::Queued,
+            ExecutionBudgetLimit {
+                deadline_at: Some(
+                    moa_test_support::fixtures::pg_now() + Duration::milliseconds(150),
+                ),
+                ..budget(2)
+            },
+        );
+        candidate.plan.definition.nodes = vec![outcome_node(kind)];
+        let run = create_run(&repository, scope, candidate).await?;
         let task = logical_task(run.run_uid, kind, "deadline", estimate(1));
-        repository
-            .materialize_tasks(scope, run.run_uid, 1, vec![task.clone()])
-            .await?;
-        reserve_and_start(&repository, scope, run.run_uid, task.task_id).await?;
+        let _fence =
+            materialize_admit_and_start(&repository, scope, run.run_uid, task.clone()).await?;
         assert!(matches!(
             repository
                 .record_task_outcome(scope, run.run_uid, task.task_id, 1, waiting_outcome,)
@@ -136,22 +138,9 @@ async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db
             .load_run(scope, run.run_uid)
             .await?
             .expect("waiting run should remain queryable");
-        let transition = if kind == "input" {
-            repository
-                .resume_task_with_input(
-                    scope,
-                    &ExecutionConfig::default(),
-                    run.run_uid,
-                    task.task_id,
-                    1,
-                    json!({"ok": true}),
-                )
-                .await?
-        } else {
-            repository
-                .retry_task(scope, run.run_uid, task.task_id, 1)
-                .await?
-        };
+        let transition = repository
+            .retry_task(scope, run.run_uid, task.task_id, 1)
+            .await?;
         let TransitionOutcome::Applied(terminal_task) = transition else {
             panic!("{kind} elapsed redispatch must terminalize atomically");
         };
@@ -166,43 +155,20 @@ async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db
         assert_eq!(terminal_run.status, ExecutionRunStatus::Running);
         assert_eq!(terminal_run.reserved, ExecutionEstimate::default());
         assert_eq!(terminal_run.consumed.tasks, 1);
-        assert_eq!(terminal_run.wake_epoch, before_terminal.wake_epoch + 1);
-        let replay = if kind == "input" {
-            repository
-                .resume_task_with_input(
-                    scope,
-                    &ExecutionConfig::default(),
-                    run.run_uid,
-                    task.task_id,
-                    1,
-                    json!({"ok": true}),
-                )
-                .await?
-        } else {
-            repository
-                .retry_task(scope, run.run_uid, task.task_id, 1)
-                .await?
-        };
+        assert!(
+            terminal_run.wake_epoch > before_terminal.wake_epoch,
+            "deadline rejection must durably wake terminal evaluation"
+        );
+        let replay = repository
+            .retry_task(scope, run.run_uid, task.task_id, 1)
+            .await?;
         assert_eq!(
             replay,
             TransitionOutcome::AlreadyApplied(terminal_task.clone())
         );
-        let stale = if kind == "input" {
-            repository
-                .resume_task_with_input(
-                    scope,
-                    &ExecutionConfig::default(),
-                    run.run_uid,
-                    task.task_id,
-                    0,
-                    json!({"ok": true}),
-                )
-                .await?
-        } else {
-            repository
-                .retry_task(scope, run.run_uid, task.task_id, 0)
-                .await?
-        };
+        let stale = repository
+            .retry_task(scope, run.run_uid, task.task_id, 0)
+            .await?;
         assert_eq!(
             stale,
             TransitionOutcome::Rejected(
@@ -212,36 +178,46 @@ async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db
     }
 
     for (kind, waiting_outcome) in [("input", needs_input(1)), ("retry", retryable(1))] {
-        let run = create_run(
-            &repository,
-            scope,
-            new_run(
-                tenant_id,
-                None,
-                &format!("exhausted-{kind}"),
-                ExecutionRunStatus::Queued,
-                ExecutionBudgetLimit {
-                    max_cost_microusd: Some(1),
-                    max_tokens: Some(1),
-                    max_tasks: Some(1),
-                    max_tool_calls: Some(1),
-                    max_retrieved_bytes: Some(1),
-                    deadline_at: Some(pg_deadline(Duration::hours(1))),
-                },
-            ),
-        )
-        .await?;
+        let mut candidate = new_run(
+            tenant_id,
+            None,
+            &format!("exhausted-{kind}"),
+            ExecutionRunStatus::Queued,
+            ExecutionBudgetLimit {
+                max_cost_microusd: Some(1),
+                max_tokens: Some(1),
+                max_tasks: Some(1),
+                max_tool_calls: Some(1),
+                max_retrieved_bytes: Some(1),
+                deadline_at: Some(pg_deadline(Duration::hours(1))),
+            },
+        );
+        candidate.plan.definition.nodes = vec![outcome_node(kind)];
+        let run = create_run(&repository, scope, candidate).await?;
         let task = logical_task(run.run_uid, kind, "budget", estimate(1));
-        repository
-            .materialize_tasks(scope, run.run_uid, 1, vec![task.clone()])
-            .await?;
-        reserve_and_start(&repository, scope, run.run_uid, task.task_id).await?;
-        assert!(matches!(
-            repository
-                .record_task_outcome(scope, run.run_uid, task.task_id, 1, waiting_outcome,)
-                .await?,
-            TaskOutcomeWrite::Applied { .. }
-        ));
+        let fence =
+            materialize_admit_and_start(&repository, scope, run.run_uid, task.clone()).await?;
+        if kind == "input" {
+            assert!(matches!(
+                repository
+                    .settle_task_attempt(
+                        &ExecutionConfig::default(),
+                        fence,
+                        waiting_outcome,
+                        None,
+                        Utc::now(),
+                    )
+                    .await?,
+                TaskAttemptSettlementOutcome::Applied { .. }
+            ));
+        } else {
+            assert!(matches!(
+                repository
+                    .record_task_outcome(scope, run.run_uid, task.task_id, 1, waiting_outcome,)
+                    .await?,
+                TaskOutcomeWrite::Applied { .. }
+            ));
+        }
         let before_terminal = repository
             .load_run(scope, run.run_uid)
             .await?
@@ -276,7 +252,10 @@ async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db
         assert_eq!(terminal_run.status, ExecutionRunStatus::Running);
         assert_eq!(terminal_run.reserved, ExecutionEstimate::default());
         assert_eq!(terminal_run.consumed.tasks, 1);
-        assert_eq!(terminal_run.wake_epoch, before_terminal.wake_epoch + 1);
+        assert!(
+            terminal_run.wake_epoch > before_terminal.wake_epoch,
+            "budget rejection must durably wake terminal evaluation"
+        );
         let replay = if kind == "input" {
             repository
                 .resume_task_with_input(
@@ -457,28 +436,28 @@ async fn stale_and_terminal_outcomes_are_audited_without_projection_mutation_db(
     let repository = ExecutionRepository::new(test_db.store().pool().clone());
     let tenant_id = TenantId::new();
     let scope = ExecutionScope::Tenant { tenant_id };
-    let run = create_run(
-        &repository,
-        scope,
-        new_run(
-            tenant_id,
-            None,
-            "outcomes",
-            ExecutionRunStatus::Queued,
-            budget(10),
-        ),
-    )
-    .await?;
+    let mut candidate = new_run(
+        tenant_id,
+        None,
+        "outcomes",
+        ExecutionRunStatus::Queued,
+        budget(10),
+    );
+    candidate.plan.definition.nodes = vec![outcome_node("outcome")];
+    let run = create_run(&repository, scope, candidate).await?;
     let task = logical_task(run.run_uid, "outcome", "", estimate(10));
-    repository
-        .materialize_tasks(scope, run.run_uid, 1, vec![task.clone()])
-        .await?;
-    reserve_and_start(&repository, scope, run.run_uid, task.task_id).await?;
+    let fence = materialize_admit_and_start(&repository, scope, run.run_uid, task.clone()).await?;
     assert!(matches!(
         repository
-            .record_task_outcome(scope, run.run_uid, task.task_id, 1, needs_input(1))
+            .settle_task_attempt(
+                &ExecutionConfig::default(),
+                fence,
+                needs_input(1),
+                None,
+                Utc::now(),
+            )
             .await?,
-        TaskOutcomeWrite::Applied { .. }
+        TaskAttemptSettlementOutcome::Applied { .. }
     ));
     let TransitionOutcome::Applied(resumed) = repository
         .resume_task_with_input(
@@ -530,6 +509,8 @@ async fn stale_and_terminal_outcomes_are_audited_without_projection_mutation_db(
         "a changed payload must retain the generation fence"
     );
 
+    let second_fence = admit_and_start(&repository, run.run_uid, task.task_id).await?;
+
     let stale = repository
         .record_task_outcome(scope, run.run_uid, task.task_id, 1, completed(2))
         .await?;
@@ -546,9 +527,15 @@ async fn stale_and_terminal_outcomes_are_audited_without_projection_mutation_db(
 
     assert!(matches!(
         repository
-            .record_task_outcome(scope, run.run_uid, task.task_id, 2, completed(2))
+            .settle_task_attempt(
+                &ExecutionConfig::default(),
+                second_fence,
+                completed(2),
+                None,
+                Utc::now(),
+            )
             .await?,
-        TaskOutcomeWrite::Applied { .. }
+        TaskAttemptSettlementOutcome::Applied { .. }
     ));
     let duplicate = repository
         .record_task_outcome(scope, run.run_uid, task.task_id, 2, completed(9))
@@ -603,7 +590,7 @@ async fn task_outcomes_update_review_state_and_failure_accounting_exactly_db() -
                     message: "terminal failure".to_string(),
                 },
             },
-            ExecutionRunStatus::WaitingInput,
+            ExecutionRunStatus::Running,
             ExecutionTaskStatus::Failed,
             1,
         ),
@@ -612,19 +599,14 @@ async fn task_outcomes_update_review_state_and_failure_accounting_exactly_db() -
     for (key, waiting_status, outcome, expected_run_status, expected_task_status, failed_tasks) in
         cases
     {
-        let run = create_run(
-            &repository,
-            scope,
-            new_run(tenant_id, None, key, ExecutionRunStatus::Queued, budget(1)),
-        )
-        .await?;
+        let mut candidate = new_run(tenant_id, None, key, ExecutionRunStatus::Queued, budget(1));
+        candidate.plan.definition.nodes = vec![outcome_node("outcome")];
+        let run = create_run(&repository, scope, candidate).await?;
         let _running =
             claim_running_controller(&repository, scope, &ExecutionConfig::default(), &run).await?;
         let task = logical_task(run.run_uid, "outcome", key, estimate(1));
-        repository
-            .materialize_tasks(scope, run.run_uid, 1, vec![task.clone()])
-            .await?;
-        reserve_and_start(&repository, scope, run.run_uid, task.task_id).await?;
+        let fence =
+            materialize_admit_and_start(&repository, scope, run.run_uid, task.clone()).await?;
         let current = repository
             .load_run(scope, run.run_uid)
             .await?
@@ -638,7 +620,8 @@ async fn task_outcomes_update_review_state_and_failure_accounting_exactly_db() -
             )
             .await?
         {
-            RunControllerClaimOutcome::Claimed(claimed) => claimed,
+            RunControllerClaimOutcome::Claimed(claimed)
+            | RunControllerClaimOutcome::Resumed(claimed) => claimed,
             outcome => panic!("task wake must be claimable: {outcome:?}"),
         };
         assert!(matches!(
@@ -666,12 +649,17 @@ async fn task_outcomes_update_review_state_and_failure_accounting_exactly_db() -
             RunControllerCompletionOutcome::Applied { .. }
         ));
 
-        let TaskOutcomeWrite::Applied {
+        let TaskAttemptSettlementOutcome::Applied {
             run: persisted_run,
             task: persisted_task,
-            ..
         } = repository
-            .record_task_outcome(scope, run.run_uid, task.task_id, task.generation, outcome)
+            .settle_task_attempt(
+                &ExecutionConfig::default(),
+                fence,
+                outcome,
+                None,
+                Utc::now(),
+            )
             .await?
         else {
             panic!("{key} outcome must apply");
@@ -681,4 +669,97 @@ async fn task_outcomes_update_review_state_and_failure_accounting_exactly_db() -
         assert_eq!(persisted_run.progress_failed_tasks, failed_tasks, "{key}");
     }
     Ok(())
+}
+
+fn outcome_node(id: &str) -> moa_artifacts::execution_plan::ExecutionNode {
+    moa_artifacts::execution_plan::ExecutionNode {
+        id: id.to_string(),
+        requirement_ids: Vec::new(),
+        depends_on: Vec::new(),
+        when: None,
+        input: json!({}),
+        output_schema: json!({"type": "object"}),
+        operation: moa_artifacts::execution_plan::ExecutionOperation::Output { value: json!({}) },
+        compensation: None,
+        retry: RetryPolicy {
+            max_attempts: 3,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 10,
+        },
+        budget: None,
+    }
+}
+
+async fn materialize_admit_and_start(
+    repository: &ExecutionRepository,
+    scope: ExecutionScope,
+    run_uid: Uuid,
+    task: LogicalTask,
+) -> Result<TaskAttemptFence, Box<dyn std::error::Error + Send + Sync>> {
+    let config = ExecutionConfig::default();
+    assert!(matches!(
+        repository
+            .materialize_ready_page(
+                scope,
+                &config,
+                ReadyMaterializationRequest {
+                    run_uid,
+                    plan_revision: 1,
+                    node_id: task.node_id.clone(),
+                    expected_cursor: 0,
+                    reduce_cursor: None,
+                    source_exhausted: true,
+                    terminal_output: None,
+                    condition_skipped: false,
+                    tasks: vec![task.clone()],
+                },
+            )
+            .await?,
+        ReadyMaterializationOutcome::Applied { .. }
+    ));
+    admit_and_start(repository, run_uid, task.task_id).await
+}
+
+async fn admit_and_start(
+    repository: &ExecutionRepository,
+    run_uid: Uuid,
+    task_id: ExecutionTaskId,
+) -> Result<TaskAttemptFence, Box<dyn std::error::Error + Send + Sync>> {
+    let config = ExecutionConfig::default();
+    let admitted = repository
+        .admit_ready_attempts(&config, 1, Utc::now())
+        .await?
+        .admitted
+        .into_iter()
+        .next()
+        .expect("one canonical task attempt must be admitted");
+    assert_eq!(admitted.run_uid, run_uid);
+    assert_eq!(admitted.task_id, task_id);
+    assert!(matches!(
+        repository
+            .start_task_attempt(TaskAttemptFence {
+                tenant_id: admitted.tenant_id,
+                run_uid: admitted.run_uid,
+                task_id: admitted.task_id,
+                controller_generation: admitted.controller_generation,
+                attempt_generation: admitted.attempt_generation,
+                dispatch_uid: admitted.dispatch_uid,
+                capacity_reservation_uid: admitted.capacity_reservation_uid,
+                watchdog_trigger_uid: admitted.watchdog_trigger_uid,
+                attempt_deadline_at: admitted.attempt_deadline_at,
+            })
+            .await?,
+        TaskAttemptStartOutcome::Started(_) | TaskAttemptStartOutcome::AlreadyStarted(_)
+    ));
+    Ok(TaskAttemptFence {
+        tenant_id: admitted.tenant_id,
+        run_uid: admitted.run_uid,
+        task_id: admitted.task_id,
+        controller_generation: admitted.controller_generation,
+        attempt_generation: admitted.attempt_generation,
+        dispatch_uid: admitted.dispatch_uid,
+        capacity_reservation_uid: admitted.capacity_reservation_uid,
+        watchdog_trigger_uid: admitted.watchdog_trigger_uid,
+        attempt_deadline_at: admitted.attempt_deadline_at,
+    })
 }

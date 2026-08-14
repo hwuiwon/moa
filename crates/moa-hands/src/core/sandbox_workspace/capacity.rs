@@ -589,7 +589,7 @@ impl PostgresWorkspaceCapacityRepository {
                   AND operation.workspace_id = $5 AND operation.operation_id = $6
                   AND operation.expected_writer_epoch = $7
                   AND operation.expected_instance_generation = $8
-                  AND operation.outcome_class = 'not_sent'
+                  AND operation.outcome_class = 'unknown'
             )
             "#,
         )

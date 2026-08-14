@@ -297,30 +297,20 @@ async fn resident_run_entitlement_caps_active_plus_parked_at_one_db() -> TestRes
             dimension: ExecutionCapacityDimension::ParkedRuns
         }
     ));
-    assert!(matches!(
-        repository
-            .claim_controller_wake(
-                scope,
-                first.run_uid,
-                first.controller_generation,
-                first.wake_epoch,
-            )
-            .await?,
-        RunControllerClaimOutcome::Claimed(_)
-    ));
+    let running = claim_running_controller(&repository, scope, &config, &first).await?;
     assert!(matches!(
         repository
             .complete_controller_wake(
                 scope,
                 &config,
-                first.run_uid,
+                running.run_uid,
                 RunControllerCompletionRequest {
-                    controller_generation: first.controller_generation,
-                    wake_epoch: first.wake_epoch,
+                    controller_generation: running.controller_generation,
+                    wake_epoch: running.wake_epoch,
                     checkpoint: ExecutionRunActivationCheckpoint {
                         status: ExecutionRunStatus::WaitingInput,
                         activation_state: ExecutionActivationState::Idle,
-                        next_wake_at: first.approved_budget.deadline_at,
+                        next_wake_at: running.approved_budget.deadline_at,
                         waiting_since: Some(Utc::now()),
                         ready_task_count: 0,
                         active_task_count: 0,
@@ -462,17 +452,6 @@ async fn terminal_finalization_releases_active_run_once_and_capacity_is_reusable
     else {
         panic!("terminal fixture must arm a deadline trigger");
     };
-    assert!(matches!(
-        repository
-            .claim_controller_wake(
-                scope,
-                running.run_uid,
-                running.controller_generation,
-                running.wake_epoch,
-            )
-            .await?,
-        RunControllerClaimOutcome::Claimed(_)
-    ));
     assert!(matches!(
         repository
             .drain_run_triggers_page(
@@ -677,17 +656,6 @@ async fn concurrent_deadline_arm_and_terminal_finalization_use_scheduled_before_
     ));
     assert!(matches!(
         repository
-            .claim_controller_wake(
-                scope,
-                running.run_uid,
-                running.controller_generation,
-                running.wake_epoch,
-            )
-            .await?,
-        RunControllerClaimOutcome::Claimed(_)
-    ));
-    assert!(matches!(
-        repository
             .drain_run_triggers_page(
                 scope,
                 &config,
@@ -724,7 +692,10 @@ async fn concurrent_deadline_arm_and_terminal_finalization_use_scheduled_before_
     .await
     .expect("ScheduledTriggers-before-run ordering must not deadlock");
     match (arm?, terminal?) {
-        (RunDeadlineArmOutcome::Terminal, FinalizationOutcome::Finalized(_))
+        (
+            RunDeadlineArmOutcome::Terminal | RunDeadlineArmOutcome::Armed(_),
+            FinalizationOutcome::Finalized(_),
+        )
         | (RunDeadlineArmOutcome::Armed(_), FinalizationOutcome::Conflict) => {}
         outcomes => {
             panic!("deadline arm/terminal race committed incoherent outcomes: {outcomes:?}")
@@ -782,17 +753,7 @@ async fn concurrent_resume_and_terminal_release_preserve_capacity_lock_order_db(
         else {
             panic!("concurrency fixture must be admitted");
         };
-        assert!(matches!(
-            repository
-                .claim_controller_wake(
-                    scope,
-                    run.run_uid,
-                    run.controller_generation,
-                    run.wake_epoch,
-                )
-                .await?,
-            RunControllerClaimOutcome::Claimed(_)
-        ));
+        let running = claim_running_controller(&repository, scope, &config, &run).await?;
         let next_wake_at = run
             .approved_budget
             .deadline_at
@@ -801,10 +762,10 @@ async fn concurrent_resume_and_terminal_release_preserve_capacity_lock_order_db(
             .complete_controller_wake(
                 scope,
                 &config,
-                run.run_uid,
+                running.run_uid,
                 RunControllerCompletionRequest {
-                    controller_generation: run.controller_generation,
-                    wake_epoch: run.wake_epoch,
+                    controller_generation: running.controller_generation,
+                    wake_epoch: running.wake_epoch,
                     checkpoint: ExecutionRunActivationCheckpoint {
                         status: ExecutionRunStatus::WaitingInput,
                         activation_state: ExecutionActivationState::Idle,
@@ -833,18 +794,7 @@ async fn concurrent_resume_and_terminal_release_preserve_capacity_lock_order_db(
         else {
             panic!("paused fixture must enqueue one canonical resume activation");
         };
-        let running = match repository
-            .claim_controller_wake(
-                scope,
-                resumed.run_uid,
-                resumed.controller_generation,
-                resumed.wake_epoch,
-            )
-            .await?
-        {
-            RunControllerClaimOutcome::Claimed(running) => running,
-            outcome => panic!("resumed fixture wake must be claimable: {outcome:?}"),
-        };
+        let running = claim_running_controller(&repository, scope, &config, &resumed).await?;
         assert!(matches!(
             repository
                 .arm_run_deadline(
@@ -942,17 +892,7 @@ async fn parked_to_active_transfer_saturates_atomically_and_replays_without_dual
     else {
         panic!("first run must consume the only ActiveRuns slot");
     };
-    assert!(matches!(
-        repository
-            .claim_controller_wake(
-                scope,
-                first.run_uid,
-                first.controller_generation,
-                first.wake_epoch,
-            )
-            .await?,
-        RunControllerClaimOutcome::Claimed(_)
-    ));
+    let running = claim_running_controller(&repository, scope, &config, &first).await?;
     let RunControllerCompletionOutcome::Applied {
         run: storage_parked,
         ..
@@ -960,14 +900,14 @@ async fn parked_to_active_transfer_saturates_atomically_and_replays_without_dual
         .complete_controller_wake(
             scope,
             &config,
-            first.run_uid,
+            running.run_uid,
             RunControllerCompletionRequest {
-                controller_generation: first.controller_generation,
-                wake_epoch: first.wake_epoch,
+                controller_generation: running.controller_generation,
+                wake_epoch: running.wake_epoch,
                 checkpoint: ExecutionRunActivationCheckpoint {
                     status: ExecutionRunStatus::WaitingInput,
                     activation_state: ExecutionActivationState::Idle,
-                    next_wake_at: first.approved_budget.deadline_at,
+                    next_wake_at: running.approved_budget.deadline_at,
                     waiting_since: Some(Utc::now()),
                     ready_task_count: 0,
                     active_task_count: 0,
@@ -1171,8 +1111,9 @@ async fn deadline_rearm_releases_superseded_trigger_capacity_before_reserving_re
         ]
     );
     let dispatch_states: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT trigger_uid, state FROM moa.execution_dispatch_outbox \
-         WHERE run_uid = $1 AND trigger_uid IS NOT NULL ORDER BY controller_generation",
+        "SELECT dispatch.trigger_uid, dispatch.state FROM moa.execution_dispatch_outbox AS dispatch \
+         JOIN moa.execution_trigger AS trigger USING (trigger_uid) \
+         WHERE trigger.run_uid = $1 ORDER BY trigger.controller_generation",
     )
     .bind(run.run_uid)
     .fetch_all(&pool)

@@ -1594,7 +1594,7 @@ pub(super) async fn requeue_current_accepted_dispatches_in_conn(
                       AND task.task_id=dispatch.task_id
                       AND task.attempt_generation=dispatch.attempt_generation
                       AND task.active_dispatch_uid=dispatch.dispatch_uid
-                      AND task.status='running' AND task.attempt_state='dispatching'
+                      AND task.status='dispatching' AND task.attempt_state='dispatching'
                       AND run.controller_generation=dispatch.controller_generation
                   )
                 ) OR (

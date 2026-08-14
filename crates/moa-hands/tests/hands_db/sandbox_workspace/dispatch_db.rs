@@ -801,7 +801,7 @@ async fn synchronous_absence_and_reconciled_absence_use_distinct_proof_rules_db(
             provider_account_generation, workspace_id, operation_id,
             expected_writer_epoch, expected_instance_generation,
             resource_dimension, quantity
-        ) VALUES (gen_random_uuid(), $1, $2, 1, $3, $4, 0, 0, 'workspaces', 1)
+        ) VALUES (gen_random_uuid(), $1, $2, 1, $3, $4, 0, 0, 'checkpoints', 1)
         "#,
     )
     .bind(tenant_id)
@@ -940,7 +940,9 @@ struct GatedWorkspaceProvider {
 }
 
 impl GatedWorkspaceProvider {
-    fn new() -> (
+    fn new(
+        pool: PgPool,
+    ) -> (
         Self,
         oneshot::Receiver<WorkspaceCheckpointPublishRequest>,
         oneshot::Sender<()>,
@@ -957,7 +959,7 @@ impl GatedWorkspaceProvider {
                 restore_calls: AtomicUsize::new(0),
                 reconcile_calls: AtomicUsize::new(0),
                 checkpoint_post_commit_state: WorkspacePostCommitState::AttachmentRetained,
-                checkpoint_capacity: None,
+                checkpoint_capacity: Some(PostgresWorkspaceCapacityRepository::new(pool)),
             },
             started_rx,
             release_tx,
@@ -1291,7 +1293,7 @@ async fn public_management_attach_checkpoint_and_exact_restore_are_durable_db() 
         .await
         .expect("create public-management workspace");
 
-    let provider = Arc::new(GatedWorkspaceProvider::management());
+    let provider = Arc::new(GatedWorkspaceProvider::parking(pool.clone()));
     let mut registry = ToolRegistry::new();
     registry.register_hand(
         "management_route_anchor",
@@ -1598,7 +1600,7 @@ async fn may_write_result_waits_for_atomic_checkpoint_publication_db() {
         .await
         .expect("create typed workspace before router dispatch");
 
-    let (provider, commit_started, commit_release) = GatedWorkspaceProvider::new();
+    let (provider, commit_started, commit_release) = GatedWorkspaceProvider::new(pool.clone());
     let provider = Arc::new(provider);
     let mut registry = ToolRegistry::new();
     registry.register_hand(
@@ -1868,6 +1870,19 @@ async fn may_write_result_waits_for_atomic_checkpoint_publication_db() {
             .await
             .expect("fence the externally started provider attempt")
     );
+    PostgresWorkspaceCapacityRepository::new(pool.clone())
+        .reserve_checkpoint_publication(
+            &WorkspaceStorageOperation {
+                operation_id: replay_operation_id,
+                kind: WorkspaceOperationKind::Commit,
+                binding: replay_binding,
+                deadline: replay_intent.deadline_at,
+                request_hash: replay_request_hash,
+            },
+            19,
+        )
+        .await
+        .expect("reserve the exact recovered checkpoint publication");
 
     router
         .commit_authorized_workspace_after_tool(JournaledWorkspaceCommit {

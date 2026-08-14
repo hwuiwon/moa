@@ -119,6 +119,12 @@ impl SpawnedEdge {
             // though application configuration remains fully sanitized.
             command.env("DYLD_FALLBACK_LIBRARY_PATH", dylib_path);
         }
+        #[cfg(target_os = "linux")]
+        if let Some(dylib_path) = std::env::var_os("LD_LIBRARY_PATH") {
+            // CI also builds with `prefer-dynamic`; clearing Cargo's Rust dylib
+            // path would make the shipped child fail before it installs signals.
+            command.env("LD_LIBRARY_PATH", dylib_path);
+        }
         let child = command.spawn().expect("spawn moa-edge binary");
         let mut edge = Self { child, port };
         edge.await_ready().await;

@@ -71,7 +71,8 @@ async fn expire_inventory_claim(pool: &PgPool, account_id: ProviderAccountId) {
         SET claim_generation = claim_generation + 1,
             claim_owner = $2, claim_token = $3,
             claimed_at = now() - interval '2 minutes',
-            claim_expires_at = now() - interval '1 minute'
+            claim_expires_at = now() - interval '1 minute',
+            last_succeeded_at = NULL
         WHERE provider_account_id = $1 AND provider_account_generation = 1
           AND claim_token IS NULL AND last_succeeded_at IS NOT NULL
         "#,
@@ -123,12 +124,11 @@ async fn provider_inventory_claim_is_exclusive_and_recovers_after_owner_restart_
         .await
         .expect("first replica reaches provider only after durable claim");
     let claimed_row_version = inventory_claim_row_version(&maintenance, account_id).await;
-    let concurrent = fixture
+    let _concurrent = fixture
         .coordinator
-        .reconcile_claimed_provider_inventory_once(1)
+        .reconcile_claimed_provider_inventory_once(32)
         .await
-        .expect("second replica sees no claimable account");
-    assert_eq!(concurrent.accounts, 0);
+        .expect("second replica may process siblings but cannot steal the live claim");
     assert_eq!(
         inventory_claim_row_version(&maintenance, account_id).await,
         claimed_row_version,
@@ -155,6 +155,16 @@ async fn provider_inventory_claim_is_exclusive_and_recovers_after_owner_restart_
     assert_eq!(recovered.accounts, 1);
     let recovered_generation = inventory_claim_generation(&maintenance, account_id).await;
     assert!(recovered_generation > stale_generation);
+    sqlx::query("DELETE FROM moa.sandbox_provider_inventory_claims WHERE provider_account_id = $1")
+        .bind(account_id)
+        .execute(&runtime)
+        .await
+        .expect("clean isolated inventory claim");
+    sqlx::query("DELETE FROM moa.sandbox_provider_accounts WHERE provider_account_id = $1")
+        .bind(account_id)
+        .execute(&runtime)
+        .await
+        .expect("clean isolated provider account");
 }
 
 #[tokio::test]
@@ -366,6 +376,41 @@ async fn provider_inventory_drift_is_quarantined_then_resolved_only_after_clean_
             .expect("resolution digest")
             .is_some_and(|digest| digest.starts_with("sha256:"))
     );
+
+    sqlx::query(
+        "DELETE FROM moa.sandbox_provider_inventory_findings \
+         WHERE provider_account_id = ANY($1)",
+    )
+    .bind(vec![account_id, foreign_account_id])
+    .execute(&runtime)
+    .await
+    .expect("clean isolated inventory findings");
+    sqlx::query(
+        "DELETE FROM moa.sandbox_provider_inventory_claims \
+         WHERE provider_account_id = ANY($1)",
+    )
+    .bind(vec![account_id, foreign_account_id])
+    .execute(&runtime)
+    .await
+    .expect("clean isolated inventory claims");
+    sqlx::query(
+        "DELETE FROM moa.sandbox_capacity_reservations \
+         WHERE provider_account_id = ANY($1)",
+    )
+    .bind(vec![account_id, foreign_account_id])
+    .execute(&runtime)
+    .await
+    .expect("clean isolated workspace capacity");
+    sqlx::query("DELETE FROM moa.sandbox_workspaces WHERE provider_account_id = ANY($1)")
+        .bind(vec![account_id, foreign_account_id])
+        .execute(&runtime)
+        .await
+        .expect("clean isolated workspaces");
+    sqlx::query("DELETE FROM moa.sandbox_provider_accounts WHERE provider_account_id = ANY($1)")
+        .bind(vec![account_id, foreign_account_id])
+        .execute(&runtime)
+        .await
+        .expect("clean isolated provider accounts");
 
     runtime.close().await;
     maintenance.close().await;

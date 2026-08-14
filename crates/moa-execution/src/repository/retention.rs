@@ -507,7 +507,7 @@ async fn load_retention_candidate(
         LEFT JOIN moa.execution_terminal_archive AS archive
           ON archive.tenant_id = run.tenant_id AND archive.run_uid = run.run_uid
         WHERE run.status IN ('completed', 'partial', 'blocked', 'unsupported', 'failed', 'cancelled')
-          AND run.completed_at <= now() - make_interval(days => $1)
+          AND run.completed_at <= now() - make_interval(days => $1::INTEGER)
           AND (archive.archive_uid IS NULL OR archive.details_deleted_at IS NULL)
           AND NOT EXISTS (
               SELECT 1 FROM moa.execution_task AS task
@@ -565,7 +565,7 @@ async fn lock_and_recheck_retention_candidate(
             SELECT 1 FROM moa.execution_run AS run
             WHERE run.tenant_id = $1 AND run.run_uid = $2
               AND run.status IN ('completed', 'partial', 'blocked', 'unsupported', 'failed', 'cancelled')
-              AND run.completed_at <= now() - make_interval(days => $3)
+              AND run.completed_at <= now() - make_interval(days => $3::INTEGER)
               AND NOT EXISTS (
                   SELECT 1 FROM moa.legal_hold AS hold
                   WHERE hold.tenant_id = run.tenant_id AND hold.released_at IS NULL

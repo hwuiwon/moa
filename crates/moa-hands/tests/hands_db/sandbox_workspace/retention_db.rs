@@ -43,7 +43,7 @@ use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 
 /// Provider registry key shared by the three maintenance DB behavior modules.
-pub(super) const SCRIPTED_PROVIDER: &str = "scripted-maintenance-db";
+pub(super) const SCRIPTED_PROVIDER: &str = "00-scripted-maintenance-db";
 
 /// Returns a required database URL or fails the ignored DB test with its name.
 pub(super) fn required_url(name: &str) -> String {

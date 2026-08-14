@@ -183,6 +183,15 @@ impl OrchestratorRestartConfig {
 
     /// Spawns the maintenance owner against the same durable fixture dependencies.
     pub(super) fn spawn_maintenance(&self, health_port: u16) -> Result<ChildGuard> {
+        self.spawn_maintenance_with_env(health_port, &self.extra_env)
+    }
+
+    /// Spawns the maintenance owner with one exact merged fixture environment.
+    pub(super) fn spawn_maintenance_with_env(
+        &self,
+        health_port: u16,
+        extra_env: &[(String, String)],
+    ) -> Result<ChildGuard> {
         spawn_maintenance(
             OrchestratorSpawnConfig {
                 binary: &self.binary,
@@ -196,7 +205,7 @@ impl OrchestratorRestartConfig {
                 script_path: self.script_path.as_deref(),
                 journal_path: self.journal_path.as_deref(),
                 fga_config: &self.fga_config,
-                extra_env: &self.extra_env,
+                extra_env,
                 otlp_endpoint: &self.otlp_endpoint,
                 observability_service_name: &self.observability_service_name,
             },

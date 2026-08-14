@@ -22,7 +22,14 @@ use moa_core::{
 use moa_crypto::LocalKmsProvider;
 use moa_hands::{LocalHandProvider, ToolRouter, deployment_sandbox_policy, route_sandbox_policy};
 use object_store::memory::InMemory;
+use sqlx::postgres::PgPoolOptions;
 use tempfile::tempdir;
+
+fn lazy_workspace_pool() -> sqlx::PgPool {
+    PgPoolOptions::new()
+        .connect_lazy("postgresql://moa:moa@127.0.0.1:1/moa")
+        .expect("offline cloud construction should accept a lazy workspace pool")
+}
 
 fn seconds(value: u64) -> LifetimeLimit {
     LifetimeLimit::Bounded {
@@ -320,7 +327,7 @@ async fn cloud_profile_refuses_the_built_in_local_development_sandbox_policy_off
         None,
         Some(Arc::new(NoRules)),
         Some(checkpoint_store),
-        None,
+        Some(lazy_workspace_pool()),
         None,
         true,
     )

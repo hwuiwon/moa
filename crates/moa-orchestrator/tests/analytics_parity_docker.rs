@@ -1571,6 +1571,18 @@ async fn seed_execution_run_and_tasks(
     let skill_template_revision_uid = Uuid::now_v7();
     let planning_hash = "1".repeat(64);
     let plan_hash = "2".repeat(64);
+    let plan_snapshot = json!({
+        "definition": {
+            "cancel_policy": "retain_effects",
+            "input_schema": {},
+            "output_schema": {},
+            "nodes": [],
+        },
+        "plan_hash": plan_hash,
+        "catalog_hash": plan_hash,
+        "estimate": {},
+        "report": {},
+    });
     sqlx::query(
         "INSERT INTO moa.execution_planning_context \
              (planning_context_uid, tenant_id, session_id, originating_user_sequence_num, \
@@ -1595,18 +1607,19 @@ async fn seed_execution_run_and_tasks(
                     'identity_type', 'service', 'id', $2::TEXT, \
                     'tenant_id', $2::TEXT, 'api_key_id', NULL, \
                     'acting_on_behalf_of', NULL), \
-                 '{\"requirements\":[{\"id\":\"r1\"}]}'::JSONB, '{}'::JSONB, '{}'::JSONB, \
-                 $6, $6, '{}'::JSONB, '{}'::JSONB, \
+                 '{\"requirements\":[{\"id\":\"r1\"}]}'::JSONB, $6, $6, \
+                 $7, $7, '{}'::JSONB, '{}'::JSONB, \
                  jsonb_build_object('kind', 'skill_template', \
                     'skill_template_ref', 'skill://billing-flow', \
-                    'skill_template_revision_uid', lower($7::TEXT)), \
-                 'skill_template', 'skill://billing-flow', $7, '{}'::JSONB, 'queued', 2, $8)",
+                    'skill_template_revision_uid', lower($8::TEXT)), \
+                 'skill_template', 'skill://billing-flow', $8, '{}'::JSONB, 'queued', 2, $9)",
     )
     .bind(run_uid)
     .bind(tenant)
     .bind(session)
     .bind(planning_context_uid)
     .bind(&planning_hash)
+    .bind(&plan_snapshot)
     .bind(&plan_hash)
     .bind(skill_template_revision_uid)
     .bind(started_at)

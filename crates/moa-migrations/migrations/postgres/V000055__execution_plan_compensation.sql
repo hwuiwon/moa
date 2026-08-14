@@ -255,13 +255,25 @@ BEGIN
     LOOP
         IF NOT moa.execution_json_object_has_exact_keys(
             audit_entry,
-            ARRAY['review_uid', 'generation', 'accepted', 'resolution', 'recorded_at']
+            ARRAY[
+                'review_uid', 'generation', 'accepted', 'resolution',
+                'expires_at', 'recorded_at'
+            ]
         )
         OR audit_entry ->> 'review_uid'
             !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
         OR audit_entry ->> 'generation' !~ '^[1-9][0-9]*$'
         OR jsonb_typeof(audit_entry -> 'accepted') <> 'boolean'
-        OR jsonb_typeof(audit_entry -> 'resolution') <> 'object'
+        OR (
+            (audit_entry ->> 'accepted')::BOOLEAN
+            AND jsonb_typeof(audit_entry -> 'resolution') <> 'object'
+        )
+        OR (
+            NOT (audit_entry ->> 'accepted')::BOOLEAN
+            AND audit_entry -> 'resolution' <> 'null'::JSONB
+        )
+        OR jsonb_typeof(audit_entry -> 'expires_at') <> 'string'
+        OR btrim(audit_entry ->> 'expires_at') = ''
         OR jsonb_typeof(audit_entry -> 'recorded_at') <> 'string'
         OR btrim(audit_entry ->> 'recorded_at') = '' THEN
             RETURN FALSE;

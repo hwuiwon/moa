@@ -83,7 +83,7 @@ require_value OPENFGA_PRESHARED_KEY_SECRET
 
 command -v kustomize >/dev/null 2>&1 || die "kustomize is required"
 command -v python3 >/dev/null 2>&1 || die "python3 is required"
-command -v rg >/dev/null 2>&1 || die "ripgrep (rg) is required"
+command -v grep >/dev/null 2>&1 || die "grep is required"
 
 output_dir="$1"
 [[ ! -e "${output_dir}" ]] || die "output path already exists: ${output_dir}"
@@ -236,20 +236,20 @@ mkdir -p "${work_dir}/rendered"
 kustomize build "${production_overlay}" >"${work_dir}/rendered/production.yaml"
 kustomize build "${jobs_overlay}" >"${work_dir}/rendered/jobs.yaml"
 
-rg -Fq "image: ${MOA_ORCHESTRATOR_IMAGE}" "${work_dir}/rendered/production.yaml" \
+grep -Fq -- "image: ${MOA_ORCHESTRATOR_IMAGE}" "${work_dir}/rendered/production.yaml" \
   || die "production manifest does not contain the requested orchestrator digest"
-rg -Fq "image: ${MOA_EDGE_IMAGE}" "${work_dir}/rendered/production.yaml" \
+grep -Fq -- "image: ${MOA_EDGE_IMAGE}" "${work_dir}/rendered/production.yaml" \
   || die "production manifest does not contain the requested edge digest"
-rg -Fq "image: ${MOA_ORCHESTRATOR_IMAGE}" "${work_dir}/rendered/jobs.yaml" \
+grep -Fq -- "image: ${MOA_ORCHESTRATOR_IMAGE}" "${work_dir}/rendered/jobs.yaml" \
   || die "maintenance manifest does not contain the requested orchestrator digest"
-rg -Fq "destination = \"${snapshot_destination}\"" "${work_dir}/rendered/production.yaml" \
+grep -Fq -- "destination = \"${snapshot_destination}\"" "${work_dir}/rendered/production.yaml" \
   || die "production manifest does not contain the requested snapshot destination"
-rg -Fq "name: ${SANDBOX_CHECKPOINT_BUCKET}" "${work_dir}/rendered/production.yaml" \
-  || rg -Fq "MOA_SANDBOX_CHECKPOINT_BUCKET: ${SANDBOX_CHECKPOINT_BUCKET}" "${work_dir}/rendered/production.yaml" \
+grep -Fq -- "name: ${SANDBOX_CHECKPOINT_BUCKET}" "${work_dir}/rendered/production.yaml" \
+  || grep -Fq -- "MOA_SANDBOX_CHECKPOINT_BUCKET: ${SANDBOX_CHECKPOINT_BUCKET}" "${work_dir}/rendered/production.yaml" \
   || die "production manifest does not contain the external checkpoint bucket"
-rg -Fq "iam.gke.io/gcp-service-account: ${SANDBOX_WORKSPACE_GSA}" "${work_dir}/rendered/production.yaml" \
+grep -Fq -- "iam.gke.io/gcp-service-account: ${SANDBOX_WORKSPACE_GSA}" "${work_dir}/rendered/production.yaml" \
   || die "production manifest does not bind the sandbox workspace workload identity"
-if rg -q 'sha256:0{64}|image-revision' "${work_dir}/rendered"; then
+if grep -REq -- 'sha256:0{64}|image-revision' "${work_dir}/rendered"; then
   die "rendered manifests contain an unresolved sentinel"
 fi
 

@@ -192,7 +192,7 @@ async fn execution_analytics_metadata_round_trips_normalized_source_and_terminal
         None,
         "execution-analytics-metadata",
         ExecutionRunStatus::Queued,
-        budget(10),
+        budget_without_deadline(10),
     );
     let (expected_template_ref, expected_template_revision_uid) = match &new_run.source_provenance {
         ExecutionSourceProvenance::SkillTemplate {
@@ -209,8 +209,21 @@ async fn execution_analytics_metadata_round_trips_normalized_source_and_terminal
             .fetch_one(&pool)
             .await?;
 
-    let running =
+    let queued =
         claim_running_controller(&repository, scope, &ExecutionConfig::default(), &run).await?;
+    let running = match repository
+        .claim_controller_wake(
+            scope,
+            queued.run_uid,
+            queued.controller_generation,
+            queued.wake_epoch,
+        )
+        .await?
+    {
+        RunControllerClaimOutcome::Claimed(running)
+        | RunControllerClaimOutcome::Resumed(running) => running,
+        outcome => panic!("terminal analytics wake must be claimable: {outcome:?}"),
+    };
     let evaluation = CompletionEvaluation {
         status: CompletionStatus::Completed,
         limit_stop: None,
@@ -711,12 +724,14 @@ async fn idempotency_is_scoped_and_null_contact_is_not_distinct_db() -> TestResu
     let contact = ContactId::new();
     let key = "same-key";
 
+    let first_request = new_run(tenant_a, None, key, ExecutionRunStatus::Queued, budget(10));
+    let duplicate_request = first_request.clone();
     let first = create_run(
         &repository,
         ExecutionScope::Tenant {
             tenant_id: tenant_a,
         },
-        new_run(tenant_a, None, key, ExecutionRunStatus::Queued, budget(10)),
+        first_request,
     )
     .await?;
     let duplicate = create_run(
@@ -724,7 +739,7 @@ async fn idempotency_is_scoped_and_null_contact_is_not_distinct_db() -> TestResu
         ExecutionScope::Tenant {
             tenant_id: tenant_a,
         },
-        new_run(tenant_a, None, key, ExecutionRunStatus::Queued, budget(20)),
+        duplicate_request,
     )
     .await?;
     let other_tenant = create_run(
@@ -792,6 +807,11 @@ async fn database_rejects_illegal_run_and_task_transition_matrices_db() -> TestR
         "failed",
         "cancelled",
     ];
+    let matrix_config = ExecutionConfig {
+        max_tenant_active_runs: 256,
+        ..ExecutionConfig::default()
+    };
+    matrix_config.validate()?;
 
     let mut rejected_run_edges = 0;
     for source in RUN_STATUSES {
@@ -804,9 +824,10 @@ async fn database_rejects_illegal_run_and_task_transition_matrices_db() -> TestR
             } else {
                 ExecutionRunStatus::Queued
             };
-            let run = create_run(
+            let RunAdmissionOutcome::Admitted(run) = create_run_with_config(
                 &repository,
                 scope,
+                &matrix_config,
                 new_run(
                     tenant_id,
                     None,
@@ -815,7 +836,11 @@ async fn database_rejects_illegal_run_and_task_transition_matrices_db() -> TestR
                     budget(10),
                 ),
             )
-            .await?;
+            .await?
+            else {
+                panic!("transition-matrix run must be admitted");
+            };
+            let run = *run;
             set_run_status_path(test_db.store().pool(), run.run_uid, run_setup_path(source))
                 .await?;
             let error = sqlx::query("UPDATE moa.execution_run SET status = $2 WHERE run_uid = $1")
@@ -843,11 +868,12 @@ async fn database_rejects_illegal_run_and_task_transition_matrices_db() -> TestR
             rejected_run_edges += 1;
         }
     }
-    assert_eq!(rejected_run_edges, 111);
+    assert_eq!(rejected_run_edges, 104);
 
-    let task_run = create_run(
+    let RunAdmissionOutcome::Admitted(task_run) = create_run_with_config(
         &repository,
         scope,
+        &matrix_config,
         new_run(
             tenant_id,
             None,
@@ -856,7 +882,11 @@ async fn database_rejects_illegal_run_and_task_transition_matrices_db() -> TestR
             budget(100),
         ),
     )
-    .await?;
+    .await?
+    else {
+        panic!("task transition-matrix run must be admitted");
+    };
+    let task_run = *task_run;
     let mut task_cases = Vec::new();
     for source in TASK_STATUSES {
         for target in TASK_STATUSES {
@@ -887,12 +917,14 @@ async fn database_rejects_illegal_run_and_task_transition_matrices_db() -> TestR
             task_setup_path(source),
         )
         .await?;
-        let error = sqlx::query("UPDATE moa.execution_task SET status = $2 WHERE task_id = $1")
+        let result = sqlx::query("UPDATE moa.execution_task SET status = $2 WHERE task_id = $1")
             .bind(task.task_id.as_uuid())
             .bind(target)
             .execute(test_db.store().pool())
-            .await
-            .expect_err("contract-disallowed task transition must fail");
+            .await;
+        let Err(error) = result else {
+            panic!("contract-disallowed task transition {source} -> {target} must fail");
+        };
         assert!(
             error
                 .to_string()
@@ -968,7 +1000,7 @@ async fn database_enforces_task_counter_history_and_immutable_field_guards_db() 
         .bind(guard_tasks[0].task_id.as_uuid())
         .execute(test_db.store().pool())
         .await,
-        "execution retry must increment attempt and generation together",
+        "execution task counters changed outside retry or input resume",
     );
     assert_eq!(
         listed_task(&repository, scope, task_run.run_uid, guard_tasks[0].task_id,).await?,
@@ -1019,7 +1051,7 @@ async fn database_enforces_task_counter_history_and_immutable_field_guards_db() 
         .bind(guard_tasks[1].task_id.as_uuid())
         .execute(test_db.store().pool())
         .await,
-        "execution input resume must increment only generation",
+        "execution task counters changed outside retry or input resume",
     );
     assert_eq!(
         listed_task(&repository, scope, task_run.run_uid, guard_tasks[1].task_id,).await?,
@@ -1083,7 +1115,7 @@ async fn database_enforces_run_immutable_and_plan_update_guards_db() -> TestResu
             .bind(run_guard.run_uid)
             .execute(test_db.store().pool())
             .await,
-        "execution run plan changes require one fenced history append",
+        "execution run amendment must use the current plan contract",
     );
     Ok(())
 }

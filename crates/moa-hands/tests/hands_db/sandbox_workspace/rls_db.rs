@@ -24,6 +24,9 @@ use moa_hands::core::leases::{
     PostgresHandLeaseStore,
 };
 use moa_hands::core::reaper::{ExpiredHandLeaseClaims, PostgresExpiredHandLeaseClaims};
+use moa_hands::core::sandbox_workspace::capacity::{
+    ActiveHandCapacityRequest, PostgresWorkspaceCapacityRepository,
+};
 use moa_hands::core::sandbox_workspace::repository::PostgresWorkspaceRepository;
 use moa_hands::core::sandbox_workspace::storage_resources::PostgresWorkspaceStorageResourceRepository;
 use sqlx::postgres::PgPoolOptions;
@@ -101,6 +104,11 @@ async fn cleanup_workspace(
     workspace_id: SandboxWorkspaceId,
     provider_account_id: ProviderAccountId,
 ) {
+    sqlx::query("DELETE FROM moa.sandbox_capacity_reservations WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(pool)
+        .await
+        .expect("clean up workspace capacity reservations");
     sqlx::query("DELETE FROM moa.sandbox_workspaces WHERE workspace_id = $1")
         .bind(workspace_id)
         .execute(pool)
@@ -632,6 +640,30 @@ async fn maintenance_reaper_crosses_tenants_without_exposing_a_foreground_bypass
             .await
             .expect("claim lease")
             .expect("claim is owned");
+        sqlx::query(
+            "UPDATE moa.sandbox_workspaces SET lifecycle_state = 'restoring' \
+             WHERE tenant_id = $1 AND workspace_id = $2 AND lifecycle_state = 'creating'",
+        )
+        .bind(tenant_id)
+        .bind(attachment.workspace_id)
+        .execute(&pool)
+        .await
+        .expect("move the directly seeded workspace into the provisioning phase");
+        let capacity = PostgresWorkspaceCapacityRepository::new(pool.clone());
+        let active_hand = ActiveHandCapacityRequest {
+            tenant_id,
+            workspace_id: attachment.workspace_id,
+            provider_account_id,
+            provider_account_generation: 1,
+            provisioning_operation_id: claim.provisioning_operation_id,
+            hand_lease_generation: claim.generation,
+            expected_writer_epoch: attachment.workspace_writer_epoch,
+            expected_instance_generation: attachment.workspace_instance_generation,
+        };
+        capacity
+            .reserve_active_hand(&active_hand)
+            .await
+            .expect("reserve active hand before activation");
         store
             .activate(HandLeaseActivateRequest {
                 tenant_id,
@@ -649,6 +681,12 @@ async fn maintenance_reaper_crosses_tenants_without_exposing_a_foreground_bypass
             })
             .await
             .expect("activate lease");
+        assert!(
+            capacity
+                .commit_active_hand(&active_hand)
+                .await
+                .expect("commit active-hand capacity after activation")
+        );
     }
 
     sqlx::query(

@@ -6,7 +6,7 @@
 
 #![cfg(all(feature = "integration", feature = "sandbox-workspace-failpoints"))]
 
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use moa_core::{
@@ -418,15 +418,32 @@ async fn wait_for_one_bash_result(
     }
 }
 
-async fn seed_ambiguous_absent_operation(pool: &sqlx::PgPool) -> Result<WorkspaceOperationId> {
+async fn seed_ambiguous_absent_operation(
+    pool: &sqlx::PgPool,
+    sandbox_root: &Path,
+) -> Result<WorkspaceOperationId> {
     let tenant_id = TenantId::from(FIXTURE_TENANT_UUID);
-    let row: (SandboxWorkspaceId, ProviderAccountId, i64, i64, i64, i64) = sqlx::query_as(
+    let row: (
+        SandboxWorkspaceId,
+        ProviderAccountId,
+        i64,
+        i64,
+        i64,
+        i64,
+        Vec<Uuid>,
+    ) = sqlx::query_as(
         r#"
         SELECT workspace_id, provider_account_id, provider_account_generation,
-               writer_epoch, instance_generation, current_checkpoint_generation
-        FROM moa.sandbox_workspaces
-        WHERE tenant_id = $1 AND scope_kind = 'worker'
-        ORDER BY created_at
+               writer_epoch, instance_generation, current_checkpoint_generation,
+               ARRAY(
+                   SELECT lease.provisioning_operation_id
+                   FROM moa.hand_leases AS lease
+                   WHERE lease.tenant_id = workspace.tenant_id
+                     AND lease.workspace_id = workspace.workspace_id
+               )
+        FROM moa.sandbox_workspaces AS workspace
+        WHERE tenant_id = $1 AND scope_kind = 'worker' AND provider = 'local'
+        ORDER BY workspace.created_at
         LIMIT 1
         "#,
     )
@@ -463,7 +480,9 @@ async fn seed_ambiguous_absent_operation(pool: &sqlx::PgPool) -> Result<Workspac
             expected_instance_generation: row.4,
             expected_checkpoint_generation: row.5,
             deadline_at: now - chrono::Duration::seconds(1),
-            reconcile_not_before: now - chrono::Duration::seconds(1),
+            // Hold the synthetic operation away from the running reaper until
+            // the exact local provider state is removed and the child restarts.
+            reconcile_not_before: now + chrono::Duration::hours(1),
         })
         .await
         .context("persist exact ambiguous-delete recovery intent")?;
@@ -478,7 +497,72 @@ async fn seed_ambiguous_absent_operation(pool: &sqlx::PgPool) -> Result<Workspac
             .await
             .context("mark delete outcome ambiguous")?
     );
+    for provisioning_operation_id in row.6 {
+        let sandbox_dir = sandbox_root.join(format!("hand-{provisioning_operation_id}"));
+        match tokio::fs::remove_dir_all(&sandbox_dir).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "remove absent-provider fixture root {}",
+                        sandbox_dir.display()
+                    )
+                });
+            }
+        }
+        let trusted_dir = sandbox_root
+            .join(".moa-hand-trusted")
+            .join(provisioning_operation_id.to_string());
+        match tokio::fs::remove_dir_all(&trusted_dir).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "remove absent-provider trusted root {}",
+                        trusted_dir.display()
+                    )
+                });
+            }
+        }
+        let marker = sandbox_root
+            .join(".moa-hand-intents")
+            .join(format!("{provisioning_operation_id}.json"));
+        match tokio::fs::remove_file(&marker).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("remove absent-provider intent marker {}", marker.display())
+                });
+            }
+        }
+    }
     Ok(operation_id)
+}
+
+async fn make_absent_operation_due(
+    pool: &sqlx::PgPool,
+    operation_id: WorkspaceOperationId,
+) -> Result<()> {
+    let affected = sqlx::query(
+        r#"
+        UPDATE moa.sandbox_workspace_operations
+        SET reconcile_not_before = now(), updated_at = now()
+        WHERE tenant_id = $1 AND operation_id = $2
+          AND outcome_class = 'unknown' AND claim_token IS NULL
+        "#,
+    )
+    .bind(FIXTURE_TENANT_UUID)
+    .bind(operation_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        bail!("synthetic absent operation lost its pre-reconciliation fence");
+    }
+    Ok(())
 }
 
 async fn wait_for_absence_release(
@@ -915,17 +999,57 @@ async fn recovery_matrix_sandbox_workspace_all_six_barriers_replay_once_service_
     }
 
     let pool = sqlx::PgPool::connect(&fixture.postgres_url).await?;
+    let operation_id =
+        seed_ambiguous_absent_operation(&pool, fixture.sandbox_workspace()?.sandbox_root()).await?;
     let absence_control = SandboxWorkspaceCrashControl::new(
         SandboxWorkspaceCrashBarrier::PostAbsenceConfirmationPreReservationRelease,
     )?;
     fixture
-        .restart_orchestrator_with_env(absence_control.orchestrator_env())
+        .restart_execution_maintenance_owner_with_env(absence_control.orchestrator_env())
         .await?;
-    let operation_id = seed_ambiguous_absent_operation(&pool).await?;
-    absence_control
+    make_absent_operation_due(&pool, operation_id).await?;
+    if let Err(error) = absence_control
         .wait_until_reached(Duration::from_secs(120))
         .await
-        .context("observe post-absence-confirmation/pre-reservation-release barrier")?;
+    {
+        let durable_state: serde_json::Value = sqlx::query_scalar(
+            r#"
+            SELECT jsonb_build_object(
+                'operation', to_jsonb(operation),
+                'reservation', to_jsonb(reservation),
+                'workspace', to_jsonb(workspace),
+                'leases', COALESCE((
+                    SELECT jsonb_agg(to_jsonb(lease) ORDER BY lease.created_at)
+                    FROM moa.hand_leases AS lease
+                    WHERE lease.tenant_id = operation.tenant_id
+                      AND lease.workspace_id = operation.workspace_id
+                ), '[]'::jsonb),
+                'database_now', now()
+            )
+            FROM moa.sandbox_workspace_operations AS operation
+            JOIN moa.sandbox_capacity_reservations AS reservation
+              ON reservation.tenant_id = operation.tenant_id
+             AND reservation.operation_id = operation.operation_id
+            JOIN moa.sandbox_workspaces AS workspace
+              ON workspace.tenant_id = operation.tenant_id
+             AND workspace.workspace_id = operation.workspace_id
+            WHERE operation.operation_id = $1
+            "#,
+        )
+        .bind(operation_id)
+        .fetch_one(&pool)
+        .await?;
+        let mut local_entries = Vec::new();
+        let mut entries = tokio::fs::read_dir(fixture.sandbox_workspace()?.sandbox_root()).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            local_entries.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        local_entries.sort();
+        let child_exit = fixture.unexpected_orchestrator_exit().await?;
+        bail!(
+            "observe post-absence-confirmation/pre-reservation-release barrier: {error:#}; durable_state={durable_state}; local_entries={local_entries:?}; child_exit={child_exit:?}"
+        );
+    }
     let before_absence_crash: (String, String) = sqlx::query_as(
         r#"
         SELECT operation.outcome_class, reservation.reservation_state
@@ -943,7 +1067,9 @@ async fn recovery_matrix_sandbox_workspace_all_six_barriers_replay_once_service_
         before_absence_crash,
         ("unknown".to_string(), "reconciling".to_string())
     );
-    fixture.hard_crash_and_restart_orchestrator().await?;
+    fixture
+        .hard_crash_and_restart_execution_maintenance_owner()
+        .await?;
     wait_for_absence_release(&pool, operation_id).await?;
 
     let delete_control = SandboxWorkspaceCrashControl::new(

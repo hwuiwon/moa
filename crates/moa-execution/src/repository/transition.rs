@@ -109,8 +109,9 @@ impl ExecutionRepository {
         let row = sqlx::query(
             "UPDATE moa.execution_run SET status='pause_requested', \
              controller_generation=$2, activation_state='paused', \
-             pause_requested_at=COALESCE(pause_requested_at, NOW()), \
-             last_progress_at=NOW(), updated_at=NOW() WHERE run_uid=$1 RETURNING *",
+             pause_requested_at=COALESCE(pause_requested_at, clock_timestamp()), \
+             last_progress_at=GREATEST(last_progress_at, clock_timestamp()), \
+             updated_at=NOW() WHERE run_uid=$1 RETURNING *",
         )
         .bind(run_uid)
         .bind(to_i64(next_generation, "controller generation")?)
@@ -132,7 +133,7 @@ impl ExecutionRepository {
         };
         let row = sqlx::query(
             "UPDATE moa.execution_run SET status=$2, \
-             paused_at=CASE WHEN $2='paused' THEN NOW() ELSE NULL END, \
+             paused_at=CASE WHEN $2='paused' THEN clock_timestamp() ELSE NULL END, \
              updated_at=NOW() WHERE run_uid=$1 RETURNING *",
         )
         .bind(run_uid)
@@ -282,7 +283,8 @@ impl ExecutionRepository {
             "UPDATE moa.execution_run SET \
              status=CASE WHEN pending_terminal_status IS NULL THEN 'queued' \
                          ELSE 'compensating' END, controller_generation=$2, \
-             activation_state='idle', paused_at=NULL, last_progress_at=NOW(), updated_at=NOW() \
+             activation_state='idle', paused_at=NULL, \
+             last_progress_at=GREATEST(last_progress_at, clock_timestamp()), updated_at=NOW() \
              WHERE run_uid=$1",
         )
         .bind(run_uid)
@@ -1085,7 +1087,8 @@ async fn enqueue_pause_cancellations(
         .await?;
         let cancelling = sqlx::query(
             "UPDATE moa.execution_compensation SET attempt_state='cancelling', \
-                 last_progress_at=NOW(), updated_at=NOW() \
+                 release_intent='pause', last_progress_at=clock_timestamp(), \
+                 updated_at=clock_timestamp() \
              WHERE run_uid=$1 AND compensation_id=$2 AND generation=$3 \
                AND attempt_generation=$4 AND active_dispatch_uid=$5 \
                AND attempt_state IN ('dispatching','running')",

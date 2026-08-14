@@ -725,7 +725,7 @@ async fn confirmation_is_plan_hash_bound_and_exact_replay_only_db() -> TestResul
     assert_eq!(confirmed.approved_budget, approved);
     assert!(confirmed.confirmed_at.is_some());
     assert_eq!(confirmed.confirmed_plan_hash, Some(run.active_plan_hash));
-    assert_eq!(confirmed.wake_epoch, 1);
+    assert_eq!(confirmed.wake_epoch, run.wake_epoch + 1);
     let confirmation_dispatch: (i64, String, String) = sqlx::query_as(
         "SELECT wake_epoch, dispatch_kind, state FROM moa.execution_dispatch_outbox \
          WHERE run_uid = $1",
@@ -735,7 +735,11 @@ async fn confirmation_is_plan_hash_bound_and_exact_replay_only_db() -> TestResul
     .await?;
     assert_eq!(
         confirmation_dispatch,
-        (1, "run_activation".into(), "pending".into())
+        (
+            i64::try_from(confirmed.wake_epoch)?,
+            "run_activation".into(),
+            "pending".into(),
+        )
     );
     let queued_at = confirmed
         .queued_at
@@ -766,10 +770,10 @@ async fn confirmation_is_plan_hash_bound_and_exact_replay_only_db() -> TestResul
         ConfirmationOutcome::Conflict(ConfirmationConflict::BudgetMismatch)
     );
 
-    repository
-        .materialize_tasks(scope, run.run_uid, 1, vec![task.clone()])
+    sqlx::query("UPDATE moa.execution_run SET status='running' WHERE run_uid=$1")
+        .bind(run.run_uid)
+        .execute(test_db.store().pool())
         .await?;
-    reserve_and_start(&repository, scope, run.run_uid, task.task_id).await?;
     assert!(matches!(
         repository
             .confirm_run(

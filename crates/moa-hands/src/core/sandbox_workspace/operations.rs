@@ -318,7 +318,8 @@ impl PostgresWorkspaceOperationRepository {
         let row = sqlx::query(
             r#"
             UPDATE moa.sandbox_workspace_operations
-            SET outcome_class = 'unknown', confirmed_disposition = NULL, updated_at = now()
+            SET outcome_class = 'unknown', confirmed_disposition = NULL,
+                direct_confirmation_pending = TRUE, updated_at = now()
             WHERE tenant_id = $1 AND operation_id = $2
               AND outcome_class = 'not_sent' AND claim_token IS NULL
             RETURNING workspace_id, operation_kind, expected_writer_epoch,
@@ -384,7 +385,8 @@ impl PostgresWorkspaceOperationRepository {
         let row = sqlx::query(
             r#"
             UPDATE moa.sandbox_workspace_operations
-            SET outcome_class = 'unknown', confirmed_disposition = NULL, updated_at = now()
+            SET outcome_class = 'unknown', confirmed_disposition = NULL,
+                direct_confirmation_pending = FALSE, updated_at = now()
             WHERE tenant_id = $1 AND operation_id = $2
               AND outcome_class IN ('not_sent', 'unknown') AND claim_token IS NULL
             RETURNING workspace_id, operation_kind, expected_writer_epoch, expected_instance_generation
@@ -467,10 +469,12 @@ impl PostgresWorkspaceOperationRepository {
             r#"
             UPDATE moa.sandbox_workspace_operations
             SET outcome_class = 'confirmed', confirmed_disposition = $3,
+                direct_confirmation_pending = FALSE,
                 claim_token = NULL, claim_expires_at = NULL, retry_not_before = NULL,
                 updated_at = now()
             WHERE tenant_id = $1 AND operation_id = $2
               AND outcome_class = 'unknown'
+              AND direct_confirmation_pending
               AND claim_token IS NULL
             "#,
         )
@@ -535,6 +539,7 @@ impl PostgresWorkspaceOperationRepository {
             r#"
             UPDATE moa.sandbox_workspace_operations
             SET outcome_class = 'confirmed', confirmed_disposition = 'resource_present',
+                direct_confirmation_pending = FALSE,
                 absence_observation_count = 0,
                 absence_first_observed_at = NULL,
                 absence_last_observed_at = NULL,
@@ -694,6 +699,7 @@ impl PostgresWorkspaceOperationRepository {
             r#"
             UPDATE moa.sandbox_workspace_operations
             SET outcome_class = 'confirmed', confirmed_disposition = 'resource_absent',
+                direct_confirmation_pending = FALSE,
                 claim_token = NULL, claim_expires_at = NULL, retry_not_before = NULL,
                 updated_at = now()
             WHERE tenant_id = $1 AND operation_id = $2
@@ -773,6 +779,7 @@ impl PostgresWorkspaceOperationRepository {
             )
             UPDATE moa.sandbox_workspace_operations AS operation
             SET claim_token = gen_random_uuid(),
+                direct_confirmation_pending = FALSE,
                 claim_expires_at = now() + make_interval(secs => $2),
                 updated_at = now()
             FROM claimable

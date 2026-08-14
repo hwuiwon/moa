@@ -460,7 +460,7 @@ async fn execution_planning_compiler_rejection_allows_only_one_repair() {
 #[tokio::test]
 async fn execution_planning_amendment_invokes_once_with_persisted_evidence() {
     // Pins: one valid amendment is generated over the persisted revision,
-    // completed structured output, waiting task, and frozen authority snapshot.
+    // bounded node status, waiting task, and frozen authority snapshot.
     let request = execution_amendment_planning_request();
     let provider = ScriptedProvider::new(MockLlmProvider.capabilities())
         .push_text(execution_amendment_candidate(7, true));
@@ -481,7 +481,6 @@ async fn execution_planning_amendment_invokes_once_with_persisted_evidence() {
     assert_accepted_planner_report_matches_compile(&result.audits);
     let prompt = serde_json::to_string(&provider.recorded_requests()[0].messages)
         .expect("serialize recorded amendment prompt");
-    assert!(prompt.contains("completed-value"));
     assert!(prompt.contains("shape changed"));
     assert!(prompt.contains("base_plan_revision\\\":7"));
     let amendment_message = &provider.recorded_requests()[0].messages[1].content;

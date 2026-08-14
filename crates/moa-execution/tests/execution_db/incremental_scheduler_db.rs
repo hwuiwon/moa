@@ -146,12 +146,6 @@ async fn ten_thousand_tasks_materialize_in_cursor_fenced_pages_db() -> TestResul
     );
     candidate.plan.definition.nodes = vec![output_node("collect")];
     let run = create_run(&repository, scope, candidate).await?;
-    assert!(
-        repository
-            .initialize_scheduler_state(scope, run.run_uid)
-            .await?
-    );
-
     let mut cursor = 0_u64;
     for page in 0_u64..10 {
         let tasks = (0_u64..1_000)
@@ -527,12 +521,6 @@ async fn twenty_five_hundred_reduce_batches_persist_exact_round_cursor_db() -> T
     );
     candidate.plan.definition.nodes = vec![reduce_node("reduce")];
     let run = create_run(&repository, scope, candidate).await?;
-    assert!(
-        repository
-            .initialize_scheduler_state(scope, run.run_uid)
-            .await?
-    );
-
     let mut total_cursor = 0_u64;
     let mut replay_request = None;
     for (batch_cursor, page_count) in [(0_u64, 1_000_u64), (1_000, 1_000), (2_000, 501)] {
@@ -600,18 +588,16 @@ async fn twenty_five_hundred_reduce_batches_persist_exact_round_cursor_db() -> T
         ReadyMaterializationOutcome::Conflict
     );
 
-    let projection = repository
-        .load_activation_projection(scope, run.run_uid, 1)
-        .await?
-        .expect("reduce run projection");
-    let node = &projection.nodes[0];
-    assert_eq!(node.materialization_cursor, 2_501);
-    assert_eq!(node.reduce_round, 1);
-    assert_eq!(node.reduce_batch_cursor, 2_501);
-    assert_eq!(node.reduce_round_input_count, Some(5_001));
-    assert_eq!(node.reduce_round_task_count, 2_501);
-    assert_eq!(node.reduce_round_terminal_task_count, 0);
-    assert!(node.reduce_ready);
+    let node: (i64, i64, i64, Option<i64>, i64, i64, bool) = sqlx::query_as(
+        "SELECT materialization_cursor,reduce_round,reduce_batch_cursor, \
+                reduce_round_input_count,reduce_round_task_count, \
+                reduce_round_terminal_task_count,reduce_ready \
+         FROM moa.execution_node_state WHERE run_uid=$1 AND node_id='reduce'",
+    )
+    .bind(run.run_uid)
+    .fetch_one(test_db.store().pool())
+    .await?;
+    assert_eq!(node, (2_501, 1, 2_501, Some(5_001), 2_501, 0, true));
     Ok(())
 }
 

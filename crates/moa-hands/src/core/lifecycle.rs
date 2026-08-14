@@ -987,12 +987,67 @@ impl ToolRouter {
                 })
                 .await?
             {
-                let claim = claim;
+                let mut claim = claim;
                 if let Err(error) = call_scope.admit() {
                     let _ = lease_store
                         .transition_status(session.tenant_id, &claim, HandLeaseStatus::Failed)
                         .await?;
                     return Err(error);
+                }
+                if let Some(previous_handle) = claim.handle.as_ref() {
+                    let Some(provider_impl) = self.hands.providers.get(provider) else {
+                        let _ = lease_store
+                            .transition_status(session.tenant_id, &claim, HandLeaseStatus::Failed)
+                            .await?;
+                        return Err(MoaError::ProviderError(format!(
+                            "unknown hand provider: {provider}"
+                        )));
+                    };
+                    if let Err(error) = call_scope.admit() {
+                        let _ = lease_store
+                            .transition_status(session.tenant_id, &claim, HandLeaseStatus::Failed)
+                            .await?;
+                        return Err(error);
+                    }
+                    // Provider destruction is an external effect. Once it starts,
+                    // finish the exact durable clear even if the caller cancels.
+                    if let Err(error) = destroy_provisioning_operations(
+                        provider_impl.as_ref(),
+                        previous_handle
+                            .handle
+                            .provider_account()
+                            .map_or(ProviderAccountId(Uuid::nil()), |context| context.0),
+                        previous_handle
+                            .handle
+                            .provider_account()
+                            .map_or(0, |context| context.1),
+                        claim.provisioning_operation_id,
+                        Some(previous_handle),
+                        ProvisioningAbsenceProof::Immediate,
+                    )
+                    .await
+                    {
+                        let _ = lease_store
+                            .transition_status(session.tenant_id, &claim, HandLeaseStatus::Failed)
+                            .await?;
+                        return Err(error);
+                    }
+                    if !lease_store
+                        .clear_handle_for_provisioning(session.tenant_id, &claim)
+                        .await?
+                    {
+                        return Err(MoaError::StorageError(format!(
+                            "hand lease replacement lost generation fence for session {} provider {provider}",
+                            session.id
+                        )));
+                    }
+                    claim.handle = None;
+                    if let Err(error) = call_scope.admit() {
+                        let _ = lease_store
+                            .transition_status(session.tenant_id, &claim, HandLeaseStatus::Failed)
+                            .await?;
+                        return Err(error);
+                    }
                 }
                 if let Some(capacity) = self.hands.workspace_capacity.as_ref() {
                     let request = active_hand_capacity_request(workspace_binding, &claim)?;

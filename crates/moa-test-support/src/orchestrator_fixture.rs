@@ -569,6 +569,34 @@ impl OrchestratorTestFixture {
         let orchestrator = orchestrator_guard
             .disarm()
             .context("healthy orchestrator child guard is unexpectedly disarmed")?;
+        let maintenance = if use_sandbox_workspace {
+            let health_listener = std::net::TcpListener::bind("0.0.0.0:0")
+                .context("reserve fixture maintenance health port")?;
+            let maintenance_health_port = health_listener
+                .local_addr()
+                .context("read fixture maintenance health port")?
+                .port();
+            drop(health_listener);
+            let config = restart_config
+                .as_ref()
+                .context("sandbox-workspace fixture requires restart configuration")?;
+            let mut maintenance_guard = config.spawn_maintenance(maintenance_health_port)?;
+            wait_for_orchestrator_health(
+                maintenance_health_port,
+                maintenance_guard
+                    .child_mut()
+                    .context("maintenance child guard is unexpectedly disarmed")?,
+            )
+            .await
+            .context("start fixture workspace maintenance owner")?;
+            Some(
+                maintenance_guard
+                    .disarm()
+                    .context("healthy maintenance child guard is unexpectedly disarmed")?,
+            )
+        } else {
+            None
+        };
 
         Ok(Self {
             client,
@@ -583,7 +611,7 @@ impl OrchestratorTestFixture {
             _openfga: openfga_container,
             redis: Mutex::new(redis_container),
             orchestrator: Mutex::new(Some(orchestrator)),
-            maintenance: Mutex::new(None),
+            maintenance: Mutex::new(maintenance),
             handler_revisions: Mutex::new(HashMap::new()),
             _orchestrator_binary_snapshot: Some(orchestrator_binary_snapshot),
             restart_config,
@@ -685,9 +713,45 @@ impl OrchestratorTestFixture {
     }
 
     async fn restart_execution_maintenance_owner(&self) -> Result<()> {
+        self.replace_execution_maintenance_owner(Vec::new(), false)
+            .await
+    }
+
+    /// Restarts the fixture-owned maintenance process with one exact test environment.
+    pub async fn restart_execution_maintenance_owner_with_env(
+        &self,
+        extra_env: Vec<(String, String)>,
+    ) -> Result<()> {
+        self.replace_execution_maintenance_owner(extra_env, false)
+            .await
+    }
+
+    /// Abruptly restarts only the fixture-owned maintenance process.
+    pub async fn hard_crash_and_restart_execution_maintenance_owner(&self) -> Result<()> {
+        self.replace_execution_maintenance_owner(Vec::new(), true)
+            .await
+    }
+
+    async fn replace_execution_maintenance_owner(
+        &self,
+        extra_env: Vec<(String, String)>,
+        hard_crash: bool,
+    ) -> Result<()> {
         let config = self.restart_config.as_ref().context(
             "external orchestrator fixture cannot restart an execution maintenance owner",
         )?;
+        validate_execution_fixture_env(&extra_env)?;
+        let mut child_env = config.extra_env.clone();
+        let mut keys = child_env
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for (key, value) in extra_env {
+            if !keys.insert(key.clone()) {
+                bail!("duplicate execution fixture environment key `{key}`");
+            }
+            child_env.push((key, value));
+        }
         let health_listener = std::net::TcpListener::bind("0.0.0.0:0")
             .context("reserve fixture maintenance health port")?;
         let health_port = health_listener
@@ -696,10 +760,14 @@ impl OrchestratorTestFixture {
             .port();
         let mut maintenance = self.maintenance.lock().await;
         if let Some(child) = maintenance.take() {
-            terminate_child(child);
+            if hard_crash {
+                hard_kill_child(child)?;
+            } else {
+                terminate_child(child);
+            }
         }
         drop(health_listener);
-        let mut child_guard = config.spawn_maintenance(health_port)?;
+        let mut child_guard = config.spawn_maintenance_with_env(health_port, &child_env)?;
         wait_for_orchestrator_health(
             health_port,
             child_guard

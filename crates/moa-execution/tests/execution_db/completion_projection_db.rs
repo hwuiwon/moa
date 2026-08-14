@@ -508,7 +508,7 @@ async fn completion_projection_pages_twenty_five_hundred_tasks_and_nodes_db() ->
                             wake_epoch: current.wake_epoch,
                             checkpoint: ExecutionRunActivationCheckpoint {
                                 status: current.status,
-                                activation_state: ExecutionActivationState::Idle,
+                                activation_state: ExecutionActivationState::Queued,
                                 next_wake_at: current.next_wake_at,
                                 waiting_since: current.waiting_since,
                                 ready_task_count: current.ready_task_count,

@@ -503,10 +503,16 @@ async fn delayed_checkpoint_reconciliation_atomically_publishes_without_resend_d
             provider_account_generation: 1,
             expected_writer_epoch: active.writer_epoch,
             expected_instance_generation: active.instance_generation,
-            quantities: vec![CapacityQuantity {
-                dimension: WorkspaceCapacityDimension::Checkpoints,
-                quantity: 1,
-            }],
+            quantities: vec![
+                CapacityQuantity {
+                    dimension: WorkspaceCapacityDimension::Checkpoints,
+                    quantity: 1,
+                },
+                CapacityQuantity {
+                    dimension: WorkspaceCapacityDimension::LogicalBytes,
+                    quantity: 17,
+                },
+            ],
         })
         .await
         .expect("reserve checkpoint capacity");

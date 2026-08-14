@@ -287,6 +287,7 @@ impl PostgresWorkspaceRepository {
             r#"
             UPDATE moa.sandbox_workspace_operations
             SET outcome_class = 'confirmed', confirmed_disposition = 'resource_present',
+                direct_confirmation_pending = FALSE,
                 claim_token = NULL, claim_expires_at = NULL,
                 retry_not_before = NULL, updated_at = now()
             WHERE tenant_id = $1 AND workspace_id = $2 AND operation_id = $3

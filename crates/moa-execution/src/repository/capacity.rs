@@ -531,7 +531,8 @@ impl ExecutionRepository {
                      reserved_cost_microusd = $8, reserved_tokens = $9, \
                      reserved_tasks = $10, reserved_tool_calls = $11, \
                      reserved_retrieved_bytes = $12, reserved_at = NOW(), \
-                     last_progress_at = NOW(), progress_step_bound_seconds = NULL, \
+                     last_progress_at = GREATEST(last_progress_at, $5, clock_timestamp()), \
+                     progress_step_bound_seconds = NULL, \
                      updated_at = NOW() \
                  WHERE run_uid = $1 AND task_id = $2 AND status = 'ready' \
                    AND ready_at IS NOT NULL AND ready_at <= $5 \

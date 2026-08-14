@@ -47,28 +47,8 @@ impl RustFsFixture {
             secret_bytes,
         );
         let data_dir = docker_mountable_tempdir("moa-rustfs-data-")?;
-        let container = GenericImage::new(RUSTFS_IMAGE, RUSTFS_TAG)
-            .with_exposed_port(RUSTFS_PORT.tcp())
-            .with_wait_for(WaitFor::seconds(2))
-            .with_env_var("RUSTFS_ACCESS_KEY", &access_key)
-            .with_env_var("RUSTFS_SECRET_KEY", &secret_key)
-            .with_env_var("RUSTFS_REGION", RUSTFS_REGION)
-            .with_env_var("RUSTFS_ADDRESS", "0.0.0.0:9000")
-            .with_env_var("RUSTFS_CONSOLE_ENABLE", "false")
-            .with_mount(Mount::bind_mount(
-                data_dir.path().display().to_string(),
-                "/data",
-            ))
-            .with_cmd(["/data"])
-            .start()
-            .await
-            .context("start digest-pinned RustFS testcontainer")?;
-        let host_port = fixture_host_port_ipv4(
-            &container,
-            "sandbox workspace RustFS API",
-            RUSTFS_PORT.tcp(),
-        )
-        .await?;
+        let (container, host_port) =
+            start_rustfs_container(data_dir.path(), &access_key, &secret_key).await?;
         let endpoint = format!("http://127.0.0.1:{host_port}");
         create_bucket_with_retry(&endpoint, &bucket, &access_key, &secret_key).await?;
         let store: Arc<dyn ObjectStore> = Arc::new(
@@ -254,6 +234,66 @@ impl RustFsFixture {
             ),
         ]
     }
+}
+
+async fn start_rustfs_container(
+    data_dir: &Path,
+    access_key: &str,
+    secret_key: &str,
+) -> Result<(ContainerAsync<GenericImage>, u16)> {
+    let mut failures = Vec::new();
+    for attempt in 1..=3 {
+        let container = match GenericImage::new(RUSTFS_IMAGE, RUSTFS_TAG)
+            .with_exposed_port(RUSTFS_PORT.tcp())
+            .with_wait_for(WaitFor::seconds(2))
+            .with_env_var("RUSTFS_ACCESS_KEY", access_key)
+            .with_env_var("RUSTFS_SECRET_KEY", secret_key)
+            .with_env_var("RUSTFS_REGION", RUSTFS_REGION)
+            .with_env_var("RUSTFS_ADDRESS", "0.0.0.0:9000")
+            .with_env_var("RUSTFS_CONSOLE_ENABLE", "false")
+            .with_mount(Mount::bind_mount(data_dir.display().to_string(), "/data"))
+            .with_cmd(["/data"])
+            .start()
+            .await
+        {
+            Ok(container) => container,
+            Err(error) => {
+                failures.push(format!("attempt {attempt} failed to start: {error}"));
+                continue;
+            }
+        };
+        match fixture_host_port_ipv4(
+            &container,
+            "sandbox workspace RustFS API",
+            RUSTFS_PORT.tcp(),
+        )
+        .await
+        {
+            Ok(host_port) => return Ok((container, host_port)),
+            Err(error) => {
+                failures.push(format!(
+                    "attempt {attempt} exposed incomplete ports: {error:#}"
+                ));
+                tracing::warn!(
+                    attempt,
+                    container_id = %container.id(),
+                    %error,
+                    "restarting RustFS fixture after incomplete Docker port publication"
+                );
+                if let Err(remove_error) = container.rm().await {
+                    tracing::warn!(
+                        attempt,
+                        %remove_error,
+                        "failed to remove incomplete RustFS fixture container"
+                    );
+                }
+            }
+        }
+    }
+    bail!(
+        "start RustFS testcontainer with API port failed after 3 attempts: {}",
+        failures.join("; ")
+    )
 }
 
 async fn create_bucket_with_retry(

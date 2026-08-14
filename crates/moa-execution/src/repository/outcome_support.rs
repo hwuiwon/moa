@@ -421,6 +421,9 @@ pub(super) async fn terminalize_redispatch_rejection(
         .map_err(sqlx_error)?;
 
     let (_, error, citations) = outcome_projection_fields(&outcome)?;
+    let failure_fingerprint = task_failure_fingerprint_input_for_outcome(task, &outcome)
+        .map(|input| failure_fingerprint(&input).map(|hash| hash.to_string()))
+        .transpose()?;
     let audit = outcome_audit_entry(task, task.generation, &outcome, true, None);
     let row = sqlx::query(RECORD_TASK_OUTCOME_SQL)
         .bind(task.run_uid)
@@ -461,6 +464,7 @@ pub(super) async fn terminalize_redispatch_rejection(
         .bind(serde_json::to_value(citations)?)
         .bind(audit)
         .bind(true)
+        .bind(failure_fingerprint)
         .fetch_one(conn.as_mut())
         .await
         .map_err(sqlx_error)?;

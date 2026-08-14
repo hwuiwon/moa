@@ -53,9 +53,15 @@ use moa_execution::wire::{
 };
 
 fn watchdog_output_node() -> ExecutionNode {
+    let mut node = output_node("watchdog-work");
+    node.requirement_ids = vec!["req".to_string()];
+    node
+}
+
+fn output_node(id: &str) -> ExecutionNode {
     ExecutionNode {
-        id: "watchdog-work".to_string(),
-        requirement_ids: vec!["req".to_string()],
+        id: id.to_string(),
+        requirement_ids: Vec::new(),
         depends_on: Vec::new(),
         when: None,
         input: json!({}),
@@ -196,7 +202,7 @@ async fn trigger_creation_is_atomic_and_firing_is_due_generation_fenced_db() -> 
             None,
             "trigger-atomic-generation",
             ExecutionRunStatus::Queued,
-            budget(10),
+            budget_without_deadline(10),
         ),
     )
     .await?;
@@ -229,26 +235,37 @@ async fn trigger_creation_is_atomic_and_firing_is_due_generation_fenced_db() -> 
     .execute(&pool)
     .await?;
 
-    let future_uid = Uuid::now_v7();
-    let future = repository
-        .create_trigger(
-            scope,
-            &execution_config,
-            run_deadline(
-                future_uid,
-                tenant_id,
-                run.run_uid,
-                1,
-                pg_deadline(Duration::minutes(5)),
-            ),
-        )
-        .await?;
-    assert_eq!(future.trigger.state, ExecutionDeliveryState::Pending);
+    let future_due_at = pg_deadline(Duration::minutes(5));
+    let mut future_request = new_run(
+        tenant_id,
+        None,
+        "future-trigger",
+        ExecutionRunStatus::Queued,
+        budget(10),
+    );
+    future_request.approved_budget.deadline_at = Some(future_due_at);
+    let future_run = create_run(&repository, scope, future_request).await?;
+    let (future_uid, future_dispatch_uid): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT trigger.trigger_uid, dispatch.dispatch_uid \
+         FROM moa.execution_trigger AS trigger \
+         JOIN moa.execution_dispatch_outbox AS dispatch USING (trigger_uid) \
+         WHERE trigger.run_uid=$1 AND trigger.trigger_kind='run_deadline'",
+    )
+    .bind(future_run.run_uid)
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE moa.execution_dispatch_outbox SET state='delivered', delivered_at=NOW(), \
+         updated_at=NOW() WHERE run_uid=$1 AND dispatch_kind='run_activation'",
+    )
+    .bind(future_run.run_uid)
+    .execute(&pool)
+    .await?;
     // Pins: creating a future trigger persists no process-local timer; the indexed outbox head is
     // the sole normal timing authority, remains unclaimable early, and becomes the due delivery.
     let wake = repository.next_pending_dispatch_wake(scope).await?;
-    assert_eq!(wake.dispatch_uid, Some(future.dispatch.dispatch_uid));
-    assert_eq!(wake.next_due_at, Some(future.trigger.due_at));
+    assert_eq!(wake.dispatch_uid, Some(future_dispatch_uid));
+    assert_eq!(wake.next_due_at, Some(future_due_at));
     assert!(
         repository
             .claim_due_dispatches(scope, "future-trigger-owner", 1, StdDuration::from_secs(30))
@@ -262,7 +279,7 @@ async fn trigger_creation_is_atomic_and_firing_is_due_generation_fenced_db() -> 
     let future_dispatch_state: String = sqlx::query_scalar(
         "SELECT state FROM moa.execution_dispatch_outbox WHERE dispatch_uid = $1",
     )
-    .bind(future.dispatch.dispatch_uid)
+    .bind(future_dispatch_uid)
     .fetch_one(&pool)
     .await?;
     assert_eq!(future_dispatch_state, "pending");
@@ -282,29 +299,38 @@ async fn trigger_creation_is_atomic_and_firing_is_due_generation_fenced_db() -> 
     );
     transaction.commit().await?;
 
-    let due_uid = Uuid::now_v7();
-    let due = repository
-        .create_trigger(
-            scope,
-            &execution_config,
-            run_deadline(
-                due_uid,
-                tenant_id,
-                run.run_uid,
-                1,
-                pg_deadline(Duration::minutes(-1)),
-            ),
-        )
-        .await?;
+    let due_at = pg_deadline(Duration::minutes(-1));
+    let mut due_request = new_run(
+        tenant_id,
+        None,
+        "due-trigger",
+        ExecutionRunStatus::Queued,
+        budget(10),
+    );
+    due_request.approved_budget.deadline_at = Some(due_at);
+    let due_run = create_run(&repository, scope, due_request).await?;
+    let (due_uid, due_dispatch_uid): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT trigger.trigger_uid, dispatch.dispatch_uid \
+         FROM moa.execution_trigger AS trigger \
+         JOIN moa.execution_dispatch_outbox AS dispatch USING (trigger_uid) \
+         WHERE trigger.run_uid=$1 AND trigger.trigger_kind='run_deadline'",
+    )
+    .bind(due_run.run_uid)
+    .fetch_one(&pool)
+    .await?;
     sqlx::query("DELETE FROM moa.execution_dispatch_outbox WHERE dispatch_uid = $1")
-        .bind(due.dispatch.dispatch_uid)
+        .bind(due_dispatch_uid)
         .execute(&pool)
         .await?;
     let repaired = repository
         .reconcile_due_trigger_dispatches(scope, 10)
         .await?;
     assert_eq!(repaired.len(), 1);
-    assert_eq!(repaired[0].dispatch_uid, due.dispatch.dispatch_uid);
+    let repaired_dispatch_uid = repaired[0].dispatch_uid;
+    assert_ne!(
+        repaired_dispatch_uid, due_dispatch_uid,
+        "reconstructing a lost delivery must escape the missing Restate identity"
+    );
     let ExecutionTriggerFireOutcome::Delivered {
         activation: Some(activation),
     } = repository.fire_trigger(scope, due_uid).await?
@@ -320,29 +346,37 @@ async fn trigger_creation_is_atomic_and_firing_is_due_generation_fenced_db() -> 
     let due_dispatch_state: String = sqlx::query_scalar(
         "SELECT state FROM moa.execution_dispatch_outbox WHERE dispatch_uid = $1",
     )
-    .bind(due.dispatch.dispatch_uid)
+    .bind(repaired_dispatch_uid)
     .fetch_one(&pool)
     .await?;
     assert_eq!(due_dispatch_state, "delivered");
 
-    let stale_uid = Uuid::now_v7();
-    let stale = repository
-        .create_trigger(
-            scope,
-            &execution_config,
-            run_deadline(
-                stale_uid,
-                tenant_id,
-                run.run_uid,
-                1,
-                pg_deadline(Duration::seconds(-1)),
-            ),
-        )
-        .await?;
-    sqlx::query("UPDATE moa.execution_run SET controller_generation = 2 WHERE run_uid = $1")
-        .bind(run.run_uid)
-        .execute(&pool)
-        .await?;
+    let stale_due_at = pg_deadline(Duration::seconds(-1));
+    let mut stale_request = new_run(
+        tenant_id,
+        None,
+        "stale-trigger",
+        ExecutionRunStatus::Queued,
+        budget(10),
+    );
+    stale_request.approved_budget.deadline_at = Some(stale_due_at);
+    let stale_run = create_run(&repository, scope, stale_request).await?;
+    let (stale_uid, stale_dispatch_uid): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT trigger.trigger_uid, dispatch.dispatch_uid \
+         FROM moa.execution_trigger AS trigger \
+         JOIN moa.execution_dispatch_outbox AS dispatch USING (trigger_uid) \
+         WHERE trigger.run_uid=$1 AND trigger.trigger_kind='run_deadline'",
+    )
+    .bind(stale_run.run_uid)
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE moa.execution_run SET budget_deadline_suspended_at=clock_timestamp() \
+         WHERE run_uid=$1",
+    )
+    .bind(stale_run.run_uid)
+    .execute(&pool)
+    .await?;
     assert_eq!(
         repository.fire_trigger(scope, stale_uid).await?,
         ExecutionTriggerFireOutcome::NoOp(ExecutionTriggerNoOp::StaleGeneration)
@@ -353,7 +387,7 @@ async fn trigger_creation_is_atomic_and_firing_is_due_generation_fenced_db() -> 
          JOIN moa.execution_dispatch_outbox AS dispatch USING (trigger_uid) \
          WHERE trigger.trigger_uid = $1",
     )
-    .bind(stale.trigger.trigger_uid)
+    .bind(stale_uid)
     .fetch_one(&pool)
     .await?;
     assert_eq!(
@@ -363,12 +397,20 @@ async fn trigger_creation_is_atomic_and_firing_is_due_generation_fenced_db() -> 
 
     let activation_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM moa.execution_dispatch_outbox \
-         WHERE run_uid = $1 AND dispatch_kind = 'run_activation'",
+         WHERE run_uid = $1 AND dispatch_kind = 'run_activation' \
+           AND payload->>'trigger_uid'=$2",
     )
-    .bind(run.run_uid)
+    .bind(due_run.run_uid)
+    .bind(due_uid.to_string())
     .fetch_one(&pool)
     .await?;
     assert_eq!(activation_count, 1);
+    let stale_dispatch_state: String =
+        sqlx::query_scalar("SELECT state FROM moa.execution_dispatch_outbox WHERE dispatch_uid=$1")
+            .bind(stale_dispatch_uid)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(stale_dispatch_state, "cancelled");
     Ok(())
 }
 
@@ -743,7 +785,6 @@ async fn reconciliation_redrives_accepted_trigger_and_run_dispatches_after_resta
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let pool = test_db.store().pool().clone();
     let repository = ExecutionRepository::new(pool.clone());
-    let execution_config = execution_capacity_config();
     let tenant_id = TenantId::new();
     let scope = ExecutionScope::Tenant { tenant_id };
     assert!(
@@ -753,32 +794,27 @@ async fn reconciliation_redrives_accepted_trigger_and_run_dispatches_after_resta
             .is_err(),
         "a reconciliation batch must fund trigger, accepted-dispatch, and run lanes"
     );
-    let run = create_run(
-        &repository,
-        scope,
-        new_run(
-            tenant_id,
-            None,
-            "restate-loss-redrive",
-            ExecutionRunStatus::Queued,
-            budget(10),
-        ),
+    let due_at = pg_deadline(Duration::minutes(-2));
+    let mut request = new_run(
+        tenant_id,
+        None,
+        "restate-loss-redrive",
+        ExecutionRunStatus::Queued,
+        budget(10),
+    );
+    request.approved_budget.deadline_at = Some(due_at);
+    let run = create_run(&repository, scope, request).await?;
+    let (trigger_uid, trigger_dispatch_uid): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT trigger.trigger_uid, dispatch.dispatch_uid \
+         FROM moa.execution_trigger AS trigger \
+         JOIN moa.execution_dispatch_outbox AS dispatch \
+           ON dispatch.trigger_uid=trigger.trigger_uid \
+          AND dispatch.dispatch_kind='trigger_delivery' \
+         WHERE trigger.run_uid=$1 AND trigger.trigger_kind='run_deadline'",
     )
+    .bind(run.run_uid)
+    .fetch_one(&pool)
     .await?;
-
-    let trigger = repository
-        .create_trigger(
-            scope,
-            &execution_config,
-            run_deadline(
-                Uuid::now_v7(),
-                tenant_id,
-                run.run_uid,
-                run.controller_generation,
-                pg_deadline(Duration::minutes(-2)),
-            ),
-        )
-        .await?;
     let mut transaction = pool.begin().await?;
     let activation = enqueue_run_activation_in_conn(
         &mut transaction,
@@ -796,7 +832,7 @@ async fn reconciliation_redrives_accepted_trigger_and_run_dispatches_after_resta
              delivery_attempts = 4, updated_at = now() - interval '2 minutes' \
          WHERE dispatch_uid = ANY($1)",
     )
-    .bind(vec![trigger.dispatch.dispatch_uid, activation.dispatch_uid])
+    .bind(vec![trigger_dispatch_uid, activation.dispatch_uid])
     .execute(&pool)
     .await?;
 
@@ -809,14 +845,14 @@ async fn reconciliation_redrives_accepted_trigger_and_run_dispatches_after_resta
         .collect::<HashSet<_>>();
     assert_eq!(
         repaired_ids,
-        HashSet::from([trigger.dispatch.dispatch_uid, activation.dispatch_uid])
+        HashSet::from([trigger_dispatch_uid, activation.dispatch_uid])
     );
     let rows: Vec<(Uuid, String, Option<DateTime<Utc>>, i32)> = sqlx::query_as(
         "SELECT dispatch_uid, state, delivered_at, delivery_attempts \
          FROM moa.execution_dispatch_outbox WHERE dispatch_uid = ANY($1) \
          ORDER BY dispatch_uid",
     )
-    .bind(vec![trigger.dispatch.dispatch_uid, activation.dispatch_uid])
+    .bind(vec![trigger_dispatch_uid, activation.dispatch_uid])
     .fetch_all(&pool)
     .await?;
     assert_eq!(rows.len(), 2);
@@ -830,12 +866,14 @@ async fn reconciliation_redrives_accepted_trigger_and_run_dispatches_after_resta
              updated_at = now() - interval '2 minutes' \
          WHERE dispatch_uid = ANY($1)",
     )
-    .bind(vec![trigger.dispatch.dispatch_uid, activation.dispatch_uid])
+    .bind(vec![trigger_dispatch_uid, activation.dispatch_uid])
     .execute(&pool)
     .await?;
     sqlx::query(
-        "UPDATE moa.execution_run SET controller_generation = controller_generation + 1, \
-         updated_at = now() WHERE run_uid = $1",
+        "UPDATE moa.execution_run \
+         SET controller_generation = controller_generation + 1, \
+             budget_deadline_suspended_at = clock_timestamp(), updated_at = now() \
+         WHERE run_uid = $1",
     )
     .bind(run.run_uid)
     .execute(&pool)
@@ -850,13 +888,13 @@ async fn reconciliation_redrives_accepted_trigger_and_run_dispatches_after_resta
         "SELECT dispatch_uid, state FROM moa.execution_dispatch_outbox \
          WHERE dispatch_uid = ANY($1) ORDER BY dispatch_uid",
     )
-    .bind(vec![trigger.dispatch.dispatch_uid, activation.dispatch_uid])
+    .bind(vec![trigger_dispatch_uid, activation.dispatch_uid])
     .fetch_all(&pool)
     .await?;
     assert!(stale_states.iter().all(|(_, state)| state == "delivered"));
     let trigger_state: String =
         sqlx::query_scalar("SELECT state FROM moa.execution_trigger WHERE trigger_uid = $1")
-            .bind(trigger.trigger.trigger_uid)
+            .bind(trigger_uid)
             .fetch_one(&pool)
             .await?;
     assert_eq!(trigger_state, "superseded");
@@ -884,7 +922,7 @@ async fn trigger_capacity_saturates_atomically_and_releases_once_db() -> TestRes
             None,
             "trigger-capacity-first",
             ExecutionRunStatus::Queued,
-            budget(10),
+            budget_without_deadline(10),
         ),
     )
     .await?;
@@ -896,7 +934,7 @@ async fn trigger_capacity_saturates_atomically_and_releases_once_db() -> TestRes
             None,
             "trigger-capacity-second",
             ExecutionRunStatus::Queued,
-            budget(10),
+            budget_without_deadline(10),
         ),
     )
     .await?;
@@ -984,9 +1022,10 @@ async fn trigger_capacity_saturates_atomically_and_releases_once_db() -> TestRes
 }
 
 #[tokio::test]
-async fn outbox_claims_are_disjoint_expiry_recoverable_and_dead_lettered_db() -> TestResult {
+async fn correctness_outbox_claims_are_disjoint_expiry_recoverable_and_durably_retried_db()
+-> TestResult {
     // Pins: bounded SKIP LOCKED claimers never overlap; expired ownership can be stolen;
-    // stale owners cannot ack; bounded exponential retry ends in durable dead letter.
+    // stale owners cannot ack; correctness dispatches remain behind durable sparse retry.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let pool = test_db.store().pool().clone();
     let repository = ExecutionRepository::new(pool.clone());
@@ -1101,21 +1140,21 @@ async fn outbox_claims_are_disjoint_expiry_recoverable_and_dead_lettered_db() ->
         .await?;
     assert_eq!(reclaimed[0].dispatch_uid, retry_uid);
     assert_eq!(reclaimed[0].delivery_attempts, 2);
-    assert_eq!(
+    assert!(matches!(
         repository
             .record_dispatch_failure(scope, retry_uid, "owner-d", "permanent", retry)
             .await?,
-        ExecutionDispatchFailureOutcome::DeadLettered
-    );
+        ExecutionDispatchFailureOutcome::RetryScheduled { .. }
+    ));
     let state: String = sqlx::query_scalar(
         "SELECT state FROM moa.execution_dispatch_outbox WHERE dispatch_uid = $1",
     )
     .bind(retry_uid)
     .fetch_one(&pool)
     .await?;
-    assert_eq!(state, "dead_letter");
+    assert_eq!(state, "pending");
     let health = repository.sample_execution_queue_health(scope, 10).await?;
-    assert_eq!(health.dead_letter_dispatches.observed_count, 1);
+    assert_eq!(health.dead_letter_dispatches.observed_count, 0);
     assert!(!health.dead_letter_dispatches.saturated);
     Ok(())
 }
@@ -1311,11 +1350,6 @@ async fn task_watchdog_preparation_is_due_fenced_and_exact_owner_replay_safe_db(
     );
     candidate.plan.definition.nodes = vec![watchdog_output_node()];
     let run = create_run(&repository, scope, candidate).await?;
-    assert!(
-        repository
-            .initialize_scheduler_state(scope, run.run_uid)
-            .await?
-    );
     sqlx::query(
         "UPDATE moa.execution_dispatch_outbox SET state='delivered', delivered_at=NOW(), \
          updated_at=NOW() WHERE run_uid=$1 AND dispatch_kind='run_activation' AND state='pending'",
@@ -1472,11 +1506,6 @@ async fn one_attempt_generation_admits_exactly_one_armed_watchdog_db() -> TestRe
     );
     candidate.plan.definition.nodes = vec![watchdog_output_node()];
     let run = create_run(&repository, scope, candidate).await?;
-    assert!(
-        repository
-            .initialize_scheduler_state(scope, run.run_uid)
-            .await?
-    );
     assert!(matches!(
         repository
             .materialize_ready_page(
@@ -2079,53 +2108,66 @@ async fn external_callbacks_are_tenant_generation_deduped_and_reconciled_db() ->
     let tenant_id = TenantId::new();
     let other_tenant = TenantId::new();
     let scope = ExecutionScope::Tenant { tenant_id };
-    let run = create_run(
-        &repository,
-        scope,
-        new_run(
-            tenant_id,
-            None,
-            "external-callback-dedupe",
-            ExecutionRunStatus::Queued,
-            budget(10),
-        ),
-    )
-    .await?;
-    let tasks = repository
-        .materialize_tasks(
-            scope,
-            run.run_uid,
-            1,
-            vec![logical_task(
-                run.run_uid,
-                "provider-job",
-                "one",
-                estimate(1),
-            )],
-        )
-        .await?;
-    let task = &tasks[0];
-    sqlx::query(
-        "UPDATE moa.execution_task SET status='reserved', updated_at=NOW() WHERE task_id=$1",
-    )
-    .bind(task.task_id.as_uuid())
-    .execute(test_db.store().pool())
-    .await?;
-    sqlx::query(
-        "UPDATE moa.execution_task SET status='running', attempt_state='running', \
-         last_progress_at=NOW(), updated_at=NOW() WHERE task_id=$1",
-    )
-    .bind(task.task_id.as_uuid())
-    .execute(test_db.store().pool())
-    .await?;
+    let mut candidate = new_run(
+        tenant_id,
+        None,
+        "external-callback-dedupe",
+        ExecutionRunStatus::Queued,
+        budget(10),
+    );
+    candidate.plan.definition.nodes = vec![output_node("provider-job")];
+    let run = create_run(&repository, scope, candidate).await?;
+    let task_spec = logical_task(run.run_uid, "provider-job", "one", estimate(1));
+    assert!(matches!(
+        repository
+            .materialize_ready_page(
+                scope,
+                &execution_config,
+                ReadyMaterializationRequest {
+                    run_uid: run.run_uid,
+                    plan_revision: 1,
+                    node_id: "provider-job".to_string(),
+                    expected_cursor: 0,
+                    reduce_cursor: None,
+                    source_exhausted: true,
+                    terminal_output: None,
+                    condition_skipped: false,
+                    tasks: vec![task_spec],
+                },
+            )
+            .await?,
+        ReadyMaterializationOutcome::Applied { .. }
+    ));
+    let admission = repository
+        .admit_ready_attempts(&execution_config, 1, Utc::now())
+        .await?
+        .admitted
+        .into_iter()
+        .next()
+        .expect("one external callback task must be admitted");
+    let fence = TaskAttemptFence {
+        tenant_id: admission.tenant_id,
+        run_uid: admission.run_uid,
+        task_id: admission.task_id,
+        controller_generation: admission.controller_generation,
+        attempt_generation: admission.attempt_generation,
+        dispatch_uid: admission.dispatch_uid,
+        capacity_reservation_uid: admission.capacity_reservation_uid,
+        watchdog_trigger_uid: admission.watchdog_trigger_uid,
+        attempt_deadline_at: admission.attempt_deadline_at,
+    };
+    let TaskAttemptStartOutcome::Started(started) = repository.start_task_attempt(fence).await?
+    else {
+        panic!("external callback fixture must start its admitted attempt");
+    };
     let external_job_uid = Uuid::now_v7();
     let first_intent = NewExecutionExternalJobIntent {
         external_job_uid,
         tenant_id,
         run_uid: run.run_uid,
         owner: ExecutionExternalJobOwner::Task {
-            task_id: task.task_id.as_uuid(),
-            attempt_generation: 1,
+            task_id: fence.task_id.as_uuid(),
+            attempt_generation: fence.attempt_generation,
         },
         job_generation: 1,
         provider: "batch-provider".to_string(),
@@ -2145,23 +2187,6 @@ async fn external_callbacks_are_tenant_generation_deduped_and_reconciled_db() ->
     .bind(external_job_uid.to_string())
     .fetch_one(test_db.store().pool())
     .await?;
-    // Isolate this fixture's timing head from the run-activation row created during setup. The
-    // callback assertions below drive repository methods directly and do not consume that row.
-    sqlx::query(
-        "UPDATE moa.execution_dispatch_outbox \
-         SET state='delivered',delivered_at=NOW(),updated_at=NOW() \
-         WHERE state='pending' AND run_uid=$1 AND dispatch_kind='run_activation'",
-    )
-    .bind(run.run_uid)
-    .execute(test_db.store().pool())
-    .await?;
-    let wake_before_rearm = repository
-        .next_pending_dispatch_wake(ExecutionScope::ControlPlane)
-        .await?;
-    assert_eq!(
-        wake_before_rearm.dispatch_uid,
-        Some(start_recovery_dispatch_uid)
-    );
     sqlx::query(
         "UPDATE moa.execution_trigger SET due_at=NOW()-interval '1 second' \
          WHERE trigger_uid=$1",
@@ -2222,16 +2247,6 @@ async fn external_callbacks_are_tenant_generation_deduped_and_reconciled_db() ->
     .fetch_one(test_db.store().pool())
     .await?;
     assert!(!old_delivery_exists);
-    assert_ne!(wake_before_rearm.next_due_at, Some(retry_at));
-    let rearmed_wake = repository
-        .next_pending_dispatch_wake(ExecutionScope::ControlPlane)
-        .await?;
-    assert_eq!(rearmed_wake.dispatch_uid, Some(rearmed.dispatch_uid));
-    assert_eq!(rearmed_wake.next_due_at, Some(retry_at));
-    assert_ne!(
-        rearmed_wake.head_updated_at,
-        wake_before_rearm.head_updated_at
-    );
     repository
         .bind_external_job(
             scope,
@@ -2254,70 +2269,83 @@ async fn external_callbacks_are_tenant_generation_deduped_and_reconciled_db() ->
             },
         )
         .await?;
-    sqlx::query(
-        "UPDATE moa.execution_task SET status='waiting_external', attempt_state='waiting', \
-         waiting_since=NOW(), external_job_uid=$3, updated_at=NOW() \
-         WHERE run_uid=$1 AND task_id=$2",
-    )
-    .bind(run.run_uid)
-    .bind(task.task_id.as_uuid())
-    .bind(external_job_uid)
-    .execute(test_db.store().pool())
-    .await?;
-    sqlx::query(
-        "UPDATE moa.execution_node_state SET node_status='waiting', waiting_task_count=1, \
-         updated_at=NOW() WHERE run_uid=$1 AND node_id=$2",
-    )
-    .bind(run.run_uid)
-    .bind(&task.node_id)
-    .execute(test_db.store().pool())
-    .await?;
-    let second_run = create_run(
-        &repository,
-        scope,
-        new_run(
-            tenant_id,
-            None,
-            "external-callback-capacity-second",
-            ExecutionRunStatus::Queued,
-            budget(10),
-        ),
-    )
-    .await?;
-    let second_tasks = repository
-        .materialize_tasks(
-            scope,
-            second_run.run_uid,
-            1,
-            vec![logical_task(
-                second_run.run_uid,
-                "provider-job-second",
-                "one",
-                estimate(1),
-            )],
-        )
-        .await?;
+    assert!(matches!(
+        repository
+            .begin_task_attempt_release(fence, started.task.generation, "external_job", Utc::now(),)
+            .await?,
+        TaskAttemptReleaseClaimOutcome::Applied(_)
+    ));
+    let TaskAttemptExternalOutcome::Applied { task, .. } = repository
+        .yield_task_attempt_to_external_job(fence, external_job_uid, None, None, Utc::now())
+        .await?
+    else {
+        panic!("external callback fixture must park on its bound provider job");
+    };
+    let mut second_candidate = new_run(
+        tenant_id,
+        None,
+        "external-callback-capacity-second",
+        ExecutionRunStatus::Queued,
+        budget(10),
+    );
+    second_candidate.plan.definition.nodes = vec![output_node("provider-job-second")];
+    let second_run = create_run(&repository, scope, second_candidate).await?;
+    assert!(matches!(
+        repository
+            .materialize_ready_page(
+                scope,
+                &execution_config,
+                ReadyMaterializationRequest {
+                    run_uid: second_run.run_uid,
+                    plan_revision: 1,
+                    node_id: "provider-job-second".to_string(),
+                    expected_cursor: 0,
+                    reduce_cursor: None,
+                    source_exhausted: true,
+                    terminal_output: None,
+                    condition_skipped: false,
+                    tasks: vec![logical_task(
+                        second_run.run_uid,
+                        "provider-job-second",
+                        "one",
+                        estimate(1),
+                    )],
+                },
+            )
+            .await?,
+        ReadyMaterializationOutcome::Applied { .. }
+    ));
+    let second_admission = repository
+        .admit_ready_attempts(&execution_config, 1, Utc::now())
+        .await?
+        .admitted
+        .into_iter()
+        .next()
+        .expect("one second external callback task must be admitted");
+    let second_fence = TaskAttemptFence {
+        tenant_id: second_admission.tenant_id,
+        run_uid: second_admission.run_uid,
+        task_id: second_admission.task_id,
+        controller_generation: second_admission.controller_generation,
+        attempt_generation: second_admission.attempt_generation,
+        dispatch_uid: second_admission.dispatch_uid,
+        capacity_reservation_uid: second_admission.capacity_reservation_uid,
+        watchdog_trigger_uid: second_admission.watchdog_trigger_uid,
+        attempt_deadline_at: second_admission.attempt_deadline_at,
+    };
+    let TaskAttemptStartOutcome::Started(second_started) =
+        repository.start_task_attempt(second_fence).await?
+    else {
+        panic!("second external callback fixture must start its admitted attempt");
+    };
     let second_external_job_uid = Uuid::now_v7();
-    sqlx::query(
-        "UPDATE moa.execution_task SET status='reserved', updated_at=NOW() WHERE task_id=$1",
-    )
-    .bind(second_tasks[0].task_id.as_uuid())
-    .execute(test_db.store().pool())
-    .await?;
-    sqlx::query(
-        "UPDATE moa.execution_task SET status='running', attempt_state='running', \
-         last_progress_at=NOW(), updated_at=NOW() WHERE task_id=$1",
-    )
-    .bind(second_tasks[0].task_id.as_uuid())
-    .execute(test_db.store().pool())
-    .await?;
     let second_intent = NewExecutionExternalJobIntent {
         external_job_uid: second_external_job_uid,
         tenant_id,
         run_uid: second_run.run_uid,
         owner: ExecutionExternalJobOwner::Task {
-            task_id: second_tasks[0].task_id.as_uuid(),
-            attempt_generation: 1,
+            task_id: second_fence.task_id.as_uuid(),
+            attempt_generation: second_fence.attempt_generation,
         },
         job_generation: 1,
         provider: "batch-provider".to_string(),
@@ -2339,49 +2367,6 @@ async fn external_callbacks_are_tenant_generation_deduped_and_reconciled_db() ->
     .fetch_one(test_db.store().pool())
     .await?;
     assert_eq!(rejected_job_count, 0);
-    sqlx::query("UPDATE moa.execution_run SET wake_epoch = $2 WHERE run_uid = $1")
-        .bind(run.run_uid)
-        .bind(i64::MAX)
-        .execute(test_db.store().pool())
-        .await?;
-    let rollback_event = callback(
-        external_job_uid,
-        1,
-        "rollback-event",
-        ExecutionExternalJobCallbackUpdate::Terminal {
-            state: ExecutionExternalJobState::Completed,
-            progress_phase: Some("must-rollback".to_string()),
-            output: Some(json!({"must": "rollback"})),
-            error: None,
-        },
-    );
-    assert!(
-        repository
-            .apply_external_job_callback_and_activate(
-                ExecutionScope::ControlPlane,
-                &execution_config,
-                rollback_event,
-            )
-            .await
-            .is_err(),
-        "wake-epoch overflow must fail after callback mutation"
-    );
-    let rolled_back: (String, Option<String>, i64) = sqlx::query_as(
-        "SELECT job.state, job.last_provider_event_id, \
-         (SELECT count(*) FROM moa.execution_external_job_callback_receipt receipt \
-          WHERE receipt.external_job_uid = job.external_job_uid \
-            AND receipt.provider_event_id = 'rollback-event') \
-         FROM moa.execution_external_job job WHERE job.external_job_uid = $1",
-    )
-    .bind(external_job_uid)
-    .fetch_one(test_db.store().pool())
-    .await?;
-    assert_eq!(rolled_back, ("starting".to_string(), None, 0));
-    sqlx::query("UPDATE moa.execution_run SET wake_epoch = $2 WHERE run_uid = $1")
-        .bind(run.run_uid)
-        .bind(i64::try_from(run.wake_epoch)?)
-        .execute(test_db.store().pool())
-        .await?;
     assert_eq!(repository.list_due_external_jobs(scope, 10).await?.len(), 1);
     assert!(
         repository
@@ -2472,7 +2457,11 @@ async fn external_callbacks_are_tenant_generation_deduped_and_reconciled_db() ->
     let ExecutionExternalJobCallbackOutcome::Applied(progressed) = progress_write.outcome else {
         panic!("exact progress callback must apply");
     };
-    assert_eq!(progressed.state, ExecutionExternalJobState::Running);
+    assert_eq!(
+        progressed.state,
+        ExecutionExternalJobState::CancelRequested,
+        "provider progress must not clear an accepted cancellation intent"
+    );
     assert_eq!(progressed.progress_phase.as_deref(), Some("map"));
     assert_eq!(progress_write.activation, None);
     let duplicate = repository
@@ -2608,14 +2597,12 @@ async fn external_callbacks_are_tenant_generation_deduped_and_reconciled_db() ->
     .bind(task.task_id.as_uuid())
     .fetch_one(test_db.store().pool())
     .await?;
-    assert_eq!(
-        paused_after_callback,
-        (
-            "paused".to_string(),
-            paused_wake_epoch,
-            "completed".to_string()
-        )
+    assert_eq!(paused_after_callback.0, "paused");
+    assert!(
+        paused_after_callback.1 > paused_wake_epoch,
+        "terminal outcome persistence must advance the durable wake fence"
     );
+    assert_eq!(paused_after_callback.2, "completed");
     assert_eq!(
         repository
             .apply_external_job_callback_and_activate(
@@ -2664,6 +2651,68 @@ async fn external_callbacks_are_tenant_generation_deduped_and_reconciled_db() ->
             },
         )
         .await?;
+    assert!(matches!(
+        repository
+            .begin_task_attempt_release(
+                second_fence,
+                second_started.task.generation,
+                "external_job",
+                Utc::now(),
+            )
+            .await?,
+        TaskAttemptReleaseClaimOutcome::Applied(_)
+    ));
+    assert!(matches!(
+        repository
+            .yield_task_attempt_to_external_job(
+                second_fence,
+                second_external_job_uid,
+                None,
+                None,
+                Utc::now(),
+            )
+            .await?,
+        TaskAttemptExternalOutcome::Applied { .. }
+    ));
+    sqlx::query("UPDATE moa.execution_run SET wake_epoch = $2 WHERE run_uid = $1")
+        .bind(second_run.run_uid)
+        .bind(i64::MAX)
+        .execute(test_db.store().pool())
+        .await?;
+    let mut rollback_event = callback(
+        second_external_job_uid,
+        1,
+        "rollback-event",
+        ExecutionExternalJobCallbackUpdate::Terminal {
+            state: ExecutionExternalJobState::Completed,
+            progress_phase: Some("must-rollback".to_string()),
+            output: Some(json!({"must": "rollback"})),
+            error: None,
+        },
+    );
+    rollback_event.provider_job_id = "provider-job-2".to_string();
+    let rollback_result = repository
+        .apply_external_job_callback_and_activate(
+            ExecutionScope::ControlPlane,
+            &execution_config,
+            rollback_event,
+        )
+        .await;
+    assert!(
+        rollback_result.is_err(),
+        "wake-epoch overflow must fail after callback mutation, got {rollback_result:?}"
+    );
+    let rolled_back: (String, Option<String>, i64) = sqlx::query_as(
+        "SELECT job.state, job.last_provider_event_id, \
+         (SELECT count(*) FROM moa.execution_external_job_callback_receipt receipt \
+          WHERE receipt.external_job_uid = job.external_job_uid \
+            AND receipt.provider_event_id = 'rollback-event') \
+         FROM moa.execution_external_job job WHERE job.external_job_uid = $1",
+    )
+    .bind(second_external_job_uid)
+    .fetch_one(test_db.store().pool())
+    .await?;
+    assert_eq!(rolled_back, ("starting".to_string(), None, 0));
     assert_eq!(
         repository
             .apply_external_job_callback_and_activate(
@@ -3451,11 +3500,6 @@ async fn assert_paused_task_review_resolution(
     );
     candidate.plan.definition.nodes = vec![watchdog_output_node()];
     let run = create_run(&repository, scope, candidate).await?;
-    assert!(
-        repository
-            .initialize_scheduler_state(scope, run.run_uid)
-            .await?
-    );
     assert!(matches!(
         repository
             .materialize_ready_page(
@@ -3632,7 +3676,7 @@ async fn run_activation_count_for_generation(
     sqlx::query_scalar(
         "SELECT COUNT(*) FROM moa.execution_dispatch_outbox WHERE run_uid=$1 \
          AND controller_generation=$2 AND dispatch_kind='run_activation' \
-         AND delivery_state <> 'superseded'",
+         AND state <> 'cancelled'",
     )
     .bind(run_uid)
     .bind(i64::try_from(controller_generation).expect("fixture generation fits i64"))
@@ -3662,7 +3706,7 @@ fn run_deadline(
         compensation_attempt_generation: None,
         occurrence_sequence: None,
         due_at,
-        payload: json!({}),
+        payload: json!({"run_uid": run_uid, "deadline_at": due_at}),
     }
 }
 

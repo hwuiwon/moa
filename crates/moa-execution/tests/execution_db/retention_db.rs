@@ -125,7 +125,7 @@ async fn terminal_retention_honors_legal_hold_then_archives_before_bounded_delet
                 predrain.wake_epoch,
             )
             .await?,
-        RunControllerClaimOutcome::Claimed(_)
+        RunControllerClaimOutcome::Claimed(_) | RunControllerClaimOutcome::Resumed(_)
     ));
     assert!(matches!(
         repository
