@@ -1115,12 +1115,28 @@ async fn correctness_outbox_claims_are_disjoint_expiry_recoverable_and_durably_r
     assert_eq!(other_health.claimable_dispatches.observed_count, 0);
     assert!(!other_health.claimable_dispatches.saturated);
 
-    let (owner_a, owner_b) = tokio::join!(
-        repository.claim_due_dispatches(scope, "owner-a", 2, StdDuration::from_secs(30)),
-        repository.claim_due_dispatches(scope, "owner-b", 2, StdDuration::from_secs(30)),
+    let mut head_lock = moa_db::ScopedConn::begin_tenant(&pool, tenant_id).await?;
+    head_lock.assume_app_role().await?;
+    let locked_head = sqlx::query_scalar::<_, Uuid>(
+        "SELECT dispatch_uid FROM moa.execution_dispatch_outbox \
+         WHERE state='pending' AND not_before_at <= now() \
+         ORDER BY not_before_at, created_at, dispatch_uid LIMIT 2 FOR UPDATE",
+    )
+    .fetch_all(head_lock.as_mut())
+    .await?;
+    assert_eq!(locked_head.len(), 2);
+    let owner_b = repository
+        .claim_due_dispatches(scope, "owner-b", 2, StdDuration::from_secs(30))
+        .await?;
+    assert_eq!(
+        owner_b.len(),
+        2,
+        "SKIP LOCKED must continue past the locked head"
     );
-    let owner_a = owner_a?;
-    let owner_b = owner_b?;
+    head_lock.rollback().await?;
+    let owner_a = repository
+        .claim_due_dispatches(scope, "owner-a", 2, StdDuration::from_secs(30))
+        .await?;
     assert_eq!((owner_a.len(), owner_b.len()), (2, 2));
     let a_ids = owner_a
         .iter()

@@ -883,28 +883,21 @@ impl ExecutionRepository {
         let mut conn = scope.begin(&self.pool).await?;
         let rows = sqlx::query(
             r#"
-            WITH head AS (
-                SELECT dispatch_uid
-                FROM (
+            WITH candidate AS (
                     (SELECT dispatch_uid, not_before_at AS claimable_at, created_at
                      FROM moa.execution_dispatch_outbox
                      WHERE state = 'pending' AND not_before_at <= now()
-                     ORDER BY not_before_at, created_at, dispatch_uid
-                     LIMIT $1)
+                     ORDER BY not_before_at, created_at, dispatch_uid)
                     UNION ALL
                     (SELECT dispatch_uid, claim_expires_at AS claimable_at, created_at
                      FROM moa.execution_dispatch_outbox
                      WHERE state = 'dispatching' AND claim_expires_at <= now()
-                     ORDER BY claim_expires_at, created_at, dispatch_uid
-                     LIMIT $1)
-                ) AS candidate
-                ORDER BY claimable_at, created_at, dispatch_uid
-                LIMIT $1
+                     ORDER BY claim_expires_at, created_at, dispatch_uid)
             ),
             claimable AS (
                 SELECT claimed.dispatch_uid
                 FROM moa.execution_dispatch_outbox AS claimed
-                JOIN head ON head.dispatch_uid = claimed.dispatch_uid
+                JOIN candidate ON candidate.dispatch_uid = claimed.dispatch_uid
                 WHERE (
                         claimed.state = 'pending'
                     AND claimed.not_before_at <= now()
@@ -912,6 +905,8 @@ impl ExecutionRepository {
                         claimed.state = 'dispatching'
                     AND claimed.claim_expires_at <= now()
                 )
+                ORDER BY candidate.claimable_at, candidate.created_at, candidate.dispatch_uid
+                LIMIT $1
                 FOR UPDATE OF claimed SKIP LOCKED
             )
             UPDATE moa.execution_dispatch_outbox AS dispatch
