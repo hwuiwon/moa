@@ -10,7 +10,7 @@ use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, PutPayload};
 use reqwest::Method;
 use sha2::{Digest as _, Sha256};
-use testcontainers::core::{IntoContainerPort, Mount};
+use testcontainers::core::IntoContainerPort;
 
 use super::*;
 
@@ -29,7 +29,6 @@ pub struct RustFsFixture {
     access_key: String,
     secret_key: String,
     store: Arc<dyn ObjectStore>,
-    _data_dir: TempDir,
     _container: ContainerAsync<GenericImage>,
 }
 
@@ -46,9 +45,7 @@ impl RustFsFixture {
             &base64::engine::general_purpose::URL_SAFE_NO_PAD,
             secret_bytes,
         );
-        let data_dir = docker_mountable_tempdir("moa-rustfs-data-")?;
-        let (container, host_port) =
-            start_rustfs_container(data_dir.path(), &access_key, &secret_key).await?;
+        let (container, host_port) = start_rustfs_container(&access_key, &secret_key).await?;
         let endpoint = format!("http://127.0.0.1:{host_port}");
         create_bucket_with_retry(&endpoint, &bucket, &access_key, &secret_key).await?;
         let store: Arc<dyn ObjectStore> = Arc::new(
@@ -72,7 +69,6 @@ impl RustFsFixture {
             access_key,
             secret_key,
             store,
-            _data_dir: data_dir,
             _container: container,
         };
         fixture.assert_available().await?;
@@ -237,7 +233,6 @@ impl RustFsFixture {
 }
 
 async fn start_rustfs_container(
-    data_dir: &Path,
     access_key: &str,
     secret_key: &str,
 ) -> Result<(ContainerAsync<GenericImage>, u16)> {
@@ -262,7 +257,6 @@ async fn start_rustfs_container(
             .with_env_var("RUSTFS_REGION", RUSTFS_REGION)
             .with_env_var("RUSTFS_ADDRESS", "0.0.0.0:9000")
             .with_env_var("RUSTFS_CONSOLE_ENABLE", "false")
-            .with_mount(Mount::bind_mount(data_dir.display().to_string(), "/data"))
             .with_cmd(["/data"])
             .with_mapped_port(host_port, RUSTFS_PORT.tcp())
             .start()
@@ -283,8 +277,18 @@ async fn start_rustfs_container(
         {
             Ok(host_port) => return Ok((container, host_port)),
             Err(error) => {
+                let stdout = container
+                    .stdout_to_vec()
+                    .await
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .unwrap_or_else(|log_error| format!("unavailable: {log_error}"));
+                let stderr = container
+                    .stderr_to_vec()
+                    .await
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .unwrap_or_else(|log_error| format!("unavailable: {log_error}"));
                 failures.push(format!(
-                    "attempt {attempt} exposed incomplete ports: {error:#}"
+                    "attempt {attempt} exposed incomplete ports: {error:#}; stdout={stdout:?}; stderr={stderr:?}"
                 ));
                 tracing::warn!(
                     attempt,
@@ -399,20 +403,6 @@ fn hmac_sha256(key: &[u8], bytes: &[u8]) -> Result<Vec<u8>> {
         .map_err(|_| anyhow!("invalid HMAC-SHA256 key"))?;
     mac.update(bytes);
     Ok(mac.finalize().into_bytes().to_vec())
-}
-
-fn docker_mountable_tempdir(prefix: &str) -> Result<TempDir> {
-    let macos_docker_tmp = Path::new("/private/tmp");
-    if macos_docker_tmp.exists() {
-        return tempfile::Builder::new()
-            .prefix(prefix)
-            .tempdir_in(macos_docker_tmp)
-            .context("create Docker-mountable RustFS data directory");
-    }
-    tempfile::Builder::new()
-        .prefix(prefix)
-        .tempdir()
-        .context("create RustFS data directory")
 }
 
 #[cfg(test)]
