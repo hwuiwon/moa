@@ -2555,7 +2555,7 @@ fn trigger_matches_request(record: &ExecutionTriggerRecord, request: &NewExecuti
         && record.compensation_generation == request.compensation_generation
         && record.compensation_attempt_generation == request.compensation_attempt_generation
         && record.occurrence_sequence == request.occurrence_sequence
-        && record.due_at == request.due_at
+        && record.due_at.timestamp_micros() == request.due_at.timestamp_micros()
         && record.payload == request.payload
 }
 

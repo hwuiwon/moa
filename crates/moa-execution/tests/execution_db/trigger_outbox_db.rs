@@ -78,6 +78,50 @@ fn output_node(id: &str) -> ExecutionNode {
 }
 
 #[tokio::test]
+async fn trigger_creation_canonicalizes_submicrosecond_due_time_db() -> TestResult {
+    // Pins: PostgreSQL TIMESTAMPTZ persists microseconds, while Linux clocks can return
+    // nanoseconds. A first trigger insert must compare immutable semantics at the database's
+    // precision instead of rejecting its own round-trip as a conflicting trigger UID.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let repository = ExecutionRepository::new(test_db.store().pool().clone());
+    let execution_config = execution_capacity_config();
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let run = create_run(
+        &repository,
+        scope,
+        new_run(
+            tenant_id,
+            None,
+            "trigger-submicrosecond-due-time",
+            ExecutionRunStatus::Queued,
+            budget_without_deadline(10),
+        ),
+    )
+    .await?;
+    let persisted_due_at = pg_deadline(Duration::minutes(5));
+    let requested_due_at = persisted_due_at + Duration::nanoseconds(321);
+
+    let write = repository
+        .create_trigger(
+            scope,
+            &execution_config,
+            run_deadline(
+                Uuid::now_v7(),
+                tenant_id,
+                run.run_uid,
+                run.controller_generation,
+                requested_due_at,
+            ),
+        )
+        .await?;
+
+    assert_eq!(write.trigger.due_at, persisted_due_at);
+    assert_eq!(write.dispatch.not_before_at, persisted_due_at);
+    Ok(())
+}
+
+#[tokio::test]
 async fn task_start_uses_post_lock_progress_time_db() -> TestResult {
     // Pins: a task-start transaction whose PostgreSQL NOW() predates a contended run lock still
     // advances both task and run progress monotonically after the lock owner commits newer times.
