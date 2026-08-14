@@ -400,7 +400,7 @@ async fn cancelling_task_without_owned_compute_gets_exact_absence_receipt_db() {
         task_id,
         logical_generation: 1,
         attempt_generation: 1,
-        verified_at: Utc::now(),
+        verified_at: pg_now(),
     };
     let receipt = repository
         .record_absent_task_execution_hand_release_receipt(intent)
@@ -464,7 +464,7 @@ async fn cancelling_task_without_owned_compute_gets_exact_absence_receipt_db() {
                 task_id: live_task_id,
                 logical_generation: 1,
                 attempt_generation: 1,
-                verified_at: Utc::now(),
+                verified_at: pg_now(),
             })
             .await
             .is_err(),
@@ -562,8 +562,8 @@ async fn checkpointed_task_destroy_records_exact_release_receipt_db() {
             task_id,
             logical_generation: 1,
             attempt_generation: 1,
-            deadline_at: Utc::now() + ChronoDuration::minutes(5),
-            recovery_claim_expires_at: Utc::now() + ChronoDuration::minutes(5),
+            deadline_at: pg_now() + ChronoDuration::minutes(5),
+            recovery_claim_expires_at: pg_now() + ChronoDuration::minutes(5),
             workspace: &active,
             lease: &active_lease,
         })
@@ -597,7 +597,7 @@ async fn checkpointed_task_destroy_records_exact_release_receipt_db() {
     }
     let operation_id = WorkspaceOperationId::new();
     let checkpoint_id = WorkspaceCheckpointId(operation_id.0);
-    let now = Utc::now();
+    let now = pg_now();
     operations
         .persist_intent(&WorkspaceOperationIntent {
             operation_id,
@@ -692,7 +692,7 @@ async fn checkpointed_task_destroy_records_exact_release_receipt_db() {
         checkpoint_manifest_digest: Some(publication.manifest_digest.clone()),
         checkpoint_logical_bytes: Some(0),
         requested_at,
-        released_at: Utc::now(),
+        released_at: pg_now(),
     };
     let finalized = workspaces
         .record_task_execution_hand_release_receipt(&receipt, claim_token, Some(contact_id))
@@ -733,7 +733,7 @@ async fn contact_scoped_compensation_without_compute_gets_exact_release_receipt_
     let hand_scope = format!("execution_compensation:{run_id}:{compensation_id}");
     let repository = PostgresWorkspaceRepository::new(pool.clone());
     let receipt_id = uuid::Uuid::now_v7();
-    let deadline_at = Utc::now() + ChronoDuration::minutes(1);
+    let deadline_at = pg_now() + ChronoDuration::minutes(1);
     let (persisted_receipt_id, claim_token, requested_at) = repository
         .begin_compensation_execution_hand_release(CompensationHandReleaseIntent {
             receipt_id,
@@ -772,7 +772,7 @@ async fn contact_scoped_compensation_without_compute_gets_exact_release_receipt_
         checkpoint_manifest_digest: None,
         checkpoint_logical_bytes: None,
         requested_at,
-        released_at: Utc::now(),
+        released_at: pg_now(),
     };
     let finalized = repository
         .record_compensation_execution_hand_release_receipt(
@@ -846,7 +846,7 @@ async fn compensation_release_recovers_persisted_destroyed_identity_after_deadli
         .expect("seeded compensation lease exists");
     let repository = PostgresWorkspaceRepository::new(pool.clone());
     let receipt_id = uuid::Uuid::now_v7();
-    let deadline_at = Utc::now() + ChronoDuration::minutes(1);
+    let deadline_at = pg_now() + ChronoDuration::minutes(1);
     repository
         .begin_compensation_execution_hand_release(CompensationHandReleaseIntent {
             receipt_id,
@@ -894,7 +894,7 @@ async fn compensation_release_recovers_persisted_destroyed_identity_after_deadli
             compensation_id,
             logical_generation: 1,
             attempt_generation: 1,
-            recovery_claim_expires_at: Utc::now() + ChronoDuration::minutes(5),
+            recovery_claim_expires_at: pg_now() + ChronoDuration::minutes(5),
         })
         .await
         .expect("renew storage-only recovery claim")
@@ -950,7 +950,7 @@ async fn compensation_release_recovers_persisted_destroyed_identity_after_deadli
         checkpoint_manifest_digest: None,
         checkpoint_logical_bytes: None,
         requested_at: claim.requested_at,
-        released_at: Utc::now(),
+        released_at: pg_now(),
     };
     assert!(
         repository
@@ -1124,7 +1124,7 @@ async fn workspace_writer_and_reconciliation_callbacks_are_generation_fenced_db(
             .expect("stale transition is a fenced miss")
     );
 
-    let now = Utc::now();
+    let now = pg_now();
     let operation_id = WorkspaceOperationId::new();
     operations
         .persist_intent(&WorkspaceOperationIntent {
@@ -1245,7 +1245,7 @@ async fn create_operation_replay_never_resends_and_reconciliation_settles_lifecy
         .expect("create workspace metadata and lifetime capacity");
     let operations = PostgresWorkspaceOperationRepository::new(pool.clone());
     let operation_id = WorkspaceOperationId::new();
-    let now = Utc::now();
+    let now = pg_now();
     let intent = WorkspaceOperationIntent {
         operation_id,
         tenant_id,
