@@ -3025,7 +3025,7 @@ async fn retry_settlement_preserves_cancelling_until_ready_transition_db() -> Te
     else {
         panic!("retry fixture must start its admitted attempt");
     };
-    let settled_at = Utc::now();
+    let settled_at = pg_deadline(Duration::zero());
     let TaskAttemptReleaseClaimOutcome::Applied(releasing) = repository
         .begin_task_attempt_release(fence, started.task.generation, "watchdog", settled_at)
         .await?
