@@ -95,7 +95,8 @@ async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db
     // typed terminal failure, releases reservations, wakes finalization, and
     // remains idempotent without weakening the generation fence.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
-    let repository = ExecutionRepository::new(test_db.store().pool().clone());
+    let pool = test_db.store().pool().clone();
+    let repository = ExecutionRepository::new(pool.clone());
     let tenant_id = TenantId::new();
     let scope = ExecutionScope::Tenant { tenant_id };
 
@@ -116,9 +117,7 @@ async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db
             &format!("elapsed-{kind}"),
             ExecutionRunStatus::Queued,
             ExecutionBudgetLimit {
-                deadline_at: Some(
-                    moa_test_support::fixtures::pg_now() + Duration::milliseconds(150),
-                ),
+                deadline_at: Some(pg_deadline(Duration::hours(1))),
                 ..budget(2)
             },
         );
@@ -133,7 +132,11 @@ async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db
                 .await?,
             TaskOutcomeWrite::Applied { .. }
         ));
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        sqlx::query("UPDATE moa.execution_run SET budget_deadline_at=$2 WHERE run_uid=$1")
+            .bind(run.run_uid)
+            .bind(pg_deadline(Duration::seconds(-1)))
+            .execute(&pool)
+            .await?;
         let before_terminal = repository
             .load_run(scope, run.run_uid)
             .await?
