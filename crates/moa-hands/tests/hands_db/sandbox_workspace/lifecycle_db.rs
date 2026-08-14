@@ -44,6 +44,7 @@ use moa_hands::core::{
         repository::PostgresWorkspaceRepository,
     },
 };
+use moa_test_support::fixtures::pg_now;
 use sqlx::postgres::PgPoolOptions;
 
 use super::{database_url, seed_session};
@@ -1441,7 +1442,7 @@ async fn checkpoint_metadata_is_created_before_bytes_and_remains_immutable_db() 
         );
     }
 
-    let now = Utc::now();
+    let now = pg_now();
     let operation_id = WorkspaceOperationId::new();
     operations
         .persist_intent(&WorkspaceOperationIntent {
