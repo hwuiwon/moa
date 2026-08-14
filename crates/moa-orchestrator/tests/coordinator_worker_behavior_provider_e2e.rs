@@ -2455,39 +2455,47 @@ async fn recovery_matrix_blocked_llm_invocation(
     let key_filter = workflow_key
         .map(|key| format!(" AND target_service_key = '{key}'"))
         .unwrap_or_default();
-    let parents = recovery_matrix_restate_rows(
-        fixture,
-        format!(
-            "SELECT id FROM sys_invocation WHERE target_service_name = '{workflow_service}'\
-             {key_filter}"
-        ),
-    )
-    .await?;
-    ensure!(
-        !parents.is_empty(),
-        "expected a {workflow_service} invocation, got {parents:?}"
-    );
-    for parent in &parents {
-        let parent_id = parent
-            .get("id")
-            .and_then(Value::as_str)
-            .context("workflow introspection row omitted id")?;
-        let children = recovery_matrix_restate_rows(
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let parents = recovery_matrix_restate_rows(
             fixture,
             format!(
-                "SELECT id, status FROM sys_invocation WHERE invoked_by_id = '{parent_id}' \
-                 AND target_service_name = 'LLMGateway' AND status != 'completed' ORDER BY id"
+                "SELECT id FROM sys_invocation WHERE target_service_name = '{workflow_service}'\
+                 {key_filter}"
             ),
         )
         .await?;
-        for child in &children {
-            let Some(invoked_id) = child.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            return Ok((parent_id.to_string(), invoked_id.to_string()));
+        let mut observed = Vec::new();
+        for parent in &parents {
+            let parent_id = parent
+                .get("id")
+                .and_then(Value::as_str)
+                .context("workflow introspection row omitted id")?;
+            let children = recovery_matrix_restate_rows(
+                fixture,
+                format!(
+                    "SELECT id, status FROM sys_invocation WHERE invoked_by_id = '{parent_id}' \
+                     AND target_service_name = 'LLMGateway' ORDER BY id"
+                ),
+            )
+            .await?;
+            for child in &children {
+                if child.get("status").and_then(Value::as_str) == Some("completed") {
+                    continue;
+                }
+                let Some(invoked_id) = child.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                return Ok((parent_id.to_string(), invoked_id.to_string()));
+            }
+            observed.push(json!({ "parent_id": parent_id, "children": children }));
         }
+        ensure!(
+            Instant::now() < deadline,
+            "{workflow_service} has no incomplete LLMGateway child: {observed:?}"
+        );
+        sleep(Duration::from_millis(25)).await;
     }
-    bail!("{workflow_service} has no incomplete LLMGateway child: {parents:?}")
 }
 
 async fn recovery_matrix_execution_task_attempt_key(
