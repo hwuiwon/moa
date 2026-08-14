@@ -739,10 +739,14 @@ async fn install_shared_extensions(conn: &mut PgConnection) -> Result<()> {
 }
 
 async fn install_shared_extensions_locked(conn: &mut PgConnection) -> Result<()> {
-    raw_sql("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
+    raw_sql("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;")
         .execute(&mut *conn)
         .await
         .context("install pgcrypto extension")?;
+    raw_sql("ALTER EXTENSION pgcrypto SET SCHEMA public;")
+        .execute(&mut *conn)
+        .await
+        .context("pin pgcrypto extension to public schema")?;
     ensure_shared_database_roles(conn).await
 }
 

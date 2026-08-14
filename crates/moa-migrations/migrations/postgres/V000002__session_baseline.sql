@@ -1570,7 +1570,7 @@ GROUP BY e.tenant_id, e.task_fingerprint, a.subject_type, a.subject_id;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_strategy_success_rates_unique
     ON task_strategy_success_rates(tenant_id, task_fingerprint, subject_type, subject_id);
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 
 CREATE TABLE IF NOT EXISTS moa.artifact (
     artifact_uid UUID PRIMARY KEY,

@@ -194,6 +194,89 @@ async fn migration_protocol_pristine_apply_is_exact_and_idempotent_db() {
 
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn schema_fragment_bootstrap_rehomes_pgcrypto_before_central_migration_db() {
+    // Pins: a schema-scoped bootstrap cannot strand the database-global pgcrypto
+    // extension outside `public` and make the later central migration lose digest().
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect extension-location maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create extension-location throwaway database");
+    let target_url = with_database(&admin_url, &db_name);
+
+    let outcome = async {
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        target
+            .execute(
+                "CREATE SCHEMA misplaced_extension; \
+                 CREATE EXTENSION pgcrypto WITH SCHEMA misplaced_extension;",
+            )
+            .await?;
+        target.close().await;
+
+        let schema_name = format!("fragment_{}", uuid::Uuid::new_v4().simple());
+        let search_path = format!("\"{schema_name}\", public");
+        let fragment_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(move |conn, _meta| {
+                let search_path = search_path.clone();
+                Box::pin(async move {
+                    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
+                        .bind(search_path)
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&target_url)
+            .await?;
+        moa_migrations::run_ocsf_schema(&fragment_pool, &schema_name).await?;
+        let extension_schema: String = sqlx::query_scalar(
+            "SELECT namespace.nspname::TEXT \
+             FROM pg_catalog.pg_extension AS extension \
+             JOIN pg_catalog.pg_namespace AS namespace \
+               ON namespace.oid = extension.extnamespace \
+             WHERE extension.extname = 'pgcrypto'",
+        )
+        .fetch_one(&fragment_pool)
+        .await?;
+        fragment_pool.close().await;
+
+        let (_, second) = clean_apply_then_reapply(&target_url).await?;
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        let digest_len: i32 =
+            sqlx::query_scalar("SELECT octet_length(public.digest('migration-smoke', 'sha256'))")
+                .fetch_one(&target)
+                .await?;
+        target.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((extension_schema, second, digest_len))
+    }
+    .await;
+
+    drop_database_with_zero_connections(&admin, &db_name).await;
+    admin.close().await;
+
+    let (extension_schema, second, digest_len) =
+        outcome.expect("schema bootstrap and central migration should compose");
+    assert_eq!(extension_schema, "public");
+    assert!(second.is_empty(), "central migration replay was not empty");
+    assert_eq!(digest_len, 32);
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
 async fn baseline_generated_identifiers_are_by_default_identity_db() {
     // Pins: the two baseline-generated identifiers use modern BY DEFAULT
     // identity columns, accept explicit import values, and still generate values
