@@ -290,6 +290,15 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
+      # Keep the feature-qualified fixture build outside nextest's per-test
+      # timeout. The recovery test snapshots this exact executable before its
+      # repeated crash/restart barriers.
+      - name: Build sandbox recovery fixture orchestrator
+        run: |
+          cargo build -p moa-orchestrator --bin moa-orchestrator-bin --locked \
+            --features provider-overrides,integration,execution-planning-failpoints,sandbox-workspace-failpoints
+          echo "MOA_ORCHESTRATOR_BIN=${GITHUB_WORKSPACE}/target/debug/moa-orchestrator-bin" >> "$GITHUB_ENV"
+
       # This lane is hermetic and unbilled. The test owns disposable Postgres,
       # Restate, OpenFGA, Valkey, and RustFS containers and hard-restarts only
       # its orchestrator child at each feature-gated workspace barrier.

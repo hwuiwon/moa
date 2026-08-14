@@ -40,6 +40,15 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 
+      # Recovery fixtures restart one feature-qualified orchestrator executable
+      # many times. Build it outside the per-test timeout and pass the exact
+      # path to the fixture instead of triggering a cold nested Cargo build.
+      - name: Build recovery fixture orchestrator
+        run: |
+          cargo build -p moa-orchestrator --bin moa-orchestrator-bin --locked \
+            --features provider-overrides,integration,execution-planning-failpoints,sandbox-workspace-failpoints
+          echo "MOA_ORCHESTRATOR_BIN=${GITHUB_WORKSPACE}/target/debug/moa-orchestrator-bin" >> "$GITHUB_ENV"
+
       # Every case owns its Postgres, Restate, OpenFGA, and Valkey containers.
       # Keep external-service settings out of the process so a developer or
       # runner environment cannot silently turn this into an ambient-stack test.

@@ -37,8 +37,11 @@ inherits = "default"
 test-threads = 8
 # moa-session keeps its physical-database clone and schema-binding checks inline
 # in the library. Select only those DB tests; all other moa-session lib tests
-# remain outside this lane.
+# remain outside this lane. `hands_db` owns the canonical shared database and
+# runs only after CI applies direct-repository migrations, so it is excluded
+# from this pre-migration, clone-isolated profile.
 default-filter = '''
+(
 binary(/_db$/)
   | (
       package(moa-session)
@@ -47,6 +50,8 @@ binary(/_db$/)
     )
   | (package(moa-eval) & kind(lib) & test(/::tests::.*_db(?:_|$)/))
   | (package(moa-orchestrator) & kind(lib) & test(/::tests::.*_db(?:_|$)/))
+)
+  - binary(/^hands_db$/)
 '''
 
 [profile.db-memory]
