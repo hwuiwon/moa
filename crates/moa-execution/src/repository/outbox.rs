@@ -1931,7 +1931,7 @@ fn dispatch_matches_request(
         && record.attempt_generation == request.attempt_generation
         && record.compensation_generation == request.compensation_generation
         && record.compensation_attempt_generation == request.compensation_attempt_generation
-        && record.not_before_at == request.not_before_at
+        && record.not_before_at.timestamp_micros() == request.not_before_at.timestamp_micros()
         && record.payload == request.payload
 }
 

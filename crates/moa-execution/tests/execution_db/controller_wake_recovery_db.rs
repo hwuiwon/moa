@@ -175,6 +175,70 @@ async fn concurrent_controller_wake_claims_admit_exactly_one_activation_db() -> 
 }
 
 #[tokio::test]
+async fn controller_continuation_canonicalizes_submicrosecond_dispatch_time_db() -> TestResult {
+    // Pins: PostgreSQL TIMESTAMPTZ persists microseconds, while Linux clocks can return
+    // nanoseconds. A first continuation insert must compare immutable dispatch semantics at the
+    // database's precision instead of rejecting its own round-trip as a conflicting dispatch UID.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let repository = ExecutionRepository::new(test_db.store().pool().clone());
+    let config = ExecutionConfig::default();
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let run = queued_run(
+        &repository,
+        scope,
+        tenant_id,
+        "controller-submicrosecond-continuation",
+    )
+    .await?;
+    let RunControllerClaimOutcome::Claimed(claimed) = repository
+        .claim_controller_wake(
+            scope,
+            run.run_uid,
+            run.controller_generation,
+            run.wake_epoch,
+        )
+        .await?
+    else {
+        panic!("the admitted queued wake must be claimable");
+    };
+    let persisted_not_before_at = pg_deadline(Duration::seconds(1));
+    let requested_not_before_at = persisted_not_before_at + Duration::nanoseconds(321);
+
+    let outcome = repository
+        .complete_controller_wake(
+            scope,
+            &config,
+            claimed.run_uid,
+            RunControllerCompletionRequest {
+                controller_generation: claimed.controller_generation,
+                wake_epoch: claimed.wake_epoch,
+                checkpoint: ExecutionRunActivationCheckpoint {
+                    status: ExecutionRunStatus::Running,
+                    activation_state: ExecutionActivationState::Queued,
+                    next_wake_at: claimed.next_wake_at,
+                    waiting_since: None,
+                    ready_task_count: claimed.ready_task_count,
+                    active_task_count: claimed.active_task_count,
+                },
+                continuation_payload: Some(json!({"reason": "submicrosecond_round_trip"})),
+                continuation_not_before_at: requested_not_before_at,
+            },
+        )
+        .await?;
+
+    let RunControllerCompletionOutcome::Applied {
+        continuation: Some(continuation),
+        ..
+    } = outcome
+    else {
+        panic!("the controller continuation must commit, got {outcome:?}");
+    };
+    assert_eq!(continuation.not_before_at, persisted_not_before_at);
+    Ok(())
+}
+
+#[tokio::test]
 async fn claim_controller_wake_refuses_an_unqueued_activation_state_db() -> TestResult {
     // Pins: the claim predicate requires an actually queued activation. A pending wake epoch on a
     // run whose activation state says no activation is queued is inconsistent durable state, and
